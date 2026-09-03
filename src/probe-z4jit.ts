@@ -95,7 +95,6 @@ const Account = z.object({
 });
 const Accounts = z.array(Account);
 
-const accountParser = compileFn(Account) as (i: unknown) => unknown;      // 官方 parser（stock 语义，无条件重建）
 const accountValidator = compileFn(Account, { assertOnly: true }) as any;  // 官方 validator（纯校验）
 const accountsParser = compileFn(Accounts) as (i: unknown) => unknown;
 

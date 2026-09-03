@@ -12,7 +12,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const input = { a: "abc", b: "u@e.com", c: "x" };
   const out = C.parse(input);
   console.log("── 基础 object ──");
-  console.log("  骨架源码:\n" + C.code!.split("\n").map((l) => "    " + l).join("\n"));
+  console.log(`  骨架源码:\n${C.code!.split("\n").map((l) => `    ${l}`).join("\n")}`);
   console.log("  干净输入 out === input:", out === input, "（期望 true）");
   assert.equal(out, input);
 

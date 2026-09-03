@@ -82,7 +82,9 @@ test("plain objects: key set, values, prototype, symbol keys, __proto__ key", ()
 test("arrays: elements, length, holes vs undefined", () => {
   same([1, 2], [1, 2], true);
   same([1, 2], [1, 2, 3], false);
+  // biome-ignore lint/suspicious/noSparseArray: holes vs undefined is what this case checks
   same([1, , 3], [1, undefined, 3], false);
+  // biome-ignore lint/suspicious/noSparseArray: holes vs undefined is what this case checks
   same([1, , 3], [1, , 3], true);
   same([1, 2], { 0: 1, 1: 2, length: 2 }, false);
 });

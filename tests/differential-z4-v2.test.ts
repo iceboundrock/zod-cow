@@ -230,14 +230,14 @@ function bWrap(rng: RNG, inner: Built): Built {
   if (which === 6) {
     // Task 6：async transform（string → string，与 sync transform 同构）
     return {
-      schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? v + "!" : v)),
+      schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? `${v}!` : v)),
       desc: `${inner.desc}.transform(async +!)`,
       gen: inner.gen,
     };
   }
   // transform：string → string（纯字符串变换，差分可对齐）
   return {
-    schema: inner.schema.transform((v: any) => (typeof v === "string" ? v + "!" : v)),
+    schema: inner.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
     desc: `${inner.desc}.transform(+!)`,
     gen: inner.gen,
   };
@@ -261,7 +261,7 @@ function bObject(rng: RNG, depth: number): Built {
     schema = z.looseObject(shape);
     modeDesc = ".passthrough()";
   }
-  const desc = `object({${fields.map((f) => f.key + ": " + f.built.desc).join(", ")}})${modeDesc}`;
+  const desc = `object({${fields.map((f) => `${f.key}: ${f.built.desc}`).join(", ")}})${modeDesc}`;
   let extraSeq = 0;
   return {
     schema,
@@ -381,26 +381,6 @@ function bSet(rng: RNG, depth: number): Built {
   };
 }
 
-function bUnion(rng: RNG, depth: number): Built {
-  const n = 2 + rng.int(2);
-  const branches: Built[] = [];
-  const kinds: string[] = [];
-  const used = new Set<string>();
-  while (branches.length < n) {
-    const b = bLeaf(rng);
-    const tag = b.desc.split(/[.(]/)[0]!;
-    if (used.has(tag)) continue;
-    used.add(tag);
-    branches.push(b);
-    kinds.push(b.desc);
-  }
-  return {
-    schema: z.union(branches.map((b) => b.schema) as [z.ZodType, z.ZodType, ...z.ZodType[]]),
-    desc: `union(${kinds.join(", ")})`,
-    gen: (r) => r.pick(branches).gen(r),
-  };
-}
-
 function bTuple(rng: RNG, depth: number): Built {
   const nFixed = 2 + rng.int(2); // 2–3 必填槽
   const items: Built[] = [];
@@ -511,7 +491,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       console.log("desc:", built.desc);
       console.log("input:", repr(input));
       console.log("stock:", compiled.stock, "async:", compiled.async);
-      console.log("cow code:\n" + (compiled.code ?? "(stock)").split("\n").map((l) => "  " + l).join("\n"));
+      console.log(`cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => `  ${l}`).join("\n")}`);
     }
 
     const snapshot = structuredClone(input);
@@ -557,7 +537,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         `SUCCESS MISMATCH stock=${stock!.success} ours=${ours!.success}\n      ${caseId}` +
           (ours!.success
             ? `\n      stock issues: ${JSON.stringify((stock!.error as any)?.issues?.slice(0, 3))}`
-            : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => "        " + l).join("\n")}`),
+            : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => `        ${l}`).join("\n")}`),
       );
       continue;
     }
@@ -566,7 +546,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       bothOk++;
       if (!assertDeepEqual(ours!.data, stock!.data)) {
         failures.push(
-          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => "        " + l).join("\n")}`,
+          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => `        ${l}`).join("\n")}`,
         );
         continue;
       }
@@ -601,7 +581,7 @@ console.log(`  成功一致: ${bothOk}   失败一致: ${bothFail}   顶层引�
 console.log(`  stock 降级（compileV2 放弃编译）: ${stockDowngraded} 次`);
 if (failures.length > 0) {
   console.log(`\n✗ ${failures.length} 个差异（前 10 个）:`);
-  for (const f of failures.slice(0, 10)) console.log("\n" + f);
+  for (const f of failures.slice(0, 10)) console.log(`\n${f}`);
   process.exit(1);
 } else {
   console.log("  全部与 stock zod4 一致 ✓");

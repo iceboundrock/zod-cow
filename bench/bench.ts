@@ -116,7 +116,7 @@ interface Sample {
   retainedDelta: number; // gc 后增量 ≈ 驻留
 }
 
-function measure(label: string, fn: () => unknown): Sample[] {
+function measure(_label: string, fn: () => unknown): Sample[] {
   const samples: Sample[] = [];
   for (let p = -1; p < PASSES; p++) {
     gc();
@@ -201,7 +201,7 @@ try {
   const s1Ark = measure("arktype（参照线，不拷贝）", () => At(data));
   report("arktype（参照线，不拷贝）", s1Ark);
   console.log(`  → zc vs arktype: ${(median(s1Cow) / median(s1Ark)).toFixed(2)}x（按中位）`);
-} catch (e) {
+} catch {
   console.log("  arktype 未安装，跳过参照线");
 }
 

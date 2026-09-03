@@ -342,7 +342,6 @@ test("union: 首个成功分支胜出；全败 → invalid_union", () => {
 });
 
 test("lazy: 递归树（自引用 schema）", () => {
-  type Tree = { v: number; children?: Tree[] };
   const Tree: any = z.object({
     v: z.number(),
     children: z.lazy(() => Tree.array()).optional(),

@@ -212,7 +212,7 @@ function bWrap(rng: RNG, inner: Built): Built {
   }
   // transform：string → string（纯字符串变换，差分可对齐）
   return {
-    schema: inner.schema.transform((v: any) => (typeof v === "string" ? v + "!" : v)),
+    schema: inner.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
     desc: `${inner.desc}.transform(+!)`,
     gen: inner.gen,
   };
@@ -236,7 +236,7 @@ function bObject(rng: RNG, depth: number): Built {
     schema = z.looseObject(shape);
     modeDesc = ".passthrough()";
   }
-  const desc = `object({${fields.map((f) => f.key + ": " + f.built.desc).join(", ")}})${modeDesc}`;
+  const desc = `object({${fields.map((f) => `${f.key}: ${f.built.desc}`).join(", ")}})${modeDesc}`;
   let extraSeq = 0;
   return {
     schema,
@@ -300,7 +300,7 @@ function bRecord(rng: RNG, depth: number): Built {
   };
 }
 
-function bUnion(rng: RNG, depth: number): Built {
+function bUnion(rng: RNG, _depth: number): Built {
   const n = 2 + rng.int(2);
   const branches: Built[] = [];
   const kinds: string[] = [];
@@ -358,7 +358,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
     total++;
 
-    let compiled;
+    let compiled: ReturnType<typeof compile>;
     try {
       compiled = compile(built.schema);
     } catch (e) {

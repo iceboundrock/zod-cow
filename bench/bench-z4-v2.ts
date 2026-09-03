@@ -331,7 +331,7 @@ console.log(`\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleStri
     rows[i] = {
       id: i,
       point: [i % 360, i % 180],
-      label: i % 2 === 0 ? ["L" + (i % 97), "T" + (i % 31)] : ["L" + (i % 97)],
+      label: i % 2 === 0 ? [`L${i % 97}`, `T${i % 31}`] : [`L${i % 97}`],
     };
   }
   const Rows = z.array(Row);

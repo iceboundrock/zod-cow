@@ -10,8 +10,8 @@
  *                    “输出与输入共享”这一事实写进类型系统
  *   .safeParse(data) 不抛错误的版本
  */
-import { z } from "zod";
-import { FAILED, Issue, ZcError } from "./internal.js";
+import type { z } from "zod";
+import { FAILED, type Issue, ZcError } from "./internal.js";
 import { go, isStaticPure } from "./compile.js";
 
 export type { Issue, PathSegment, Ctx, Validator } from "./internal.js";

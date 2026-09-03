@@ -19,10 +19,9 @@
  *   9. .int() = number_format "safeint"（isInteger + 2^53 范围）。
  */
 import {
-  Ctx,
+  type Ctx,
   FAILED,
-  PathSegment,
-  Validator,
+  type Validator,
   ZcNotSupportedError,
   parsedType,
   pushInvalidType,
@@ -34,7 +33,7 @@ import {
 
 const getDef = (s: any): any => s?._zod?.def ?? s?.def;
 
-const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+const hasOwn = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
 /** check 条目归一化：实例（c._zod.def）或裸 def 直接返回 */
 const checkDef = (c: any): any => c?._zod?.def ?? c;
@@ -48,10 +47,6 @@ function defChecks(def: any): any[] {
   const arr: any[] = def.checks ? [...def.checks] : [];
   if (def.check) arr.push(def);
   return arr;
-}
-
-function invalidTypeMsg(expected: string, data: unknown): string {
-  return `Invalid input: expected ${expected}, received ${parsedType(data)}`;
 }
 
 /* ────────────────────────── 通用 check 通道 ────────────────────────── */
@@ -826,13 +821,23 @@ function makeMap(def: any): Validator {
     const c = checkDef(chk);
     if (c.check === "min_size" || c.check === "min_length") {
       const n = c.size ?? c.minimum;
-      return (v: Map<any, any>, ctx: Ctx) =>
-        v.size < n ? (pushIssue(ctx, "too_small", `Too small: expected map to have >=${n} entries`, { minimum: n, origin: "map", inclusive: true }), FAILED) : v;
+      return (v: Map<any, any>, ctx: Ctx) => {
+        if (v.size < n) {
+          pushIssue(ctx, "too_small", `Too small: expected map to have >=${n} entries`, { minimum: n, origin: "map", inclusive: true });
+          return FAILED;
+        }
+        return v;
+        };
     }
     if (c.check === "max_size" || c.check === "max_length") {
       const n = c.size ?? c.maximum;
-      return (v: Map<any, any>, ctx: Ctx) =>
-        v.size > n ? (pushIssue(ctx, "too_big", `Too big: expected map to have <=${n} entries`, { maximum: n, origin: "map", inclusive: true }), FAILED) : v;
+      return (v: Map<any, any>, ctx: Ctx) => {
+        if (v.size > n) {
+          pushIssue(ctx, "too_big", `Too big: expected map to have <=${n} entries`, { maximum: n, origin: "map", inclusive: true });
+          return FAILED;
+        }
+        return v;
+        };
     }
     return genericCheck(chk);
   });
@@ -876,18 +881,33 @@ function makeSet(def: any): Validator {
     const c = checkDef(chk);
     if (c.check === "min_size" || c.check === "min_length") {
       const n = c.size ?? c.minimum;
-      return (v: Set<any>, ctx: Ctx) =>
-        v.size < n ? (pushIssue(ctx, "too_small", `Too small: expected set to have >=${n} entries`, { minimum: n, origin: "set", inclusive: true }), FAILED) : v;
+      return (v: Set<any>, ctx: Ctx) => {
+        if (v.size < n) {
+          pushIssue(ctx, "too_small", `Too small: expected set to have >=${n} entries`, { minimum: n, origin: "set", inclusive: true });
+          return FAILED;
+        }
+        return v;
+        };
     }
     if (c.check === "max_size" || c.check === "max_length") {
       const n = c.size ?? c.maximum;
-      return (v: Set<any>, ctx: Ctx) =>
-        v.size > n ? (pushIssue(ctx, "too_big", `Too big: expected set to have <=${n} entries`, { maximum: n, origin: "set", inclusive: true }), FAILED) : v;
+      return (v: Set<any>, ctx: Ctx) => {
+        if (v.size > n) {
+          pushIssue(ctx, "too_big", `Too big: expected set to have <=${n} entries`, { maximum: n, origin: "set", inclusive: true });
+          return FAILED;
+        }
+        return v;
+        };
     }
     if (c.check === "size_equals" || c.check === "length_equals") {
       const n = c.size ?? c.length;
-      return (v: Set<any>, ctx: Ctx) =>
-        v.size !== n ? (pushIssue(ctx, v.size < n ? "too_small" : "too_big", `Invalid input: expected set to have exactly ${n} entries`, { minimum: n, maximum: n, origin: "set", inclusive: true }), FAILED) : v;
+      return (v: Set<any>, ctx: Ctx) => {
+        if (v.size !== n) {
+          pushIssue(ctx, v.size < n ? "too_small" : "too_big", `Invalid input: expected set to have exactly ${n} entries`, { minimum: n, maximum: n, origin: "set", inclusive: true });
+          return FAILED;
+        }
+        return v;
+        };
     }
     return genericCheck(chk);
   });

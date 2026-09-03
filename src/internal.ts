@@ -127,7 +127,7 @@ export function safeSet(obj: Record<string, unknown>, key: string, value: unknow
 /** 零分配检测对象自身是否含有 shape 之外的键（供 strip/strict 使用） */
 export function findExtraKey(data: object, keySet: Set<string>): string | null {
   for (const k in data) {
-    if (Object.prototype.hasOwnProperty.call(data, k) && !keySet.has(k)) return k;
+    if (Object.hasOwn(data, k) && !keySet.has(k)) return k;
   }
   return null;
 }
@@ -135,7 +135,7 @@ export function findExtraKey(data: object, keySet: Set<string>): string | null {
 export function allExtraKeys(data: object, keySet: Set<string>): string[] {
   const out: string[] = [];
   for (const k in data) {
-    if (Object.prototype.hasOwnProperty.call(data, k) && !keySet.has(k)) out.push(k);
+    if (Object.hasOwn(data, k) && !keySet.has(k)) out.push(k);
   }
   return out;
 }

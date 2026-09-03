@@ -56,6 +56,7 @@ function computeProbe(): ProbeResult {
   const version = (() => {
     try {
       // zod 未导出 version，从其 package.json 读
+      // biome-ignore lint/security/noGlobalEval: probe script; borrows CJS require from an ESM entry to read zod/package.json
       const req = eval("require") as NodeRequire;
       return req("zod/package.json").version as string;
     } catch {

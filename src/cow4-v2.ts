@@ -167,6 +167,7 @@ function requiresPresence(schema: Node): boolean {
 
 // 官方 mayOutputUndefined：输出组装时该键是否可能产出 undefined
 // （决定拷贝分支对 absent/present-undefined 键的写入规则）
+// biome-ignore lint/correctness/noUnusedVariables: reference copy of zod's predicate, kept for version anchoring (see AGENTS.md)
 function mayOutputUndefined(schema: Node): boolean {
   const def = schema._zod.def;
   switch (def.type) {
@@ -400,16 +401,6 @@ function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
     for (const s of Object.getOwnPropertySymbols(def.shape)) kids.push(def.shape[s]);
   }
   return kids.some((k) => subtreeHasAsync(k, seen));
-}
-
-/** 官方 assertOnly 产物（仅校验，返回 true/INVALID）；失败 → null（async 由调用方处理） */
-function officialValidatorFn(schema: Node): Fn | null {
-  try {
-    return compileFn(schema, { assertOnly: true }) as Fn;
-  } catch (e) {
-    if (e instanceof ZodCompileAsyncError) throw e; // 调用方（emitNode/officialFn）转 async 岛
-    return null;
-  }
 }
 
 /**

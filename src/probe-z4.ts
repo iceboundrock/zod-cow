@@ -110,7 +110,7 @@ dump("refine", z.string().refine((v: string) => v.length > 2), "ab");
 dump("map", z.map(z.string(), z.number()), "x");
 dump("set", z.set(z.string()), "x");
 if (typeof (z as any).readonly === "function") dump("readonly", (z.object({ a: z.string() }) as any).readonly(), {});
-if (typeof (z as any).custom === "function") dump("custom", (z as any).custom((v: unknown) => true), 1);
+if (typeof (z as any).custom === "function") dump("custom", (z as any).custom(() => true), 1);
 {
   const so: any = z.strictObject({ a: z.string() });
   const lo: any = z.looseObject({ a: z.string() });
@@ -163,13 +163,13 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
   let keys: string[] = [];
   const r = z.string().transform((v: string, p: any) => {
     keys = Object.keys(p ?? {});
-    return v + "!";
+    return `${v}!`;
   }).safeParse("x");
   console.log("P10 transform payload keys:", keys.join(","), "| result:", r.success ? (r as any).data : "fail");
 }
 {
   let arg2: any = null;
-  z.string().refine(((v: unknown, p: any) => {
+  z.string().refine(((_v: unknown, p: any) => {
     arg2 = { keys: Object.keys(p ?? {}), hasIssues: Array.isArray(p?.issues), addIssue: typeof p?.addIssue === "function" };
     return true;
   }) as any).safeParse("x");

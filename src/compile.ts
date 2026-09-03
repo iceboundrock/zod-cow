@@ -13,11 +13,11 @@
  */
 import { z } from "zod";
 import {
-  Ctx,
+  type Ctx,
   FAILED,
-  Issue,
-  PathSegment,
-  Validator,
+  type Issue,
+  type PathSegment,
+  type Validator,
   ZcNotSupportedError,
   parsedType,
   pushInvalidType,
@@ -111,7 +111,7 @@ function formatStringStep(c: any): StringStep {
     }
     case "emoji": {
       // zod 惰性构建：^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$（u flag）
-      const emojiRe = new RegExp("^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$", "u");
+      const emojiRe = /^(\p{Extended_Pictographic}|\p{Emoji_Component})+$/u;
       return (v, ctx) => {
         if (!emojiRe.test(v)) {
           pushIssue(ctx, "invalid_string", message(), { validation: "emoji" });
@@ -446,7 +446,7 @@ function makeNativeEnum(def: any): Validator {
   const set = new Set<unknown>();
   // 与 stock 一致：跳过数字枚举的反向映射（键为数字字符串）
   for (const k in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, k) && Number.isNaN(Number(k))) {
+    if (Object.hasOwn(obj, k) && Number.isNaN(Number(k))) {
       set.add(obj[k]);
     }
   }
@@ -522,9 +522,14 @@ function makeObject(def: any): Validator {
       const inVal = data[k];
 
       if (inVal === undefined && undefStable[i]) {
-        const present = Object.prototype.hasOwnProperty.call(data, k);
-        if (!present && matAbsent) (absentUndef ??= []).push(i);
-        else if (present && !keepPresentUndef) (presentDrop ??= []).push(i);
+        const present = Object.hasOwn(data, k);
+        if (!present && matAbsent) {
+          absentUndef ??= [];
+          absentUndef.push(i);
+        } else if (present && !keepPresentUndef) {
+          presentDrop ??= [];
+          presentDrop.push(i);
+        }
         continue; // 透传即可覆盖的行为：什么都不做（零开销）
       }
 
@@ -553,10 +558,11 @@ function makeObject(def: any): Validator {
       // strict：收集全部多余键用于报错
       let extras: string[] | null = null;
       for (const k in data) {
-        if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+        if (!Object.hasOwn(data, k)) continue;
         if (!keySet.has(k)) {
           if (mode === "strict") {
-            (extras ??= []).push(k);
+            extras ??= [];
+            extras.push(k);
           } else {
             extras = [k];
             break;
@@ -580,7 +586,7 @@ function makeObject(def: any): Validator {
           for (let i = 0; i < keys.length; i++) {
             const k = keys[i]!;
             // alwaysSet 语义对齐：stock 只保留“非 undefined 或输入中存在”的键
-            if (data[k] !== undefined || Object.prototype.hasOwnProperty.call(data, k)) {
+            if (data[k] !== undefined || Object.hasOwn(data, k)) {
               out[k] = data[k];
             }
           }
@@ -735,7 +741,7 @@ function makeRecord(def: any): Validator {
     let dirty = false;
     let anyFailed = false;
     for (const k in data) {
-      if (!Object.prototype.hasOwnProperty.call(data, k)) continue;
+      if (!Object.hasOwn(data, k)) continue;
       const inVal = data[k];
       ctx.path.push(k);
       const outKey = keyV(k, ctx);

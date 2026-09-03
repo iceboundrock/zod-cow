@@ -411,7 +411,7 @@ compileV2(schema)
   ├─ compileCowFn（整树骨架编译）
   │     ├─ emitBoxedContainer ── cowSafeContainerForChild（剥壳 + checks 安全）
   │     │     ├─ object/array/tuple/record/map/set 骨架
-  │     │     │     ├─ 纯净叶子 → officialValidatorFn（assertOnly 产物）
+  │     │     │     ├─ 纯净叶子 → officialFn（assertOnly 产物）
   │     │     │     │     └─ 生成失败 → officialFn(parser) → island
   │     │     │     ├─ 非纯子树 → officialFn(parser 产物)
   │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError）

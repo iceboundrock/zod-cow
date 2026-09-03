@@ -13,7 +13,7 @@
  *     .async            true = 骨架含 async 子树 → sync API 抛 $ZodAsyncError（官方同款语义）
  */
 import type { z } from "zod4";
-import { INVALID, compileCowFn, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";
+import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";
 import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod4/v4/core";
 
 export interface CompiledV2<T extends z.ZodType> {

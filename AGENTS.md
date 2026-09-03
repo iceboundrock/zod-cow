@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README (Chinese) is the authoritative narrative; `docs/ARCHITECTURE-v2.md` is the deep dive on the current engine.
 
-Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on Node 22). No linter configured. Docs and code comments are written in Chinese; keep that convention when editing existing files.
+Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix). No linter configured. Docs and code comments are written in Chinese; keep that convention when editing existing files.
 
 ## Commands
 

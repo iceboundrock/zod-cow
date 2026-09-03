@@ -6,7 +6,7 @@
  * 附加统计：顶层引用共享率（CoW 命中率）。
  * 生成器确定性：失败打印 seed/case/desc/input，可直接复现。
  */
-import assert from "node:assert/strict";
+import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod4";
 import { compile, ZcNotSupportedError } from "../src/index-z4.js";
 
@@ -443,14 +443,6 @@ for (let seed = 1; seed <= SEEDS; seed++) {
   }
 }
 
-function assertDeepEqual(a: unknown, b: unknown): boolean {
-  try {
-    assert.deepStrictEqual(a, b);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** 失败诊断用：def 树轻量转储（截断） */
 function defRepr(schema: any, depth = 0): string {

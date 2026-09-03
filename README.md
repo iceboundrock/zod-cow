@@ -1,5 +1,7 @@
 # cow-zod-prototype
 
+[![CI](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml)
+
 Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) 思路的延伸。
 
 > **v0.2：已适配 zod 4**。双前端共享同一 CoW 核心（`internal.ts`）：
@@ -15,12 +17,14 @@ Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numer
 
 ## 快速开始
 
+Requires Node.js >= 22.13.0 and pnpm 11.24.0.
+
 ```bash
-npm install
-npm run probe       # 实测 stock zod 边界语义（探针驱动版本兼容）
-npm test            # 27 个单元测试 + 20000 case 差分模糊测试（对比 stock zod）
-npm run bench       # 50 万账户基准（需 node --expose-gc，脚本已配置）
-npx tsx examples/demo.ts   # 60 秒上手 demo
+pnpm install
+pnpm run probe       # 实测 stock zod 边界语义（探针驱动版本兼容）
+pnpm test            # 27 个单元测试 + 20000 case 差分模糊测试（对比 stock zod）
+pnpm run bench       # 50 万账户基准（需 node --expose-gc，脚本已配置）
+pnpm exec tsx examples/demo.ts   # 60 秒上手 demo
 ```
 
 ## 使用
@@ -150,9 +154,9 @@ fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
 
 ### zod4 验证
 
-- `npm run test:z4`：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
-- `npm run bench:z4`：本基准
-- `npm run probe:z4`：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
+- `pnpm run test:z4`：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
+- `pnpm run bench:z4`：本基准
+- `pnpm run probe:z4`：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
 
 ## 已知限制（原型范围）
 

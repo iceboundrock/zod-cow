@@ -7,7 +7,7 @@
  *
  * 生成器是确定性的：失败时打印 seed/case/desc/input，可直接复现。
  */
-import assert from "node:assert/strict";
+import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
 import { compile, ZcNotSupportedError } from "../src/index.js";
 
@@ -424,15 +424,6 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     } else {
       bothFail++;
     }
-  }
-}
-
-function assertDeepEqual(a: unknown, b: unknown): boolean {
-  try {
-    assert.deepStrictEqual(a, b);
-    return true;
-  } catch {
-    return false;
   }
 }
 

@@ -1,10 +1,10 @@
 /**
- * 60 秒上手 demo —— 运行：npx tsx examples/demo.ts
+ * 60-second demo. Run: pnpm exec tsx examples/demo.ts
  *
- * 演示 CoW 编译层的三个核心承诺：
- *   1. 纯校验零拷贝（返回输入原引用）
- *   2. “被迫修改”时只拷贝脏路径（copy-on-write / path-copying）
- *   3. 输入永不失真（对比 Numeric fork 的原地 strip 删除）
+ * Shows the three core promises of the CoW compilation layer:
+ *   1. Pure validation is zero-copy (returns the input reference itself)
+ *   2. A forced change copies only the dirty path (copy-on-write / path copying)
+ *   3. The input is never mutated (contrast: the Numeric fork strips keys in place)
  */
 import { z } from "zod";
 import { compile } from "../src/index.js";

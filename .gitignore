@@ -2,3 +2,4 @@ node_modules/
 *.log
 TODO.md
 .DS_Store
+docs/superpowers/

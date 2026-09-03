@@ -64,24 +64,27 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
+          # Render one bench capture as a section: heading + fenced text block,
+          # or a placeholder when the file is missing or empty.
+          section() {
+            local title="$1" file="$2"
+            echo "### ${title}"
+            echo
+            if [ -s "${file}" ]; then
+              echo '```text'
+              cat "${file}"
+              echo '```'
+            else
+              echo "_No output captured (step did not run or failed before printing)._"
+            fi
+            echo
+          }
           {
             echo "## Benchmark smoke run"
             echo
             echo "> Smoke results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
             echo "> Runner noise makes these numbers non-comparable across runs; reference numbers live in the README and come from local runs."
             echo
-            for pair in "zod 4 v2 (bench:v2)|bench-v2.txt" "zod 3 (bench)|bench-z3.txt"; do
-              title="${pair%%|*}"
-              file="${pair#*|}"
-              echo "### ${title}"
-              echo
-              if [ -s "${file}" ]; then
-                echo '```text'
-                cat "${file}"
-                echo '```'
-              else
-                echo "_No output captured (step did not run or failed before printing)._"
-              fi
-              echo
-            done
+            section "zod 4 v2 (bench:v2)" bench-v2.txt
+            section "zod 3 (bench)" bench-z3.txt
           } >> "$GITHUB_STEP_SUMMARY"

@@ -6,7 +6,6 @@
  *   官方 compileFn parser          官方 JIT 产物、stock 语义（无条件新容器）——「只复用不修饰」对照
  *   官方 compileFn validator       官方 assertOnly 纯校验下限（validate 语义参照）
  *   zc-v2 CoW parse                本次主角：官方 codegen + CoW 容器修饰
- *   zc-v1 CoW parse（Task3 自研）   纵向对比：手写语义 codegen + 解释循环
  *   arktype                        参照线
  *
  *   S1（主赛道）: 纯校验 schema（干净输入 → CoW 应零拷贝原引用返回）
@@ -20,14 +19,13 @@ import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
 
 const { z } = await import("zod4");
-const { compile: compileV1 } = await import("../src/index-z4.js");
 const { compileV2 } = await import("../src/index-z4-v2.js");
 const { compileFn } = await import("zod4/v4/core");
 
 const N = Number(process.env.BENCH_N ?? 500_000);
 const PASSES = 3;
 
-/* ─────────────────────────── 数据生成（与 bench-z4 完全一致） ─────────────────────────── */
+/* ─────────────────────────── 数据生成 ─────────────────────────── */
 
 const first = ["Ana", "Bob", "Cid", "Dee", "Eve", "Fay", "Gus", "Hal"];
 const cities = ["NYC", "SFO", "SEA", "ATX", "CHI"];
@@ -122,8 +120,6 @@ const officialValidator = compileFn(AccountStock, { assertOnly: true }) as (i: u
 
 const V2Stock = compileV2(AccountsStock);
 const V2Cow = compileV2(AccountsCow);
-const V1Stock = compileV1(AccountsStock);
-const V1Cow = compileV1(AccountsCow);
 
 /* ─────────────────────────── 测量工具 ─────────────────────────── */
 
@@ -203,7 +199,7 @@ const medianOf = (samples: Sample[]): number =>
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
 console.log(`\n═══ S1 纯校验 · ${N.toLocaleString()} 账户 · 每变体 ${PASSES} 轮取中位 ═══`);
-console.log(`  zc-v2 stock 降级: ${V2Stock.stock ? "是（异常！）" : "否"}   v1 编译: 正常`);
+console.log(`  zc-v2 stock 降级: ${V2Stock.stock ? "是（异常！）" : "否"}`);
 const data = makeAccounts();
 
 {
@@ -223,8 +219,6 @@ const s1Official = measure(() => officialParser(data));
 report("官方 compileFn parser（JIT·stock 语义）", s1Official);
 const s1V2 = measure(() => V2Stock.safeParse(data));
 report("zc-v2 CoW parse（官方 codegen+修饰）", s1V2);
-const s1V1 = measure(() => V1Stock.safeParse(data));
-report("zc-v1 CoW parse（Task3 自研 codegen）", s1V1);
 
 console.log(`\n  比值（中位）:`);
 console.log(
@@ -235,9 +229,6 @@ console.log(
 );
 console.log(
   `    官方parser / zc-v2 = ${(medianOf(s1Official) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰在 JIT 之上的净收益`,
-);
-console.log(
-  `    zc-v1 / zc-v2      = ${(medianOf(s1V1) / medianOf(s1V2)).toFixed(2)}x   ← 复用官方 codegen vs 自研`,
 );
 
 /* ─────────────────────────── S2: CoW 脏负载 ─────────────────────────── */
@@ -261,30 +252,27 @@ const s2Official = measure(() => officialParserCow(dataCow));
 report("官方 compileFn parser（JIT·default）", s2Official);
 const s2V2 = measure(() => V2Cow.safeParse(dataCow));
 report("zc-v2 CoW parse（90% 零拷贝）", s2V2);
-const s2V1 = measure(() => V1Cow.safeParse(dataCow));
-report("zc-v1 CoW parse（Task3）", s2V1);
 console.log(
-  `\n  比值（中位）: stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   官方parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x   stock/v1 = ${(medianOf(s2Stock) / medianOf(s2V1)).toFixed(2)}x`,
+  `\n  比值（中位）: stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   官方parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x`,
 );
 
 /* ─────────────────────────── S3: 脏比例扫描 ─────────────────────────── */
 
 console.log(`\n═══ S3 脏比例扫描 · role 缺失比例 → default 注入 ═══`);
 console.log(
-  `  ${"缺失比例".padEnd(8)} ${"stock".padStart(8)} ${"官方JIT".padStart(8)} ${"zc-v2".padStart(8)} ${"zc-v1".padStart(8)} ${"stock/v2".padStart(8)}   ${"v2驻留".padStart(8)} ${"stock驻留".padStart(9)}`,
+  `  ${"缺失比例".padEnd(8)} ${"stock".padStart(8)} ${"官方JIT".padStart(8)} ${"zc-v2".padStart(8)} ${"stock/v2".padStart(8)}   ${"v2驻留".padStart(8)} ${"stock驻留".padStart(9)}`,
 );
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const mStock = medianOf(measure(() => stockCowParser(ds)));
   const mOfficial = medianOf(measure(() => officialParserCow(ds)));
   const mV2 = medianOf(measure(() => V2Cow.safeParse(ds)));
-  const mV1 = medianOf(measure(() => V1Cow.safeParse(ds)));
   const rs =
     measure(() => stockCowParser(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   const rv =
     measure(() => V2Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   console.log(
-    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${mV1.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(7)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
+    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(7)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
   );
 }
 

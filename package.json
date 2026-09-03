@@ -12,14 +12,12 @@
     "probe": "tsx src/probe.ts",
     "probe:z4": "tsx src/probe-z4.ts",
     "test": "tsx tests/harness.test.ts && tsx tests/unit.test.ts && tsx tests/differential.test.ts",
-    "test:z4": "tsx tests/unit-z4.test.ts && tsx tests/differential-z4.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "bench": "node --expose-gc --import tsx bench/bench.ts",
-    "bench:z4": "node --expose-gc --import tsx bench/bench-z4.ts",
-    "test:v2": "tsx tests/smoke-v2.ts && tsx tests/smoke-v2-containers.test.ts && tsx tests/smoke-v2-tuple-async.test.ts && tsx tests/differential-z4-v2.test.ts",
+    "test:v2": "tsx tests/canary-z4.test.ts && tsx tests/smoke-v2.ts && tsx tests/smoke-v2-containers.test.ts && tsx tests/smoke-v2-tuple-async.test.ts && tsx tests/differential-z4-v2.test.ts",
     "bench:v2": "node --expose-gc --import tsx bench/bench-z4-v2.ts"
   },
   "dependencies": {

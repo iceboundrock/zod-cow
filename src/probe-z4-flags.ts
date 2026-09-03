@@ -1,8 +1,8 @@
 /**
  * zod4 行为探针 flag — 编译器硬编码语义的“版本金丝”。
  *
- * compile-z4.ts 假设了以下 stock 行为（全部在 zod 4.5.4 上经 probe-z4.ts 实测）。
- * unit-z4 测试会断言这些 flag 与编译器假设一致：zod 版本升级改变隐式契约时，
+ * cow4-v2.ts 假设了以下 stock 行为（全部在 zod 4.5.4 上经 probe-z4.ts 实测）。
+ * canary-z4 测试会断言这些 flag 与编译器假设一致：zod 版本升级改变隐式契约时，
  * 测试先红，提醒重新锚定语义，而不是静默分歧。
  */
 import { z } from "zod4";

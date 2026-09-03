@@ -1,0 +1,35 @@
+/**
+ * zod version canary — the stock zod4 behaviors the CoW layer is built on.
+ *
+ * `src/probe-z4-flags.ts` measures these behaviors against the installed zod4
+ * at import time; this suite asserts that every one of them still holds. A zod
+ * upgrade that changes one of these implicit contracts turns this test red
+ * instead of silently drifting the compiled semantics away from stock.
+ *
+ * Anchored to zod 4.5.4. After bumping zod: run `pnpm run probe:z4`, re-read
+ * the assumptions, then run the differential suite.
+ *
+ * These assertions previously lived in `tests/unit-z4.test.ts`, which was
+ * removed together with the zod4 v1 compiler line.
+ */
+import assert from "node:assert/strict";
+import { test, summary } from "./harness.js";
+import { PROBE4 } from "../src/probe-z4-flags.js";
+
+test(`PROBE4: stock zod4 semantics match the compiler's assumptions (zod ${PROBE4.zodVersion})`, () => {
+  assert.equal(
+    PROBE4.absentOptionalNotMaterialized,
+    true,
+    "an absent optional key must not be materialized",
+  );
+  assert.equal(PROBE4.presentUndefKept, true, "a present-undefined key must be kept");
+  assert.equal(PROBE4.outputFollowsShapeOrder, true, "output key order must follow the shape");
+  assert.equal(PROBE4.strictViaCatchallNever, true, "strict must be modelled as catchall never");
+  assert.equal(PROBE4.looseViaCatchallUnknown, true, "loose must be modelled as catchall unknown");
+  assert.equal(PROBE4.recordRebuilds, true, "stock record must rebuild its output");
+  assert.equal(PROBE4.defaultShortCircuits, true, "z4 default must short-circuit (no inner check)");
+  assert.equal(PROBE4.catchThrowsPropagate, true, "z4 catch must not swallow thrown errors");
+  assert.equal(PROBE4.cleanParseClones, true, "a clean stock parse must produce a new object");
+});
+
+summary("canary-z4");

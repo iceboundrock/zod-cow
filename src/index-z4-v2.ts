@@ -1,6 +1,6 @@
 /**
- * zc-v2 公开 API —— 与 zc-z4（index-z4.ts）同构，但引擎换成
- * 「zod4 官方 codegen + CoW 容器修饰」（Task 6 起支持 tuple 骨架 + async schema）。
+ * zc-v2 公开 API —— 引擎为「zod4 官方 codegen + CoW 容器修饰」
+ * （Task 6 起支持 tuple 骨架 + async schema）。
  *
  *   compile(schema) 返回：
  *     .parse(data)      CoW 语义：成功返回输出（干净输入 === 输入原引用）

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-v2.md` is the deep dive on the current engine.
 
-Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:v2` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with a reduced `BENCH_N` and writes the output to the job summary; treat those as smoke results, not reference numbers. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
+Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + both test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:v2` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with a reduced `BENCH_N` and writes the output to the job summary; treat those as smoke results, not reference numbers. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
 
 **Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Much of the existing code and documentation is still in Chinese; that migration is tracked in #6 (code comments and test/bench output) and #7 (README, architecture doc, CHANGELOG). When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change. Purely mechanical edits inside an existing Chinese line (swapping a command or identifier, fixing a path) do not by themselves require translating that line.
 
@@ -23,10 +23,9 @@ Use Node.js >= 22.13.0 with pnpm 11.24.0.
 | Apply safe lint fixes and formatting | `pnpm run lint:fix` |
 | Format only | `pnpm run format` |
 | Tests, zod3 line (v1), plus the `tests/harness.ts` self-test | `pnpm test` |
-| Tests, zod4 line (v1) | `pnpm run test:z4` |
 | Tests, zod4 **v2 line (current work)** | `pnpm run test:v2` |
 | Run one test file | `pnpm exec tsx tests/<file>.ts` (e.g. `pnpm exec tsx tests/smoke-v2.ts`) |
-| Benchmarks | `pnpm run bench` / `pnpm run bench:z4` / `pnpm run bench:v2` (need `--expose-gc`, already in scripts) |
+| Benchmarks | `pnpm run bench` / `pnpm run bench:v2` (need `--expose-gc`, already in scripts) |
 | Probe stock zod behavior | `pnpm run probe` / `pnpm run probe:z4` |
 | 60-second demo | `pnpm exec tsx examples/demo.ts` |
 
@@ -40,12 +39,11 @@ Environment knobs:
 
 ## Architecture
 
-Three parallel compiler front-ends live in `src/`; they do **not** share code beyond `internal.ts`. Know which line you are editing:
+Two compiler front-ends live in `src/`; they share no code (`internal.ts` is the zod3 line's protocol module — the v2 engine never imported it). Know which line you are editing:
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
 | zod3 v1 | `src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
-| zod4 v1 | `src/index-z4.ts` → `src/compile-z4.ts` | Same closure-tree approach re-targeted at zod4's flat `def.checks` | Frozen; used as a benchmark baseline |
 | zod4 **v2** | `src/index-z4-v2.ts` → `src/cow4-v2.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line** — new work goes here |
 
 zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1, `import { z } from "zod4"` is the npm alias for zod@4.5.4.
@@ -68,11 +66,11 @@ Every compiled node is `(input) => output | FAILED-sentinel`. Dirtiness needs no
 
 ### Version anchoring
 
-The v2 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEFAULTED_CHECKS`, `getTupleOptStart`, `mayOutputUndefined`, `acceptsAbsence`). Anchored to **zod 4.5.4**. `src/probe-z4-flags.ts` encodes the stock behaviors the compilers assume (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, etc.), and `tests/unit-z4.test.ts` asserts them so an upgrade turns tests red instead of drifting silently. After bumping zod: rerun probes, then the full differential suites.
+The v2 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEFAULTED_CHECKS`, `getTupleOptStart`, `mayOutputUndefined`, `acceptsAbsence`). Anchored to **zod 4.5.4**. `src/probe-z4-flags.ts` encodes the stock behaviors the compilers assume (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, etc.), and `tests/canary-z4.test.ts` (first step of `test:v2`) asserts them so an upgrade turns tests red instead of drifting silently. After bumping zod: rerun probes, then the full differential suites.
 
 ### Known unsupported (throws at compile time or degrades to stock)
 
-`intersection`; zod3 `catchall`/tuple rest/`ZodPromise`; zod4 `file`/`templateLiteral`/`promise`, `string_format` without a `pattern` (e.g. `url`), recursive top-level and schema-level `catchall` in v2. Do not silently widen support: either add a differential-verified path, or keep the explicit failure (v1 lines throw `ZcNotSupportedError` at compile time; v2 lets the official `ZodCompileUnsupportedError` degrade the tree to stock).
+`intersection`; zod3 `catchall`/tuple rest/`ZodPromise`; zod4 `file`/`templateLiteral`/`promise`, `string_format` without a `pattern` (e.g. `url`), recursive top-level and schema-level `catchall` in v2. Do not silently widen support: either add a differential-verified path, or keep the explicit failure (the zod3 v1 line throws `ZcNotSupportedError` at compile time; v2 lets the official `ZodCompileUnsupportedError` degrade the tree to stock).
 
 ## Working conventions
 

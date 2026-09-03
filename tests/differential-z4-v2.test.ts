@@ -1,6 +1,6 @@
 /**
  * 差分模糊测试（zc-v2：官方 codegen + CoW 修饰 vs stock zod4）。
- * 生成器框架与 differential-z4.test.ts 相同；对比项：
+ * Compares against stock zod4 on:
  *   1. 成败奇偶  2. 输出 deepStrictEqual  3. 输入零失真
  * 附加：顶层引用共享率（CoW 命中率）、stock 降级率统计。
  * 失败打印 seed/case 可复现（REPRO=seed:case）。

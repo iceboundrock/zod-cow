@@ -10,25 +10,27 @@ Not a git repository. No linter configured. Docs and code comments are written i
 
 ## Commands
 
-`npm install` first (tsx/tsc are local devDependencies; nothing works without it).
+Use Node.js >= 22.13.0 with pnpm 11.24.0.
+
+`pnpm install` first (tsx/tsc are local devDependencies; nothing works without it).
 
 | Task | Command |
 |---|---|
-| Typecheck (only static check available) | `npm run typecheck` |
-| Tests, zod3 line (v1) | `npm test` |
-| Tests, zod4 line (v1) | `npm run test:z4` |
-| Tests, zod4 **v2 line (current work)** | `npm run test:v2` |
-| Run one test file | `npx tsx tests/<file>.ts` (e.g. `npx tsx tests/smoke-v2.ts`) |
-| Benchmarks | `npm run bench` / `bench:z4` / `bench:v2` (need `--expose-gc`, already in scripts) |
-| Probe stock zod behavior | `npm run probe` / `npm run probe:z4` |
-| 60-second demo | `npx tsx examples/demo.ts` |
+| Typecheck (only static check available) | `pnpm run typecheck` |
+| Tests, zod3 line (v1) | `pnpm test` |
+| Tests, zod4 line (v1) | `pnpm run test:z4` |
+| Tests, zod4 **v2 line (current work)** | `pnpm run test:v2` |
+| Run one test file | `pnpm exec tsx tests/<file>.ts` (e.g. `pnpm exec tsx tests/smoke-v2.ts`) |
+| Benchmarks | `pnpm run bench` / `pnpm run bench:z4` / `pnpm run bench:v2` (need `--expose-gc`, already in scripts) |
+| Probe stock zod behavior | `pnpm run probe` / `pnpm run probe:z4` |
+| 60-second demo | `pnpm exec tsx examples/demo.ts` |
 
 There is no test runner. Test files are plain `tsx` scripts: unit/smoke tests use `tests/harness.ts` (`test()` + `summary()`, sets `process.exitCode = 1` on failure); differential tests are self-contained fuzzers that compare against stock zod.
 
 Environment knobs:
 
-- `SEEDS` / `CASES` — differential fuzz size; code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 npx tsx tests/differential-z4-v2.test.ts` for a quick pass.
-- `REPRO=seed:case` — re-run exactly one failing differential case and dump the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 npx tsx tests/differential-z4-v2.test.ts`).
+- `SEEDS` / `CASES` — differential fuzz size; code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 pnpm exec tsx tests/differential-z4-v2.test.ts` for a quick pass.
+- `REPRO=seed:case` — re-run exactly one failing differential case and dump the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 pnpm exec tsx tests/differential-z4-v2.test.ts`).
 - `BENCH_N` — benchmark record count (default 500 000).
 
 ## Architecture

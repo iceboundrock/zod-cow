@@ -1,5 +1,5 @@
 /**
- * 60 秒上手 demo —— 运行：npx tsx examples/demo.ts
+ * 60 秒上手 demo —— 运行：pnpm exec tsx examples/demo.ts
  *
  * 演示 CoW 编译层的三个核心承诺：
  *   1. 纯校验零拷贝（返回输入原引用）

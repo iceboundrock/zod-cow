@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README (Chinese) is the authoritative narrative; `docs/ARCHITECTURE-v2.md` is the deep dive on the current engine.
+A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-v2.md` is the deep dive on the current engine.
 
-Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix). No linter configured. Docs and code comments are written in Chinese; keep that convention when editing existing files.
+Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix). No linter configured.
+
+**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Much of the existing code and documentation is still in Chinese; that migration is tracked in #6 (code comments and test/bench output) and #7 (README, architecture doc, CHANGELOG). When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change.
 
 ## Commands
 
@@ -25,7 +27,7 @@ Use Node.js >= 22.13.0 with pnpm 11.24.0.
 | Probe stock zod behavior | `pnpm run probe` / `pnpm run probe:z4` |
 | 60-second demo | `pnpm exec tsx examples/demo.ts` |
 
-There is no test runner. Test files are plain `tsx` scripts: unit/smoke tests use `tests/harness.ts` (`test()` + `summary()`, sets `process.exitCode = 1` on failure); differential tests are self-contained fuzzers that compare against stock zod.
+There is no test runner. Test files are plain `tsx` scripts: unit/smoke tests use `tests/harness.ts` (`test()` + `summary()`, sets `process.exitCode = 1` on failure); differential tests are standalone fuzzers that compare against stock zod and share only the `deepEqual` comparator from `tests/harness.ts`.
 
 Environment knobs:
 
@@ -79,7 +81,7 @@ The v2 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEFAU
 
 Anything a task produces that is not code (design docs, specs, plans, research notes, assessments) must end up on GitHub, not just on disk.
 
-- Write non-code artifacts in English by default.
+- Write non-code artifacts in English (see the Language rule above).
 - Post the artifact as a comment on the relevant issue. If the work has no issue yet, create one first; if the artifact is about changes already under review, post it to the PR instead.
 - Post the full content, not a summary or a file path. Several child repos keep planning notes in gitignored local directories (for example `__ref__/plan/` in `ltbase.api`, see #497); a local working copy is fine, but it is invisible to everyone else and does not survive the branch.
 - Do not force-add gitignored planning files to make them shareable. The issue comment is the sharing mechanism.

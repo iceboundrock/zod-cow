@@ -1,5 +1,7 @@
 # cow-zod-prototype
 
+[![CI](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml)
+
 Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) 思路的延伸。
 
 > **v0.2：已适配 zod 4**。双前端共享同一 CoW 核心（`internal.ts`）：

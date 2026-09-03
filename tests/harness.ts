@@ -1,5 +1,5 @@
 /**
- * 极简单元测试框架（零依赖，确定性输出）
+ * Minimal unit-test framework (zero dependencies, deterministic output).
  */
 import { isDeepStrictEqual } from "node:util";
 
@@ -30,33 +30,48 @@ export function summary(suite: string): void {
 }
 
 /**
- * 深度严格相等（布尔版），语义等同 assert.deepStrictEqual，唯一差别：
- * 两个 Invalid Date（getTime() 为 NaN）视为相等。
+ * Boolean deep-strict equality with the semantics of `assert.deepStrictEqual`,
+ * with exactly one deviation: two invalid Dates (`getTime()` is NaN) are equal.
  *
- * 背景：Node 22 的 deepStrictEqual 用 `!==` 比较 Date.getTime()，NaN !== NaN，
- * 于是 `new Date(NaN)` 与它的 structuredClone 被判为不等（Node 24+ 已修复）。
- * 差分模糊测试的输入池含 `new Date(NaN)`，在 Node 22 上会被误报为 INPUT MUTATED。
- * 这里不重写比较器，只把 Invalid Date 归一化为同一个哨兵对象，其余仍交给 Node 判断。
+ * Why: Node 22's deepStrictEqual compares Dates with `getTime() !== getTime()`,
+ * and `NaN !== NaN`, so `new Date(NaN)` never equals its own structuredClone
+ * (fixed in Node 24+). The differential fuzzers put `new Date(NaN)` in the
+ * input pool, so on Node 22 every such case was falsely reported as
+ * INPUT MUTATED. Instead of rewriting the comparator, both sides are
+ * normalized and then handed to `util.isDeepStrictEqual`, which stays the
+ * source of truth for prototypes, key sets, NaN, Map/Set membership, etc.
+ *
+ * Normalization scope (deliberately narrow):
+ *   - invalid Date            -> a fresh InvalidDateMarker instance
+ *   - Array / Map / Set       -> rebuilt from elements / entries only; custom
+ *                                enumerable properties set on the collection
+ *                                instance itself are NOT carried over
+ *   - plain object (Object.prototype or null prototype)
+ *                             -> own enumerable keys (string + symbol) copied
+ *   - anything else (class instances, boxed primitives, RegExp, ...)
+ *                             -> returned as-is
+ * Markers are created per occurrence so a Map or Set holding several invalid
+ * Dates keeps its size; distinct instances still compare deepStrictEqual
+ * because they share a prototype and have no own properties. The marker's
+ * prototype is not Object.prototype, so no plain-object input can forge it.
  */
-// 私有 class 实例作哨兵：原型不是 Object.prototype，普通输入无法伪造出与之 deepStrictEqual 的值
 class InvalidDateMarker {}
-const INVALID_DATE = Object.freeze(new InvalidDateMarker());
 
 function normalizeForCompare(v: unknown): unknown {
   if (typeof v !== "object" || v === null) return v;
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? INVALID_DATE : v;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? new InvalidDateMarker() : v;
   if (Array.isArray(v)) return v.map(normalizeForCompare);
   if (v instanceof Map) {
     return new Map([...v].map(([k, x]) => [normalizeForCompare(k), normalizeForCompare(x)]));
   }
   if (v instanceof Set) return new Set([...v].map(normalizeForCompare));
   const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return v; // 非普通对象：原样交给 deepStrictEqual
+  if (proto !== Object.prototype && proto !== null) return v; // not a plain object: leave to deepStrictEqual
   const out = Object.create(proto);
   for (const k of Reflect.ownKeys(v)) {
     const d = Object.getOwnPropertyDescriptor(v, k)!;
     if (!d.enumerable) continue;
-    // defineProperty 而非赋值：避免 "__proto__" 键触发原型写入
+    // defineProperty rather than assignment: a "__proto__" key must not set the prototype
     Object.defineProperty(out, k, {
       value: normalizeForCompare((v as Record<PropertyKey, unknown>)[k]),
       enumerable: true,

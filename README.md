@@ -27,6 +27,14 @@ pnpm run bench       # 50 万账户基准（需 node --expose-gc，脚本已配�
 pnpm exec tsx examples/demo.ts   # 60 秒上手 demo
 ```
 
+> **CI benchmark runs are smoke results, not reference numbers.** The
+> [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
+> runs `bench:v2` and `bench` manually (or weekly) with a reduced `BENCH_N`
+> (default 50 000) and prints the tables in the job summary. It exists to catch
+> broken bench scripts and to show a rough shape without cloning; GitHub-hosted
+> runners are too noisy for the numbers to be compared across runs. All numbers
+> in this README and in `docs/` come from local runs (node v24, 500 000 records).
+
 ## 使用
 
 ```ts

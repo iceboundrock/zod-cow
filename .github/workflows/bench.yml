@@ -1,0 +1,90 @@
+name: Benchmarks
+
+# Manual and weekly only. GitHub-hosted runners are too noisy for the numbers
+# to be comparable across runs; this workflow exists to (a) prove the bench
+# scripts still run after refactors and (b) show a rough result in the job
+# summary without cloning the repo. Reference numbers in README/docs come
+# from local runs.
+on:
+  workflow_dispatch:
+    inputs:
+      bench_n:
+        description: "Record count passed to the bench scripts as BENCH_N"
+        required: false
+        default: "50000"
+        type: string
+  schedule:
+    # Mondays 03:17 UTC (off the hour to avoid the top-of-hour rush).
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  # Reduced record count so a smoke run stays fast (the scripts default to 500 000).
+  BENCH_N: ${{ inputs.bench_n || '50000' }}
+
+jobs:
+  bench:
+    name: bench (node 24, BENCH_N=${{ inputs.bench_n || '50000' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          # 24 = README benchmark environment
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Each bench step tees its output into a file so the summary step below
+      # can render it even when a later step fails. `shell: bash` enables
+      # pipefail, so a failing bench still fails the step through `tee`.
+      # The package.json scripts already pass --expose-gc; BENCH_N comes from
+      # the job env.
+      - name: Bench zod 4 v2
+        shell: bash
+        run: pnpm run bench:v2 2>&1 | tee bench-v2.txt
+
+      - name: Bench zod 3
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: pnpm run bench 2>&1 | tee bench-z3.txt
+
+      - name: Write job summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          # Render one bench capture as a section: heading + fenced text block,
+          # or a placeholder when the file is missing or empty.
+          section() {
+            local title="$1" file="$2"
+            echo "### ${title}"
+            echo
+            if [ -s "${file}" ]; then
+              echo '```text'
+              cat "${file}"
+              echo '```'
+            else
+              echo "_No output captured (step did not run or failed before printing)._"
+            fi
+            echo
+          }
+          {
+            echo "## Benchmark smoke run"
+            echo
+            echo "> Smoke results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
+            echo "> Runner noise makes these numbers non-comparable across runs; reference numbers live in the README and come from local runs."
+            echo
+            section "zod 4 v2 (bench:v2)" bench-v2.txt
+            section "zod 3 (bench)" bench-z3.txt
+          } >> "$GITHUB_STEP_SUMMARY"

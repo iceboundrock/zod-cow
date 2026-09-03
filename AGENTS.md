@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-v2.md` is the deep dive on the current engine.
 
-Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix, plus a separate `lint` job). Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
+Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:v2` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with a reduced `BENCH_N` and writes the output to the job summary; treat those as smoke results, not reference numbers. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
 
 **Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Much of the existing code and documentation is still in Chinese; that migration is tracked in #6 (code comments and test/bench output) and #7 (README, architecture doc, CHANGELOG). When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change. Purely mechanical edits inside an existing Chinese line (swapping a command or identifier, fixing a path) do not by themselves require translating that line.
 
@@ -36,7 +36,7 @@ Environment knobs:
 
 - `SEEDS` / `CASES` — differential fuzz size; code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 pnpm exec tsx tests/differential-z4-v2.test.ts` for a quick pass.
 - `REPRO=seed:case` — re-run exactly one failing differential case and dump the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 pnpm exec tsx tests/differential-z4-v2.test.ts`).
-- `BENCH_N` — benchmark record count (default 500 000).
+- `BENCH_N` — benchmark record count (default 500 000; the CI bench workflow uses 50 000).
 
 ## Architecture
 

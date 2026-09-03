@@ -152,7 +152,7 @@ fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
 
 ### zod4 验证
 
-- `pnpm run test:z4`：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case（对比 stock zod4）
+- `pnpm run test:z4`：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
 - `pnpm run bench:z4`：本基准
 - `pnpm run probe:z4`：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
 

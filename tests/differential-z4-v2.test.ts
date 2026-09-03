@@ -5,7 +5,7 @@
  * 附加：顶层引用共享率（CoW 命中率）、stock 降级率统计。
  * 失败打印 seed/case 可复现（REPRO=seed:case）。
  */
-import assert from "node:assert/strict";
+import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod4";
 import { compileV2 } from "../src/index-z4-v2.js";
 
@@ -577,14 +577,6 @@ for (let seed = 1; seed <= SEEDS; seed++) {
   }
 }
 
-function assertDeepEqual(a: unknown, b: unknown): boolean {
-  try {
-    assert.deepStrictEqual(a, b);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function defRepr(schema: any, depth = 0): string {
   try {

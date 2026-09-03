@@ -1,0 +1,28 @@
+{
+  "name": "cow-zod-prototype",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "description": "Zod-compatible CoW compilation layer — v2: reuses the official zod4 codegen (compileFn/assertOnly) as the semantic backend, adds CoW container skeletons (object/array/tuple/record/map/set) + async support",
+  "scripts": {
+    "probe": "tsx src/probe.ts",
+    "probe:z4": "tsx src/probe-z4.ts",
+    "test": "tsx tests/unit.test.ts && tsx tests/differential.test.ts",
+    "test:z4": "tsx tests/unit-z4.test.ts && tsx tests/differential-z4.test.ts",
+    "typecheck": "tsc --noEmit",
+    "bench": "node --expose-gc --import tsx bench/bench.ts",
+    "bench:z4": "node --expose-gc --import tsx bench/bench-z4.ts",
+    "test:v2": "tsx tests/smoke-v2.ts && tsx tests/smoke-v2-containers.test.ts && tsx tests/smoke-v2-tuple-async.test.ts && tsx tests/differential-z4-v2.test.ts",
+    "bench:v2": "node --expose-gc --import tsx bench/bench-z4-v2.ts"
+  },
+  "dependencies": {
+    "zod": "3.24.1",
+    "zod4": "npm:zod@^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "arktype": "^2.2.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0"
+  }
+}

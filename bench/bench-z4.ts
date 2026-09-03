@@ -158,20 +158,26 @@ function report(label: string, samples: Sample[]): { best: number; median: numbe
   const median = ms[Math.floor(ms.length / 2)]!;
   const heap = samples.reduce((m, s) => Math.max(m, s.heapDelta), 0);
   const retained = samples.reduce((m, s) => Math.max(m, s.retainedDelta), 0);
-  const fmt = (v: number) => (v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`);
+  const fmt = (v: number) =>
+    v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`;
   console.log(
     `  ${label.padEnd(38)} best ${best.toFixed(0).padStart(6)}ms   median ${median
       .toFixed(0)
-      .padStart(6)}ms   分配压力 ${fmt(heap).padStart(10)}   gc后驻留 ${fmt(retained).padStart(10)}`,
+      .padStart(
+        6,
+      )}ms   分配压力 ${fmt(heap).padStart(10)}   gc后驻留 ${fmt(retained).padStart(10)}`,
   );
   return { best, median };
 }
 
-const median = (samples: Sample[]) => samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
+const median = (samples: Sample[]) =>
+  samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
 
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
-console.log(`\n═══ S1 纯校验 · ${N.toLocaleString()} 账户 · zod4 ${(z as any)._zod ? "" : ""}· 每变体 ${PASSES} 轮 ═══`);
+console.log(
+  `\n═══ S1 纯校验 · ${N.toLocaleString()} 账户 · zod4 ${(z as any)._zod ? "" : ""}· 每变体 ${PASSES} 轮 ═══`,
+);
 console.log(`  JIT (zod4/compile): ${jitLoaded ? "已加载" : "不可用"}`);
 const data = makeAccounts();
 
@@ -258,7 +264,9 @@ if (jitLoaded) {
 /* ─────────────────────────── S3: 脏比例扫描 ─────────────────────────── */
 
 console.log(`\n═══ S3 脏比例扫描 · role 缺失比例 → default 注入 · 每变体 ${PASSES} 轮取中位 ═══`);
-console.log(`  ${"缺失比例".padEnd(8)} ${"stock".padStart(9)} ${"zc CoW".padStart(9)} ${"加速比".padStart(8)}   ${"stock驻留".padStart(11)} ${"zc驻留".padStart(11)}`);
+console.log(
+  `  ${"缺失比例".padEnd(8)} ${"stock".padStart(9)} ${"zc CoW".padStart(9)} ${"加速比".padStart(8)}   ${"stock驻留".padStart(11)} ${"zc驻留".padStart(11)}`,
+);
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const sStock = measure("s", () => AccountsCow.safeParse(ds));
@@ -273,7 +281,7 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const rS = sStock.reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   const rC = sCow.reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   console.log(
-    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mS.toFixed(0).padStart(8)}ms ${mC.toFixed(0).padStart(8)}ms ${(mS / mC).toFixed(2).padStart(7)}x   ${(rS).toFixed(1).padStart(9)}MB ${(rC).toFixed(1).padStart(9)}MB`,
+    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mS.toFixed(0).padStart(8)}ms ${mC.toFixed(0).padStart(8)}ms ${(mS / mC).toFixed(2).padStart(7)}x   ${rS.toFixed(1).padStart(9)}MB ${rC.toFixed(1).padStart(9)}MB`,
   );
 }
 

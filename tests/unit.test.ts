@@ -10,9 +10,7 @@ import { test, summary } from "./harness.js";
 console.log("── CoW 语义 ──");
 
 test("纯 schema：parse 恒等返回输入引用（零拷贝）", () => {
-  const C = compile(
-    z.object({ a: z.string(), b: z.number().int(), c: z.array(z.string()) }),
-  );
+  const C = compile(z.object({ a: z.string(), b: z.number().int(), c: z.array(z.string()) }));
   const input = { a: "x", b: 1, c: ["p", "q"] };
   assert.equal(C.parse(input), input);
   assert.equal(C.validate(input), input);
@@ -57,7 +55,10 @@ test("trim 仅在值实际变化时判脏（原始类型值比较的威力）", 
 test("深路径拷贝：叶子 default → 祖先链新建、兄弟子树共享、输入无损", () => {
   const C = compile(
     z.object({
-      meta: z.object({ deep: z.object({ v: z.number().default(7), keep: z.string() }), keep: z.string() }),
+      meta: z.object({
+        deep: z.object({ v: z.number().default(7), keep: z.string() }),
+        keep: z.string(),
+      }),
       sib: z.object({ k: z.string() }),
     }),
   );
@@ -162,7 +163,10 @@ test("string checks：min/max/regex/email/uuid/datetime/startsWith/endsWith", ()
   assert.equal(E.safeParse("nope").success, false);
 
   const U = compile(z.string().uuid());
-  assert.equal(U.parse("00000000-0000-4000-8000-000000000000"), "00000000-0000-4000-8000-000000000000");
+  assert.equal(
+    U.parse("00000000-0000-4000-8000-000000000000"),
+    "00000000-0000-4000-8000-000000000000",
+  );
   assert.equal(U.safeParse("xxx").success, false);
 
   const D = compile(z.string().datetime());
@@ -305,11 +309,9 @@ test("refine/superRefine：纯谓词不破坏零拷贝；失败带路径", () =>
   }
 
   const S = compile(
-    z
-      .object({ lo: z.number(), hi: z.number() })
-      .superRefine((val, ctx) => {
-        if (val.lo > val.hi) ctx.addIssue({ code: "custom", message: "lo>hi" });
-      }),
+    z.object({ lo: z.number(), hi: z.number() }).superRefine((val, ctx) => {
+      if (val.lo > val.hi) ctx.addIssue({ code: "custom", message: "lo>hi" });
+    }),
   );
   const ok2 = { lo: 1, hi: 2 };
   assert.equal(S.parse(ok2), ok2);
@@ -321,9 +323,19 @@ test("preprocess / pipe / readonly / branded / optional / nullable / tuple", () 
   const P = compile(z.preprocess((v) => String(v), z.string()));
   assert.equal(P.parse(42 as never), "42");
 
-  const Pipe = compile(z.string().transform((s) => s.length).pipe(z.number().int()));
+  const Pipe = compile(
+    z
+      .string()
+      .transform((s) => s.length)
+      .pipe(z.number().int()),
+  );
   assert.equal(Pipe.parse("abcd"), 4);
-  const Pipe2 = compile(z.string().transform((s) => s.length).pipe(z.number().min(3)));
+  const Pipe2 = compile(
+    z
+      .string()
+      .transform((s) => s.length)
+      .pipe(z.number().min(3)),
+  );
   assert.equal(Pipe2.safeParse("ab").success, false);
 
   const RO = compile(z.object({ a: z.string() }).readonly());
@@ -361,7 +373,10 @@ test("__proto__ 多余键：不产生原型污染，输入无损", () => {
 
 test("失败路径：嵌套 issue path 正确", () => {
   const C = compile(
-    z.object({ list: z.array(z.object({ v: z.number() })), n: z.object({ m: z.object({ s: z.string() }) }) }),
+    z.object({
+      list: z.array(z.object({ v: z.number() })),
+      n: z.object({ m: z.object({ s: z.string() }) }),
+    }),
   );
   const r = C.safeParse({ list: [{ v: 1 }, { v: "x" }], n: { m: { s: 1 } } } as never);
   assert.equal(r.success, false);
@@ -372,8 +387,14 @@ test("失败路径：嵌套 issue path 正确", () => {
 });
 
 test("不支持特性：编译期明确报错（而非运行时静默漂移）", () => {
-  assert.throws(() => compile(z.intersection(z.object({ a: z.string() }), z.object({ b: z.string() }))), ZcNotSupportedError);
-  assert.throws(() => compile(z.object({ a: z.string() }).catchall(z.string())), ZcNotSupportedError);
+  assert.throws(
+    () => compile(z.intersection(z.object({ a: z.string() }), z.object({ b: z.string() }))),
+    ZcNotSupportedError,
+  );
+  assert.throws(
+    () => compile(z.object({ a: z.string() }).catchall(z.string())),
+    ZcNotSupportedError,
+  );
 });
 
 test("async refine → 运行时明确报错", () => {

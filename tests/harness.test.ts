@@ -42,7 +42,11 @@ test("invalid Dates nested in object / array / Map value / Set", () => {
 });
 
 test("Map / Set keep their size when several invalid Dates are present", () => {
-  const two = () => new Map([[invalid(), 1], [invalid(), 2]]);
+  const two = () =>
+    new Map([
+      [invalid(), 1],
+      [invalid(), 2],
+    ]);
   const one = () => new Map([[invalid(), 2]]);
   assert.equal(deepEqual(two(), two()), true);
   assert.equal(deepEqual(two(), one()), false);
@@ -61,7 +65,9 @@ test("primitives, NaN, -0, boxed primitives, RegExp, class instances", () => {
   same(new Number(1), 1, false);
   same(/a/g, /a/g, true);
   same(/a/g, /a/i, false);
-  class P { constructor(public x: number) {} }
+  class P {
+    constructor(public x: number) {}
+  }
   same(new P(1), new P(1), true);
   same(new P(1), { x: 1 }, false);
 });
@@ -82,7 +88,9 @@ test("plain objects: key set, values, prototype, symbol keys, __proto__ key", ()
 test("arrays: elements, length, holes vs undefined", () => {
   same([1, 2], [1, 2], true);
   same([1, 2], [1, 2, 3], false);
+  // biome-ignore lint/suspicious/noSparseArray: holes vs undefined is what this case checks
   same([1, , 3], [1, undefined, 3], false);
+  // biome-ignore lint/suspicious/noSparseArray: holes vs undefined is what this case checks
   same([1, , 3], [1, , 3], true);
   same([1, 2], { 0: 1, 1: 2, length: 2 }, false);
 });
@@ -97,8 +105,14 @@ test("arrays: custom enumerable properties on the array instance are compared", 
 });
 
 test("arrays: custom property holding an invalid Date is normalized too", () => {
-  assert.equal(deepEqual(Object.assign([1], { d: invalid() }), Object.assign([1], { d: invalid() })), true);
-  assert.equal(deepEqual(Object.assign([1], { d: invalid() }), Object.assign([1], { d: new Date(0) })), false);
+  assert.equal(
+    deepEqual(Object.assign([1], { d: invalid() }), Object.assign([1], { d: invalid() })),
+    true,
+  );
+  assert.equal(
+    deepEqual(Object.assign([1], { d: invalid() }), Object.assign([1], { d: new Date(0) })),
+    false,
+  );
 });
 
 test("Map / Set: entries, custom enumerable properties on the instance", () => {
@@ -106,7 +120,11 @@ test("Map / Set: entries, custom enumerable properties on the instance", () => {
   same(new Map([[1, "a"]]), new Map([[1, "b"]]), false);
   same(new Set([1, 2]), new Set([2, 1]), true);
   same(new Set([1, 2]), new Set([1]), false);
-  same(Object.assign(new Map([[1, 2]]), { tag: "x" }), Object.assign(new Map([[1, 2]]), { tag: "x" }), true);
+  same(
+    Object.assign(new Map([[1, 2]]), { tag: "x" }),
+    Object.assign(new Map([[1, 2]]), { tag: "x" }),
+    true,
+  );
   same(Object.assign(new Map([[1, 2]]), { tag: "x" }), new Map([[1, 2]]), false);
   same(Object.assign(new Set([1]), { tag: "x" }), Object.assign(new Set([1]), { tag: "y" }), false);
 });
@@ -125,7 +143,12 @@ test("Array / Map / Set subclasses keep their prototype", () => {
 
 test("normalization does not mutate its inputs", () => {
   const a = { d: invalid(), arr: Object.assign([1], { tag: "x" }), m: new Map([[invalid(), 1]]) };
-  const before = { keys: Object.keys(a), arrTag: a.arr.tag, mapSize: a.m.size, dTime: a.d.getTime() };
+  const before = {
+    keys: Object.keys(a),
+    arrTag: a.arr.tag,
+    mapSize: a.m.size,
+    dTime: a.d.getTime(),
+  };
   deepEqual(a, structuredClone({ d: invalid(), arr: [1], m: new Map() }));
   assert.deepEqual(Object.keys(a), before.keys);
   assert.equal(a.arr.tag, before.arrTag);

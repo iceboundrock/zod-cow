@@ -52,14 +52,23 @@ function computeFlags(): Probe4Flags {
 
   let defaultShortCircuits: boolean;
   try {
-    defaultShortCircuits = z.number().int().default(1.5 as never).safeParse(undefined).success;
+    defaultShortCircuits = z
+      .number()
+      .int()
+      .default(1.5 as never)
+      .safeParse(undefined).success;
   } catch {
     defaultShortCircuits = false;
   }
 
   let catchThrowsPropagate: boolean;
   try {
-    const thrower: any = z.string().refine(() => { throw new Error("boom"); }).catch("fb");
+    const thrower: any = z
+      .string()
+      .refine(() => {
+        throw new Error("boom");
+      })
+      .catch("fb");
     const r = thrower.safeParse("x");
     catchThrowsPropagate = false; // 被吞了
     void r;

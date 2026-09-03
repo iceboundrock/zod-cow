@@ -108,7 +108,10 @@ head("tuple + rest → 逐槽引用比较");
   const r = C.safeParse(input);
   assert.ok(r.success && (r.data as unknown[]) === input, "rest 全干净 → 原引用");
   // rest 元素转换（number → string 键重试不适用；用 rest schema transform）
-  const S2 = z.tuple([z.string()], z.string().transform((s) => s.length));
+  const S2 = z.tuple(
+    [z.string()],
+    z.string().transform((s) => s.length),
+  );
   const C2 = compileV2(S2);
   const input2 = ["a", "bb", "ccc"] as unknown[];
   const stock2 = S2.safeParse(input2 as never);
@@ -141,10 +144,9 @@ head("tuple + refine（容器自身 checks 双路径）");
   assert.equal(rb.success, stockB.success, "checks 失败一致");
   assert.ok(!rb.success);
   // 元素脏 + checks 作用于重建输出
-  const S2 = z.tuple([z.string(), z.string().transform((s) => s + "!")]).refine(
-    (t) => (t[1] as string).endsWith("!"),
-    { error: "need bang" },
-  );
+  const S2 = z
+    .tuple([z.string(), z.string().transform((s) => `${s}!`)])
+    .refine((t) => (t[1] as string).endsWith("!"), { error: "need bang" });
   const C2 = compileV2(S2);
   const r2 = C2.safeParse(["x", "y"] as unknown[]);
   assert.ok(r2.success);
@@ -175,7 +177,7 @@ head("嵌套：tuple 内 object（CoW 子骨架）+ tuple 被 optional 包装");
   const S3 = z.optional(z.tuple([z.string()]));
   const C3 = compileV2(S3);
   const r3 = C3.safeParse(["a"] as unknown);
-  assert.ok(r3.success && (r3.data as unknown) === C3.schema instanceof Object === false && Array.isArray(r3.data));
+  assert.ok(r3.success && Array.isArray(r3.data));
   const r4 = C3.safeParse(undefined);
   assert.ok(r4.success && r4.data === undefined);
   ok("嵌套 strip / 剥壳一致");
@@ -198,7 +200,8 @@ head("tuple 短输入落入 defaulted 槽区（optinStart < L < optoutStart）")
     const stock = S2.safeParse(inp as never);
     const r = C2.safeParse(inp);
     assert.equal(r.success, stock.success, `L=${inp.length} 成败一致`);
-    if (r.success && stock.success) assert.deepEqual(r.data, stock.data, `L=${inp.length} 输出一致`);
+    if (r.success && stock.success)
+      assert.deepEqual(r.data, stock.data, `L=${inp.length} 输出一致`);
   }
   ok("defaulted 槽区四态一致");
 }
@@ -263,7 +266,7 @@ head("async transform → 引用比较判脏");
   assert.ok((r.data as never) !== input, "async transform值变 → 拷贝");
   assert.equal((r.data as { tag: string }).tag, input.tag, "未变键共享");
   // 数组内 async transform
-  const S2 = z.array(z.string().transform(async (s) => s + "!"));
+  const S2 = z.array(z.string().transform(async (s) => `${s}!`));
   const C2 = compileV2(S2);
   const in2 = ["a", "b"];
   const r2 = await C2.safeParseAsync(in2);
@@ -275,7 +278,7 @@ head("async transform → 引用比较判脏");
 
 head("lazy(async) 静态探测 → async 岛");
 {
-  const S = z.object({ v: z.lazy(() => z.string().transform(async (s) => s + "?")) });
+  const S = z.object({ v: z.lazy(() => z.string().transform(async (s) => `${s}?`)) });
   const C = compileV2(S);
   assert.ok(C.async, "lazy(async) 被静态识破");
   const r = await C.safeParseAsync({ v: "x" });
@@ -305,12 +308,20 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   const S = z.array(z.string()).refine(async (a) => a.length > 1);
   const C = compileV2(S);
   assert.ok(C.async, "async 容器 checks → async 骨架");
-  const r1 = await C.safeParseAsync(["a", "b"]);
-  assert.ok(r1.success && (r1.data as never) === (await Promise.resolve(["a", "b"])) || r1.success);
+  const input1 = ["a", "b"];
+  const r1 = await C.safeParseAsync(input1);
+  assert.ok(r1.success, "async container refine passes");
+  assert.deepEqual(r1.data, input1, "async container refine keeps the value");
+  // Reference sharing is NOT asserted here: checksAreCowSafe rejects async custom checks, so the
+  // container degrades to a runtime island and returns a copy. Tracked in #13; once fixed this
+  // should become assert.strictEqual(r1.data, input1).
   const r2 = await C.safeParseAsync(["a"]);
   assert.ok(!r2.success, "async min 谓词失败");
   // map 值 async
-  const S3 = z.map(z.string(), z.number().transform(async (n) => n * 2));
+  const S3 = z.map(
+    z.string(),
+    z.number().transform(async (n) => n * 2),
+  );
   const C3 = compileV2(S3);
   const m = new Map([["k", 21]]);
   const r3 = await C3.safeParseAsync(m);
@@ -325,14 +336,17 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   assert.ok(r4.success);
   assert.deepEqual([...(r4.data as Set<string>)], ["A"]);
   // record 值 async
-  const S5 = z.record(z.string(), z.number().transform(async (n) => n + 1));
+  const S5 = z.record(
+    z.string(),
+    z.number().transform(async (n) => n + 1),
+  );
   const C5 = compileV2(S5);
   const rec = { a: 1 };
   const r5 = await C5.safeParseAsync(rec);
   assert.ok(r5.success);
   assert.deepEqual(r5.data, { a: 2 });
   // tuple 槽 async
-  const S6 = z.tuple([z.string(), z.string().transform(async (s) => s + "!")]);
+  const S6 = z.tuple([z.string(), z.string().transform(async (s) => `${s}!`)]);
   const C6 = compileV2(S6);
   const r6 = await C6.safeParseAsync(["a", "b"]);
   assert.ok(r6.success);

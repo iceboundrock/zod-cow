@@ -19,7 +19,12 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const inner = { n: 1, flag: true };
   const input2 = { a: inner, b: { n: 2, flag: false } };
   const out2 = C2.parse(input2) as typeof input2;
-  console.log("  嵌套 object 值: out === input:", out2 === input2, " out.a === inner:", out2.a === inner);
+  console.log(
+    "  嵌套 object 值: out === input:",
+    out2 === input2,
+    " out.a === inner:",
+    out2.a === inner,
+  );
   assert.equal(out2, input2);
   assert.equal(out2.a, inner);
 
@@ -40,7 +45,13 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const input = { 1: "a", 2: "b" }; // JS 对象键恒为字符串 "1","2"
   const out = C.parse(input) as Record<string, string>;
   console.log("\n── record 数值键（键名转换） ──");
-  console.log("  out:", JSON.stringify(out), " out === input:", out === input, "（stock 键名也是数字→字符串化）");
+  console.log(
+    "  out:",
+    JSON.stringify(out),
+    " out === input:",
+    out === input,
+    "（stock 键名也是数字→字符串化）",
+  );
   assert.deepEqual(out, input);
   // stock 对照：stock 也输出字符串化键
   const stockOut = (S as any).parse(input);
@@ -66,7 +77,13 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const C2 = compileV2(S2);
   const input4 = { a: 1 };
   const out4 = C2.parse(input4) as any;
-  console.log("  缺 b + optional 值: out.b =", out4.b, " out === input:", out4 === input, "（stock 物化 undefined → 必脏）");
+  console.log(
+    "  缺 b + optional 值: out.b =",
+    out4.b,
+    " out === input:",
+    out4 === input,
+    "（stock 物化 undefined → 必脏）",
+  );
   assert.equal(out4.b, undefined);
   assert.notEqual(out4, input4);
   assert.ok(!("b" in input4));
@@ -100,7 +117,12 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const C2 = compileV2(S2);
   const input2 = new Map([["a", { n: 1 }]]);
   const out2 = C2.parse(input2) as Map<string, any>;
-  console.log("  值 default 注入: out.get('a').tag =", out2.get("a")!.tag, " input 未失真:", !("tag" in input2.get("a")!));
+  console.log(
+    "  值 default 注入: out.get('a').tag =",
+    out2.get("a")!.tag,
+    " input 未失真:",
+    !("tag" in input2.get("a")!),
+  );
   assert.equal(out2.get("a")!.tag, "t");
   assert.notEqual(out2, input2);
   assert.ok(!("tag" in input2.get("a")!));

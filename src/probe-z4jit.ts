@@ -14,7 +14,12 @@ const core = await import("zod4/v4/core");
 const { compileFn, INVALID } = core as any;
 console.log("── 复用入口 ──");
 console.log("  compileFn:", typeof compileFn, " INVALID:", String(INVALID));
-console.log("  compile:", typeof core.compile, " ZodCompileUnsupportedError:", typeof (core as any).ZodCompileUnsupportedError);
+console.log(
+  "  compile:",
+  typeof core.compile,
+  " ZodCompileUnsupportedError:",
+  typeof (core as any).ZodCompileUnsupportedError,
+);
 
 const { z } = await import("zod4");
 const { compile } = await import("./index-z4.js");
@@ -50,9 +55,16 @@ const bad = demoVal({ a: "toolong", b: "u@e.com", c: "x", d: [1, 2] });
 console.log("  合法输入 →", ok, "（期望 true）");
 console.log("  非法输入 →", bad, "（期望 INVALID）");
 const p2 = compileFn(Demo2) as any;
-console.log("  transform 树 parser：", JSON.stringify(p2({ keep: "s", role: undefined, len: "abcd", opt: undefined })));
+console.log(
+  "  transform 树 parser：",
+  JSON.stringify(p2({ keep: "s", role: undefined, len: "abcd", opt: undefined })),
+);
 const v2 = compileFn(Demo2, { assertOnly: true } as any) as any;
-console.log("  transform 树 validator：", v2({ keep: "s", role: undefined, len: "abcd", opt: undefined }), "（校验语义保留，输出 true）");
+console.log(
+  "  transform 树 validator：",
+  v2({ keep: "s", role: undefined, len: "abcd", opt: undefined }),
+  "（校验语义保留，输出 true）",
+);
 
 /* ── 4. 性能基线（50 万账户，与 bench-z4 同数据集）── */
 const N = Number(process.env.BENCH_N ?? 500_000);
@@ -95,8 +107,7 @@ const Account = z.object({
 });
 const Accounts = z.array(Account);
 
-const accountParser = compileFn(Account) as (i: unknown) => unknown;      // 官方 parser（stock 语义，无条件重建）
-const accountValidator = compileFn(Account, { assertOnly: true }) as any;  // 官方 validator（纯校验）
+const accountValidator = compileFn(Account, { assertOnly: true }) as any; // 官方 validator（纯校验）
 const accountsParser = compileFn(Accounts) as (i: unknown) => unknown;
 
 // 现有 zc CoW 层
@@ -119,7 +130,9 @@ function bench(label: string, fn: () => unknown, passes = 3): number {
     (globalThis as any).__last = r;
   }
   samples.sort((a, b) => a - b);
-  console.log(`  ${label.padEnd(44)} median ${samples[Math.floor(passes / 2)]!.toFixed(0).padStart(6)}ms  best ${samples[0]!.toFixed(0).padStart(6)}ms  heap +${(heap / 1048576).toFixed(0)}MB`);
+  console.log(
+    `  ${label.padEnd(44)} median ${samples[Math.floor(passes / 2)]!.toFixed(0).padStart(6)}ms  best ${samples[0]!.toFixed(0).padStart(6)}ms  heap +${(heap / 1048576).toFixed(0)}MB`,
+  );
   return samples[Math.floor(passes / 2)]!;
 }
 
@@ -130,7 +143,11 @@ const stockOut = Accounts.safeParse(data);
 const jitOut = accountsParser(data) as any;
 console.log("  官方 parser 产物输出 deepStrictEqual stock：");
 let eq = true;
-for (let i = 0; i < N; i += 9999) if (JSON.stringify(jitOut[i]) !== JSON.stringify((stockOut as any).data[i])) { eq = false; break; }
+for (let i = 0; i < N; i += 9999)
+  if (JSON.stringify(jitOut[i]) !== JSON.stringify((stockOut as any).data[i])) {
+    eq = false;
+    break;
+  }
 console.log("   ", eq ? "一致 ✓" : "不一致 ✗");
 console.log("  官方 validator 产物（单账户）：", accountValidator(data[0]), "（true = 通过）");
 
@@ -144,7 +161,9 @@ const mJitV = bench("官方 compileFn validator（assertOnly 纯校验）", () =
 const mZc = bench("zc CoW parse（Task3 自研编译层）", () => Compiled.safeParse(data));
 
 console.log(`\n  比值（中位）: stock / 官方parser = ${(mStock / mJitP).toFixed(2)}x`);
-console.log(`               官方parser / 官方validator = ${(mJitP / mJitV).toFixed(2)}x  ← 输出构造的净成本`);
+console.log(
+  `               官方parser / 官方validator = ${(mJitP / mJitV).toFixed(2)}x  ← 输出构造的净成本`,
+);
 console.log(`               stock / zc CoW = ${(mStock / mZc).toFixed(2)}x`);
 
 /* ── 5. arktype 参照 ── */

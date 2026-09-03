@@ -37,21 +37,43 @@ function makeRng(seed: number): RNG {
 
 const ABSENT = Symbol("absent");
 
-const STRINGS = ["", "a", "ab", "abc", "abcd", "hello", "AB1", "a@b.co", "  pad  ", "aaaab", "forbidden", "x".repeat(12)] as const;
+const STRINGS = [
+  "",
+  "a",
+  "ab",
+  "abc",
+  "abcd",
+  "hello",
+  "AB1",
+  "a@b.co",
+  "  pad  ",
+  "aaaab",
+  "forbidden",
+  "x".repeat(12),
+] as const;
 const NON_STRINGS = [1, null, true, undefined, 4.5] as const;
 const NUMBERS = [0, 1, 2, 3, 7, 10, -1, -7, 4.5, 100, NaN, "5", null] as const;
 const BOOLEANS = [true, false, "true", 0, null] as const;
 const BIGINTS = [1n, 0n, 99n, -5n, 1, "x", null] as const;
-const DATES = [new Date(0), new Date(1700000000000), new Date(NaN), "not a date", 123, null] as const;
+const DATES = [
+  new Date(0),
+  new Date(1700000000000),
+  new Date(NaN),
+  "not a date",
+  123,
+  null,
+] as const;
 
 function repr(v: unknown): string {
   try {
-    return JSON.stringify(v, (_k, x) => {
-      if (typeof x === "bigint") return `${x}n`;
-      if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
-      if (typeof x === "symbol") return String(x);
-      return x;
-    }) ?? String(v);
+    return (
+      JSON.stringify(v, (_k, x) => {
+        if (typeof x === "bigint") return `${x}n`;
+        if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
+        if (typeof x === "symbol") return String(x);
+        return x;
+      }) ?? String(v)
+    );
   } catch {
     return String(v);
   }
@@ -214,7 +236,9 @@ function bWrap(rng: RNG, inner: Built): Built {
   }
   if (which === 3) {
     return {
-      schema: inner.schema.refine((v: unknown) => v !== "forbidden", { error: "value is forbidden" }),
+      schema: inner.schema.refine((v: unknown) => v !== "forbidden", {
+        error: "value is forbidden",
+      }),
       desc: `${inner.desc}.refine(≠forbidden)`,
       gen: inner.gen,
     };
@@ -222,7 +246,9 @@ function bWrap(rng: RNG, inner: Built): Built {
   if (which === 5) {
     // Task 6：async refine（成败域与 sync 同构，但走 async 岛）
     return {
-      schema: inner.schema.refine(async (v: unknown) => v !== "forbidden", { error: "value is forbidden" }),
+      schema: inner.schema.refine(async (v: unknown) => v !== "forbidden", {
+        error: "value is forbidden",
+      }),
       desc: `${inner.desc}.refine(async ≠forbidden)`,
       gen: inner.gen,
     };
@@ -230,14 +256,14 @@ function bWrap(rng: RNG, inner: Built): Built {
   if (which === 6) {
     // Task 6：async transform（string → string，与 sync transform 同构）
     return {
-      schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? v + "!" : v)),
+      schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? `${v}!` : v)),
       desc: `${inner.desc}.transform(async +!)`,
       gen: inner.gen,
     };
   }
   // transform：string → string（纯字符串变换，差分可对齐）
   return {
-    schema: inner.schema.transform((v: any) => (typeof v === "string" ? v + "!" : v)),
+    schema: inner.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
     desc: `${inner.desc}.transform(+!)`,
     gen: inner.gen,
   };
@@ -261,7 +287,7 @@ function bObject(rng: RNG, depth: number): Built {
     schema = z.looseObject(shape);
     modeDesc = ".passthrough()";
   }
-  const desc = `object({${fields.map((f) => f.key + ": " + f.built.desc).join(", ")}})${modeDesc}`;
+  const desc = `object({${fields.map((f) => `${f.key}: ${f.built.desc}`).join(", ")}})${modeDesc}`;
   let extraSeq = 0;
   return {
     schema,
@@ -381,26 +407,6 @@ function bSet(rng: RNG, depth: number): Built {
   };
 }
 
-function bUnion(rng: RNG, depth: number): Built {
-  const n = 2 + rng.int(2);
-  const branches: Built[] = [];
-  const kinds: string[] = [];
-  const used = new Set<string>();
-  while (branches.length < n) {
-    const b = bLeaf(rng);
-    const tag = b.desc.split(/[.(]/)[0]!;
-    if (used.has(tag)) continue;
-    used.add(tag);
-    branches.push(b);
-    kinds.push(b.desc);
-  }
-  return {
-    schema: z.union(branches.map((b) => b.schema) as [z.ZodType, z.ZodType, ...z.ZodType[]]),
-    desc: `union(${kinds.join(", ")})`,
-    gen: (r) => r.pick(branches).gen(r),
-  };
-}
-
 function bTuple(rng: RNG, depth: number): Built {
   const nFixed = 2 + rng.int(2); // 2–3 必填槽
   const items: Built[] = [];
@@ -474,7 +480,7 @@ function bAny(rng: RNG, depth: number): Built {
   if (roll < 0.52) return bObject(rng, depth);
   if (roll < 0.62) return bArray(rng, depth);
   if (roll < 0.72) return bTuple(rng, depth);
-  if (roll < 0.80) return bRecord(rng, depth);
+  if (roll < 0.8) return bRecord(rng, depth);
   if (roll < 0.86) return bMap(rng, depth);
   if (roll < 0.91) return bSet(rng, depth);
   return bWrap(rng, bLeaf(rng));
@@ -511,7 +517,12 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       console.log("desc:", built.desc);
       console.log("input:", repr(input));
       console.log("stock:", compiled.stock, "async:", compiled.async);
-      console.log("cow code:\n" + (compiled.code ?? "(stock)").split("\n").map((l) => "  " + l).join("\n"));
+      console.log(
+        `cow code:\n${(compiled.code ?? "(stock)")
+          .split("\n")
+          .map((l) => `  ${l}`)
+          .join("\n")}`,
+      );
     }
 
     const snapshot = structuredClone(input);
@@ -520,10 +531,14 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     let stockThrew: Error | null = null;
     try {
       const rp = useAsync
-        ? (built.schema as unknown as { safeParseAsync: (d: unknown) => Promise<never> }).safeParseAsync(input)
+        ? (
+            built.schema as unknown as { safeParseAsync: (d: unknown) => Promise<never> }
+          ).safeParseAsync(input)
         : built.schema.safeParse(input as never);
       const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
-      stock = r.success ? { success: true, data: r.data } : { success: false, error: r.error as never };
+      stock = r.success
+        ? { success: true, data: r.data }
+        : { success: false, error: r.error as never };
     } catch (e) {
       stockThrew = e as Error;
     }
@@ -533,7 +548,9 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     try {
       const rp = useAsync ? compiled.safeParseAsync(input) : compiled.safeParse(input);
       const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
-      ours = r.success ? { success: true, data: r.data } : { success: false, error: r.error as never };
+      ours = r.success
+        ? { success: true, data: r.data }
+        : { success: false, error: r.error as never };
     } catch (e) {
       oursThrew = e as Error;
     }
@@ -557,7 +574,12 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         `SUCCESS MISMATCH stock=${stock!.success} ours=${ours!.success}\n      ${caseId}` +
           (ours!.success
             ? `\n      stock issues: ${JSON.stringify((stock!.error as any)?.issues?.slice(0, 3))}`
-            : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => "        " + l).join("\n")}`),
+            : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(
+                compiled.code ?? "(stock)"
+              )
+                .split("\n")
+                .map((l) => `        ${l}`)
+                .join("\n")}`),
       );
       continue;
     }
@@ -566,7 +588,12 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       bothOk++;
       if (!assertDeepEqual(ours!.data, stock!.data)) {
         failures.push(
-          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(compiled.code ?? "(stock)").split("\n").map((l) => "        " + l).join("\n")}`,
+          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(
+            compiled.code ?? "(stock)"
+          )
+            .split("\n")
+            .map((l) => `        ${l}`)
+            .join("\n")}`,
         );
         continue;
       }
@@ -577,17 +604,27 @@ for (let seed = 1; seed <= SEEDS; seed++) {
   }
 }
 
-
 function defRepr(schema: any, depth = 0): string {
   try {
     if (depth > 4) return "…";
     const d = schema?._zod?.def ?? {};
     const parts: string[] = [d.type ?? d.check ?? "?"];
-    for (const k of ["innerType", "element", "in", "out", "keyType", "valueType", "left", "right"]) {
+    for (const k of [
+      "innerType",
+      "element",
+      "in",
+      "out",
+      "keyType",
+      "valueType",
+      "left",
+      "right",
+    ]) {
       if (d[k]) parts.push(`${k}=${defRepr(d[k], depth + 1)}`);
     }
-    if (d.options) parts.push(`options=[${d.options.map((o: any) => defRepr(o, depth + 1)).join(",")}]`);
-    if (d.checks) parts.push(`checks=[${d.checks.map((c: any) => (c?._zod?.def ?? c)?.check).join(",")}]`);
+    if (d.options)
+      parts.push(`options=[${d.options.map((o: any) => defRepr(o, depth + 1)).join(",")}]`);
+    if (d.checks)
+      parts.push(`checks=[${d.checks.map((c: any) => (c?._zod?.def ?? c)?.check).join(",")}]`);
     return parts.join("(") + ")".repeat(parts.length - 1);
   } catch {
     return "?";
@@ -597,11 +634,13 @@ function defRepr(schema: any, depth = 0): string {
 /* ─────────────────────────── 报告 ─────────────────────────── */
 
 console.log(`zc-v2 差分测试: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
-console.log(`  成功一致: ${bothOk}   失败一致: ${bothFail}   顶层引用共享率: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}%（成功 case 中 ${(refShared / Math.max(1, bothOk) * 100).toFixed(1)}%）`);
+console.log(
+  `  成功一致: ${bothOk}   失败一致: ${bothFail}   顶层引用共享率: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}%（成功 case 中 ${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}%）`,
+);
 console.log(`  stock 降级（compileV2 放弃编译）: ${stockDowngraded} 次`);
 if (failures.length > 0) {
   console.log(`\n✗ ${failures.length} 个差异（前 10 个）:`);
-  for (const f of failures.slice(0, 10)) console.log("\n" + f);
+  for (const f of failures.slice(0, 10)) console.log(`\n${f}`);
   process.exit(1);
 } else {
   console.log("  全部与 stock zod4 一致 ✓");

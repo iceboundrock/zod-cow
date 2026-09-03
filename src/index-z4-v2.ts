@@ -13,7 +13,7 @@
  *     .async            true = 骨架含 async 子树 → sync API 抛 $ZodAsyncError（官方同款语义）
  */
 import type { z } from "zod4";
-import { INVALID, compileCowFn, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";
+import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";
 import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod4/v4/core";
 
 export interface CompiledV2<T extends z.ZodType> {
@@ -25,14 +25,13 @@ export interface CompiledV2<T extends z.ZodType> {
   /** CoW 骨架源码（stock 降级时为 null） */
   readonly code: string | null;
   parse(data: unknown): z.output<T>;
-  safeParse(data: unknown):
-    | { success: true; data: z.output<T> }
-    | { success: false; error: z.ZodError };
+  safeParse(
+    data: unknown,
+  ): { success: true; data: z.output<T> } | { success: false; error: z.ZodError };
   parseAsync(data: unknown): Promise<z.output<T>>;
-  safeParseAsync(data: unknown): Promise<
-    | { success: true; data: z.output<T> }
-    | { success: false; error: z.ZodError }
-  >;
+  safeParseAsync(
+    data: unknown,
+  ): Promise<{ success: true; data: z.output<T> } | { success: false; error: z.ZodError }>;
   /** 纯校验：通过返回输入原引用（DeepReadonly 提示共享），失败返回 null */
   validate(data: unknown): unknown;
 }
@@ -56,9 +55,12 @@ export function compileV2<T extends z.ZodType>(schema: T): CompiledV2<T> {
 
   const isAsync = isAsyncProduct(cowFn);
   const validator = cowFn && !isAsync ? officialValidator(schema) : null;
-  const stockParse = (schema as unknown as { safeParse: (d: unknown) => SyncResult }).safeParse.bind(schema);
-  const stockParseAsync = (schema as unknown as { safeParseAsync: (d: unknown) => Promise<SyncResult> })
-    .safeParseAsync.bind(schema);
+  const stockParse = (
+    schema as unknown as { safeParse: (d: unknown) => SyncResult }
+  ).safeParse.bind(schema);
+  const stockParseAsync = (
+    schema as unknown as { safeParseAsync: (d: unknown) => Promise<SyncResult> }
+  ).safeParseAsync.bind(schema);
 
   const throwSyncOnAsync = (): never => {
     // 官方 sync API 对 async schema 的同款语义（$ZodAsyncError）
@@ -91,7 +93,8 @@ export function compileV2<T extends z.ZodType>(schema: T): CompiledV2<T> {
       if (isAsync) throwSyncOnAsync();
       if (cowFn) {
         const out = cowFn(data);
-        if (out !== INVALID) return { success: true, data: out } as { success: true; data: z.output<T> };
+        if (out !== INVALID)
+          return { success: true, data: out } as { success: true; data: z.output<T> };
       }
       return stockParse(data) as { success: false; error: z.ZodError };
     },
@@ -105,7 +108,8 @@ export function compileV2<T extends z.ZodType>(schema: T): CompiledV2<T> {
     async safeParseAsync(data: unknown) {
       if (cowFn) {
         const out = await cowFn(data);
-        if (out !== INVALID) return { success: true, data: out } as { success: true; data: z.output<T> };
+        if (out !== INVALID)
+          return { success: true, data: out } as { success: true; data: z.output<T> };
       }
       const r = isAsync ? await stockParseAsync(data) : stockParse(data);
       return r as { success: false; error: z.ZodError };

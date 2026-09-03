@@ -189,14 +189,16 @@ function report(label: string, samples: Sample[]): number {
   const median = ms[Math.floor(ms.length / 2)]!;
   const heap = samples.reduce((m, s) => Math.max(m, s.heapDelta), 0);
   const retained = samples.reduce((m, s) => Math.max(m, s.retainedDelta), 0);
-  const fmt = (v: number) => (v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`);
+  const fmt = (v: number) =>
+    v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`;
   console.log(
     `  ${label.padEnd(44)} median ${median.toFixed(0).padStart(6)}ms   分配压力 ${fmt(heap).padStart(9)}   gc后驻留 ${fmt(retained).padStart(9)}`,
   );
   return median;
 }
 
-const medianOf = (samples: Sample[]): number => samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
+const medianOf = (samples: Sample[]): number =>
+  samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
 
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
@@ -210,7 +212,9 @@ const data = makeAccounts();
   const v2Out = V2Stock.safeParse(data);
   assert.ok(v2Out.success);
   assert.deepStrictEqual(v2Out.data, (stockOut as any).data);
-  console.log(`  正确性: deepStrictEqual ✓   v2 输出 === 输入引用: ${v2Out.data === data ? "是（零拷贝）" : "否"}`);
+  console.log(
+    `  正确性: deepStrictEqual ✓   v2 输出 === 输入引用: ${v2Out.data === data ? "是（零拷贝）" : "否"}`,
+  );
 }
 
 const s1Stock = measure(() => stockParser(data));
@@ -223,10 +227,18 @@ const s1V1 = measure(() => V1Stock.safeParse(data));
 report("zc-v1 CoW parse（Task3 自研 codegen）", s1V1);
 
 console.log(`\n  比值（中位）:`);
-console.log(`    stock / 官方parser = ${(medianOf(s1Stock) / medianOf(s1Official)).toFixed(2)}x   ← 官方 JIT 本身的收益`);
-console.log(`    stock / zc-v2      = ${(medianOf(s1Stock) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰总收益`);
-console.log(`    官方parser / zc-v2 = ${(medianOf(s1Official) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰在 JIT 之上的净收益`);
-console.log(`    zc-v1 / zc-v2      = ${(medianOf(s1V1) / medianOf(s1V2)).toFixed(2)}x   ← 复用官方 codegen vs 自研`);
+console.log(
+  `    stock / 官方parser = ${(medianOf(s1Stock) / medianOf(s1Official)).toFixed(2)}x   ← 官方 JIT 本身的收益`,
+);
+console.log(
+  `    stock / zc-v2      = ${(medianOf(s1Stock) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰总收益`,
+);
+console.log(
+  `    官方parser / zc-v2 = ${(medianOf(s1Official) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰在 JIT 之上的净收益`,
+);
+console.log(
+  `    zc-v1 / zc-v2      = ${(medianOf(s1V1) / medianOf(s1V2)).toFixed(2)}x   ← 复用官方 codegen vs 自研`,
+);
 
 /* ─────────────────────────── S2: CoW 脏负载 ─────────────────────────── */
 
@@ -251,20 +263,26 @@ const s2V2 = measure(() => V2Cow.safeParse(dataCow));
 report("zc-v2 CoW parse（90% 零拷贝）", s2V2);
 const s2V1 = measure(() => V1Cow.safeParse(dataCow));
 report("zc-v1 CoW parse（Task3）", s2V1);
-console.log(`\n  比值（中位）: stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   官方parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x   stock/v1 = ${(medianOf(s2Stock) / medianOf(s2V1)).toFixed(2)}x`);
+console.log(
+  `\n  比值（中位）: stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   官方parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x   stock/v1 = ${(medianOf(s2Stock) / medianOf(s2V1)).toFixed(2)}x`,
+);
 
 /* ─────────────────────────── S3: 脏比例扫描 ─────────────────────────── */
 
 console.log(`\n═══ S3 脏比例扫描 · role 缺失比例 → default 注入 ═══`);
-console.log(`  ${"缺失比例".padEnd(8)} ${"stock".padStart(8)} ${"官方JIT".padStart(8)} ${"zc-v2".padStart(8)} ${"zc-v1".padStart(8)} ${"stock/v2".padStart(8)}   ${"v2驻留".padStart(8)} ${"stock驻留".padStart(9)}`);
+console.log(
+  `  ${"缺失比例".padEnd(8)} ${"stock".padStart(8)} ${"官方JIT".padStart(8)} ${"zc-v2".padStart(8)} ${"zc-v1".padStart(8)} ${"stock/v2".padStart(8)}   ${"v2驻留".padStart(8)} ${"stock驻留".padStart(9)}`,
+);
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const mStock = medianOf(measure(() => stockCowParser(ds)));
   const mOfficial = medianOf(measure(() => officialParserCow(ds)));
   const mV2 = medianOf(measure(() => V2Cow.safeParse(ds)));
   const mV1 = medianOf(measure(() => V1Cow.safeParse(ds)));
-  const rs = measure(() => stockCowParser(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
-  const rv = measure(() => V2Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
+  const rs =
+    measure(() => stockCowParser(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
+  const rv =
+    measure(() => V2Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   console.log(
     `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${mV1.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(7)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
   );
@@ -272,7 +290,9 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
 
 /* ─────────────────────────── S5: record/map/set 容器场景 ─────────────────────────── */
 
-console.log(`\n═══ S5 容器 CoW · record / map / set · ${N.toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`);
+console.log(
+  `\n═══ S5 容器 CoW · record / map / set · ${N.toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`,
+);
 {
   // 数据：50 万条记录，每条含一个 4 键 record + 一个 3 条目 map + 一个 3 成员 set
   const dict = z.record(z.string(), z.number());
@@ -284,8 +304,12 @@ console.log(`\n═══ S5 容器 CoW · record / map / set · ${N.toLocaleStri
     lookup,
     tags,
   });
-  const rows: { id: number; dict: Record<string, number>; lookup: Map<string, number>; tags: Set<number> }[] =
-    new Array(N);
+  const rows: {
+    id: number;
+    dict: Record<string, number>;
+    lookup: Map<string, number>;
+    tags: Set<number>;
+  }[] = new Array(N);
   for (let i = 0; i < N; i++) {
     rows[i] = {
       id: i,
@@ -305,7 +329,9 @@ console.log(`\n═══ S5 容器 CoW · record / map / set · ${N.toLocaleStri
   const probe = RowsV2.safeParse(rows);
   assert.ok(probe.success);
   assert.deepStrictEqual(probe.data, (Rows.safeParse(rows) as any).data);
-  console.log(`  正确性: deepStrictEqual ✓   CoW 输出 === 输入引用: ${probe.data === rows ? "是（零拷贝）" : "否"}`);
+  console.log(
+    `  正确性: deepStrictEqual ✓   CoW 输出 === 输入引用: ${probe.data === rows ? "是（零拷贝）" : "否"}`,
+  );
 
   const rs = measure(() => Rows.safeParse(rows));
   report("S5 stock（record+map+set 每条重建）", rs);
@@ -320,7 +346,9 @@ console.log(`\n═══ S5 容器 CoW · record / map / set · ${N.toLocaleStri
 
 /* ─────────────────────────── S6: tuple 场景 ─────────────────────────── */
 
-console.log(`\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`);
+console.log(
+  `\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`,
+);
 {
   // 数据：50 万条，每条含满长 tuple [x,y]（全数字）与 [name, optional tag]
   const Point = z.tuple([z.number(), z.number()]);
@@ -331,7 +359,7 @@ console.log(`\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleStri
     rows[i] = {
       id: i,
       point: [i % 360, i % 180],
-      label: i % 2 === 0 ? ["L" + (i % 97), "T" + (i % 31)] : ["L" + (i % 97)],
+      label: i % 2 === 0 ? [`L${i % 97}`, `T${i % 31}`] : [`L${i % 97}`],
     };
   }
   const Rows = z.array(Row);
@@ -341,7 +369,9 @@ console.log(`\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleStri
   const probe = RowsV2.safeParse(rows);
   assert.ok(probe.success);
   assert.deepStrictEqual(probe.data, (Rows.safeParse(rows) as any).data);
-  console.log(`  正确性: deepStrictEqual ✓   CoW 输出 === 输入引用: ${probe.data === rows ? "是（零拷贝）" : "否"}`);
+  console.log(
+    `  正确性: deepStrictEqual ✓   CoW 输出 === 输入引用: ${probe.data === rows ? "是（零拷贝）" : "否"}`,
+  );
 
   const rs = measure(() => Rows.safeParse(rows));
   report("S6 stock（tuple 每条重建 new 数组）", rs);
@@ -356,7 +386,9 @@ console.log(`\n═══ S6 tuple CoW · 坐标/标签 tuple · ${N.toLocaleStri
 
 /* ─────────────────────────── S7: async 场景 ─────────────────────────── */
 
-console.log(`\n═══ S7 async CoW · async transform 叶子 · ${(N / 10).toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`);
+console.log(
+  `\n═══ S7 async CoW · async transform 叶子 · ${(N / 10).toLocaleString()} 条 · 每变体 ${PASSES} 轮取中位 ═══`,
+);
 {
   // 数据规模：async 每元素一条 microtask 链，N/10 条保持单轮可测量
   const M = N / 10;

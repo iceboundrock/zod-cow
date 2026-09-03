@@ -10,8 +10,8 @@
  *                    “输出与输入共享”这一事实写进类型系统
  *   .safeParse(data) 不抛错误的版本
  */
-import { z } from "zod";
-import { FAILED, Issue, ZcError } from "./internal.js";
+import type { z } from "zod";
+import { FAILED, type Issue, ZcError } from "./internal.js";
 import { go, isStaticPure } from "./compile.js";
 
 export type { Issue, PathSegment, Ctx, Validator } from "./internal.js";
@@ -28,9 +28,7 @@ export type DeepReadonly<T> = T extends (infer U)[]
         ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
         : T;
 
-export type SafeParseResult<T> =
-  | { success: true; data: T }
-  | { success: false; error: ZcError };
+export type SafeParseResult<T> = { success: true; data: T } | { success: false; error: ZcError };
 
 export interface Compiled<T extends z.ZodTypeAny> {
   /** 原始 zod schema（仍可用作类型推断 / .extend / stock parse） */

@@ -17,7 +17,7 @@ Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numer
 
 ## 快速开始
 
-要求：Node.js >= 22.13.0（pnpm@11.24.0）
+Requires Node.js >= 22.13.0 and pnpm 11.24.0.
 
 ```bash
 pnpm install

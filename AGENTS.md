@@ -8,7 +8,7 @@ A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(
 
 Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + all three test lines on a Node 22/24/26 matrix). No linter configured.
 
-**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Much of the existing code and documentation is still in Chinese; that migration is tracked in #6 (code comments and test/bench output) and #7 (README, architecture doc, CHANGELOG). When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change.
+**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Much of the existing code and documentation is still in Chinese; that migration is tracked in #6 (code comments and test/bench output) and #7 (README, architecture doc, CHANGELOG). When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change. Purely mechanical edits inside an existing Chinese line (swapping a command or identifier, fixing a path) do not by themselves require translating that line.
 
 ## Commands
 
@@ -19,7 +19,7 @@ Use Node.js >= 22.13.0 with pnpm 11.24.0.
 | Task | Command |
 |---|---|
 | Typecheck (only static check available) | `pnpm run typecheck` |
-| Tests, zod3 line (v1) | `pnpm test` |
+| Tests, zod3 line (v1), plus the `tests/harness.ts` self-test | `pnpm test` |
 | Tests, zod4 line (v1) | `pnpm run test:z4` |
 | Tests, zod4 **v2 line (current work)** | `pnpm run test:v2` |
 | Run one test file | `pnpm exec tsx tests/<file>.ts` (e.g. `pnpm exec tsx tests/smoke-v2.ts`) |

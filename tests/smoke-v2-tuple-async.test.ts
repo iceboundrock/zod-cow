@@ -308,10 +308,13 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   const S = z.array(z.string()).refine(async (a) => a.length > 1);
   const C = compileV2(S);
   assert.ok(C.async, "async 容器 checks → async 骨架");
-  const r1 = await C.safeParseAsync(["a", "b"]);
-  assert.ok(
-    (r1.success && (r1.data as never) === (await Promise.resolve(["a", "b"]))) || r1.success,
-  );
+  const input1 = ["a", "b"];
+  const r1 = await C.safeParseAsync(input1);
+  assert.ok(r1.success, "async container refine passes");
+  assert.deepEqual(r1.data, input1, "async container refine keeps the value");
+  // Reference sharing is NOT asserted here: checksAreCowSafe rejects async custom checks, so the
+  // container degrades to a runtime island and returns a copy. Tracked in #13; once fixed this
+  // should become assert.strictEqual(r1.data, input1).
   const r2 = await C.safeParseAsync(["a"]);
   assert.ok(!r2.success, "async min 谓词失败");
   // map 值 async

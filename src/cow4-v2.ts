@@ -203,7 +203,9 @@ function mayOutputUndefined(schema: Node): boolean {
     case "union":
       return def.options ? def.options.some(mayOutputUndefined) : true;
     case "intersection":
-      return !def.left || !def.right || mayOutputUndefined(def.left) || mayOutputUndefined(def.right);
+      return (
+        !def.left || !def.right || mayOutputUndefined(def.left) || mayOutputUndefined(def.right)
+      );
     case "pipe":
       return def.out ? mayOutputUndefined(def.out) : true;
     default:
@@ -252,7 +254,8 @@ function isPure(schema: Node): boolean {
         return false; // schema 型 catchall：官方 parser island
       }
       for (const k of Object.keys(def.shape)) if (!isPure(def.shape[k])) return false;
-      for (const s of Object.getOwnPropertySymbols(def.shape)) if (!isPure(def.shape[s])) return false;
+      for (const s of Object.getOwnPropertySymbols(def.shape))
+        if (!isPure(def.shape[s])) return false;
       return true;
     }
     case "array":
@@ -321,16 +324,26 @@ function checksAreCowSafe(schema: Node): boolean {
   if (!checks || checks.length === 0) return true;
   const def = schema._zod.def;
   const isContainer =
-    def.type === "object" || def.type === "array" || def.type === "map" || def.type === "set" || def.type === "tuple";
+    def.type === "object" ||
+    def.type === "array" ||
+    def.type === "map" ||
+    def.type === "set" ||
+    def.type === "tuple";
   if (!isContainer) return false; // record 自身无 size checks；非容器保守拒绝
   return checks.every((c: Node) => {
     const d = c._zod?.def ?? c;
     if (hasCustomWhen(d)) return false;
     if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // superRefine（无 fn）可能改写值 → 拒；async refine 非纯
-    if (def.type === "array" && (d.check === "min_length" || d.check === "max_length" || d.check === "length_equals")) {
+    if (
+      def.type === "array" &&
+      (d.check === "min_length" || d.check === "max_length" || d.check === "length_equals")
+    ) {
       return true;
     }
-    if ((def.type === "map" || def.type === "set") && (d.check === "min_size" || d.check === "max_size" || d.check === "size_equals")) {
+    if (
+      (def.type === "map" || def.type === "set") &&
+      (d.check === "min_size" || d.check === "max_size" || d.check === "size_equals")
+    ) {
       return true;
     }
     return false;
@@ -538,7 +551,8 @@ function containerChecksFn(schema: Node): Fn | null {
 function isAsyncFn(fn: unknown): boolean {
   return (
     typeof fn === "function" &&
-    (fn.constructor.name === "AsyncFunction" || (fn as { [Symbol.toStringTag]?: string })[Symbol.toStringTag] === "AsyncFunction")
+    (fn.constructor.name === "AsyncFunction" ||
+      (fn as { [Symbol.toStringTag]?: string })[Symbol.toStringTag] === "AsyncFunction")
   );
 }
 
@@ -564,11 +578,7 @@ function containerChildFn(child: Node, seen: Set<Node>): Fn {
 function buildFn(ctx: CodeCtx): Fn {
   const F = Function;
   const head = ctx.async ? "return async (input) => {" : "return (input) => {";
-  const factory = new F(
-    "INVALID",
-    ...ctx.constNames,
-    `${head}\n${ctx.lines.join("\n")}\n}`,
-  );
+  const factory = new F("INVALID", ...ctx.constNames, `${head}\n${ctx.lines.join("\n")}\n}`);
   const fn = factory(INVALID, ...ctx.constValues) as Fn;
   return ctx.async ? markAsync(fn) : fn;
 }
@@ -641,13 +651,26 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
  * 向 ctx 发射 schema 的校验/CoW 代码，返回输出 accessor（needsValue=false 时可能为 null）。
  * seen：编译期循环引用防护 —— 递归子树不再展开，交官方产物/岛。
  */
-function emitNode(ctx: CodeCtx, schema: Node, accessor: string, needsValue: boolean, seen: Set<Node>): string | null {
+function emitNode(
+  ctx: CodeCtx,
+  schema: Node,
+  accessor: string,
+  needsValue: boolean,
+  seen: Set<Node>,
+): string | null {
   const def = schema._zod.def;
   const t: string = def.type;
   if (needsValue) {
     // 容器（含 optional/nullable 包装链）→ CoW 骨架
     if (
-      (t === "object" || t === "array" || t === "tuple" || t === "record" || t === "map" || t === "set" || t === "optional" || t === "nullable") &&
+      (t === "object" ||
+        t === "array" ||
+        t === "tuple" ||
+        t === "record" ||
+        t === "map" ||
+        t === "set" ||
+        t === "optional" ||
+        t === "nullable") &&
       cowSafeContainerForChild(schema)
     ) {
       return emitBoxedContainer(ctx, schema, accessor, seen);
@@ -700,7 +723,9 @@ function emitCoWObject(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
   seen.add(schema);
 
   // 容器守卫（官方模板原文）
-  ctx.write(`if (typeof ${accessor} !== "object" || ${accessor} === null || Array.isArray(${accessor})) return INVALID;`);
+  ctx.write(
+    `if (typeof ${accessor} !== "object" || ${accessor} === null || Array.isArray(${accessor})) return INVALID;`,
+  );
 
   const shape = def.shape;
   const stringKeys = Object.keys(shape);
@@ -708,14 +733,16 @@ function emitCoWObject(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
   const allKeys: (string | symbol)[] = [...stringKeys, ...symbolKeys];
 
   // __proto__ 形状键：官方同样拒绝（字面量赋值会改原型）
-  if (stringKeys.includes("__proto__")) throw new ZodCompileUnsupportedError('object shape key "__proto__"');
+  if (stringKeys.includes("__proto__"))
+    throw new ZodCompileUnsupportedError('object shape key "__proto__"');
 
   // catchall 模式分类（官方 unknownKeysMode 同款判定）
   let mode: "strip" | "strict" | "loose" = "strip";
   if (def.catchall) {
     const t = def.catchall._zod.def.type;
     if (t === "never") mode = "strict";
-    else if ((t === "unknown" || t === "any") && !def.catchall._zod.def.checks?.length) mode = "loose";
+    else if ((t === "unknown" || t === "any") && !def.catchall._zod.def.checks?.length)
+      mode = "loose";
     else throw new ZodCompileUnsupportedError("schema catchall");
   }
 
@@ -735,7 +762,9 @@ function emitCoWObject(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
 
     // 官方 presence guard：值级快路径无法区分缺席与 undefined 的 required 键
     if (requiresPresence(child)) {
-      ctx.write(`if (!(${typeof key === "symbol" ? keyExpr : keyExpr} in ${accessor})) return INVALID;`);
+      ctx.write(
+        `if (!(${typeof key === "symbol" ? keyExpr : keyExpr} in ${accessor})) return INVALID;`,
+      );
     }
 
     if (isPure(child) && !cowSafeContainerForChild(child)) {
@@ -791,7 +820,9 @@ function emitCoWObject(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
     }
 
     // 脏判定：引用比较。输出 undefined 且键缺席 → 视为未变（stock 亦不物化该键）
-    ctx.write(`if (${outVar} !== ${inVar} && !(${outVar} === undefined && !(${keyExpr} in ${accessor}))) ${dirty} = true;`);
+    ctx.write(
+      `if (${outVar} !== ${inVar} && !(${outVar} === undefined && !(${keyExpr} in ${accessor}))) ${dirty} = true;`,
+    );
     writeback.push({ keyExpr, outVar, inVar });
   }
 
@@ -850,7 +881,9 @@ function emitCoWObject(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
     ctx.indented(() => {
       const known2 = ctx.addConst(new Set(allKeys));
       ctx.write(`for (const k in ${accessor}) if (!${known2}.has(k)) delete out[k];`);
-      ctx.write(`for (const s of Object.getOwnPropertySymbols(${accessor})) if (!${known2}.has(s)) delete out[s];`);
+      ctx.write(
+        `for (const s of Object.getOwnPropertySymbols(${accessor})) if (!${known2}.has(s)) delete out[s];`,
+      );
     });
     ctx.write(`}`);
   }
@@ -978,7 +1011,9 @@ function emitCoWTuple(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<No
   if (rest) {
     ctx.write(`if (${accessor}.length < ${optinStart}) return INVALID;`);
   } else {
-    ctx.write(`if (${accessor}.length < ${optinStart} || ${accessor}.length > ${N}) return INVALID;`);
+    ctx.write(
+      `if (${accessor}.length < ${optinStart} || ${accessor}.length > ${N}) return INVALID;`,
+    );
   }
 
   // 每个固定槽位的产物（编译期生成一次；键位/元素位/值位统一走 childProduct）
@@ -990,7 +1025,12 @@ function emitCoWTuple(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<No
 
   /** 值形态槽（parser/cow/async 产物）：判 INVALID + 引用比较 + 首脏 slice 写回。
    *  eVar=null 表示缺席槽（官方无条件 out[i] = 产出，含 undefined 物化/结构扩展）→ 无条件写。 */
-  const emitValueSlot = (p: ChildProduct, argExpr: string, idxExpr: string, eVar: string | null): void => {
+  const emitValueSlot = (
+    p: ChildProduct,
+    argExpr: string,
+    idxExpr: string,
+    eVar: string | null,
+  ): void => {
     const f = ctx.addConst(p.fn);
     const isA = p.kind === "async";
     if (isA) ctx.async = true;
@@ -1011,7 +1051,12 @@ function emitCoWTuple(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<No
     }
   };
   /** 校验形态槽（validator 产物）：只答成败；缺席时官方照样物化 out[i] = undefined（纯子树输出=输入=undefined） */
-  const emitValidatorSlot = (p: ChildProduct, argExpr: string, idxExpr: string, present: boolean): void => {
+  const emitValidatorSlot = (
+    p: ChildProduct,
+    argExpr: string,
+    idxExpr: string,
+    present: boolean,
+  ): void => {
     const f = ctx.addConst(p.fn);
     const isA = p.kind === "async";
     if (isA) ctx.async = true;
@@ -1180,7 +1225,12 @@ function emitCoWTuple(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<No
  *   C. bare-string 键（z.record(z.string(), v)）：键名恒不变，纯值比较。
  */
 function emitCoWRecord(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
-  const def = schema._zod.def as { keyType: Node; valueType: Node; mode?: string; partial?: boolean };
+  const def = schema._zod.def as {
+    keyType: Node;
+    valueType: Node;
+    mode?: string;
+    partial?: boolean;
+  };
   const childSeen = new Set(seen);
   childSeen.add(schema);
 
@@ -1192,7 +1242,9 @@ function emitCoWRecord(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
   const dirty = ctx.var();
   ctx.write(`let ${out} = ${accessor}, ${dirty} = false;`);
 
-  const keyValues = def.partial ? undefined : (def.keyType._zod as { values?: Set<unknown> }).values;
+  const keyValues = def.partial
+    ? undefined
+    : (def.keyType._zod as { values?: Set<unknown> }).values;
   const loose = def.mode === "loose";
 
   if (keyValues) {
@@ -1253,9 +1305,17 @@ function emitCoWRecord(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
   }
 
   /* ── 路径 B/C：遍历输入键 ── */
-  const keyDef = def.keyType._zod.def as { type: string; format?: string; coerce?: boolean; checks?: unknown[] };
+  const keyDef = def.keyType._zod.def as {
+    type: string;
+    format?: string;
+    coerce?: boolean;
+    checks?: unknown[];
+  };
   const keyIsBareString =
-    keyDef.type === "string" && keyDef.format === undefined && !keyDef.coerce && (keyDef.checks?.length ?? 0) === 0;
+    keyDef.type === "string" &&
+    keyDef.format === undefined &&
+    !keyDef.coerce &&
+    (keyDef.checks?.length ?? 0) === 0;
 
   const propIsEnumerable = ctx.addConst(Object.prototype.propertyIsEnumerable);
 
@@ -1284,7 +1344,9 @@ function emitCoWRecord(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
       ctx.write(`if (k === "__proto__") continue;`);
       ctx.write(`if (!${propIsEnumerable}.call(${accessor}, k)) continue;`);
       ctx.write(`let outKey = ${kAwait}${keyFast}(k);`);
-      ctx.write(`if (outKey === INVALID && typeof k === "string" && ${numeric}.test(k)) outKey = ${kAwait}${keyFast}(Number(k));`);
+      ctx.write(
+        `if (outKey === INVALID && typeof k === "string" && ${numeric}.test(k)) outKey = ${kAwait}${keyFast}(Number(k));`,
+      );
       ctx.write(`if (outKey === INVALID) {`);
       ctx.indented(() => {
         // loose：键 schema 拒绝的键原样保留（值不校验）；{...input} 已带原值，无需写回——官方同款

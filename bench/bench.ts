@@ -146,16 +146,20 @@ function report(label: string, samples: Sample[]): { best: number; median: numbe
   const median = ms[Math.floor(ms.length / 2)]!;
   const heap = samples.reduce((m, s) => Math.max(m, s.heapDelta), 0);
   const retained = samples.reduce((m, s) => Math.max(m, s.retainedDelta), 0);
-  const fmt = (v: number) => (v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`);
+  const fmt = (v: number) =>
+    v > 0 ? `+${(v / 1048576).toFixed(1)}MB` : `${(v / 1048576).toFixed(1)}MB`;
   console.log(
     `  ${label.padEnd(38)} best ${best.toFixed(0).padStart(6)}ms   median ${median
       .toFixed(0)
-      .padStart(6)}ms   分配压力 ${fmt(heap).padStart(10)}   gc后驻留 ${fmt(retained).padStart(10)}`,
+      .padStart(
+        6,
+      )}ms   分配压力 ${fmt(heap).padStart(10)}   gc后驻留 ${fmt(retained).padStart(10)}`,
   );
   return { best, median };
 }
 
-const median = (samples: Sample[]) => samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
+const median = (samples: Sample[]) =>
+  samples.map((s) => s.ms).sort((a, b) => a - b)[Math.floor(PASSES / 2)]!;
 
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
@@ -179,9 +183,7 @@ const s1Stock = measure("stock zod3 parse（深拷贝）", () => AccountsStock.p
 const s1Cow = measure("zc compiled parse（CoW）", () => Compiled.parse(data));
 report("stock zod3 parse（深拷贝）", s1Stock);
 report("zc compiled parse（CoW）", s1Cow);
-console.log(
-  `  → 加速比: ${(median(s1Stock) / median(s1Cow)).toFixed(2)}x（按中位）`,
-);
+console.log(`  → 加速比: ${(median(s1Stock) / median(s1Cow)).toFixed(2)}x（按中位）`);
 
 // arktype 参照线（可选）
 try {
@@ -216,7 +218,7 @@ console.log(`\n═══ S2 CoW 脏负载 · role 带 default · 10% 数据缺 r
   assert.deepStrictEqual(cowOut.data, stockOut.data);
   let injected = 0;
   for (let i = 0; i < N; i++) if (!("role" in dataCow[i]!)) injected++;
-  console.log(`  正确性: deepStrictEqual ✓   缺 role 占比 ${(injected / N * 100).toFixed(1)}%`);
+  console.log(`  正确性: deepStrictEqual ✓   缺 role 占比 ${((injected / N) * 100).toFixed(1)}%`);
 }
 
 const s2Stock = measure("stock zod3 parse（default 场景）", () => AccountsCow.parse(dataCow));

@@ -41,7 +41,11 @@ const out = CUser.parse(missingRole) as any;
 console.log("\ndefault 注入后：");
 console.log("  out !== input        :", out !== missingRole, "（顶层被迫拷贝）");
 console.log("  out.role             :", out.role);
-console.log("  out.address === input.address :", out.address === missingRole.address, "（未脏子树共享）");
+console.log(
+  "  out.address === input.address :",
+  out.address === missingRole.address,
+  "（未脏子树共享）",
+);
 console.log("  'role' in input      :", "role" in missingRole, "（输入无损）");
 
 /* 3) strip 多余键：干净副本，绝不原地删除 ─────────────────────── */

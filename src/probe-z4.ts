@@ -45,10 +45,7 @@ function dumpCheck(chk: any, probeValue: unknown, i: number): void {
   const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(zi) ?? []);
   console.log(`    check[${i}] proto:`, proto.join(","));
   if (typeof zi.run === "function") {
-    console.log(
-      `    check[${i}] run src:`,
-      zi.run.toString().replace(/\s+/g, " ").slice(0, 280),
-    );
+    console.log(`    check[${i}] run src:`, zi.run.toString().replace(/\s+/g, " ").slice(0, 280));
     try {
       const p: any = { value: probeValue, issues: [] };
       zi.run(p, undefined);
@@ -78,8 +75,18 @@ console.log("╔══════════ zod4 结构采样 ═════
 console.log("zod version:", require("zod4/package.json").version);
 console.log("z.email:", typeof (z as any).email, "| z.iso:", typeof (z as any).iso);
 console.log("z.int:", typeof (z as any).int, "| z.set:", typeof z.set, "| z.map:", typeof z.map);
-console.log("z.file:", typeof (z as any).file, "| z.json:", typeof (z as any).json, "| z.custom:", typeof (z as any).custom);
-console.log("string._zod run src:", (z.string() as any)._zod.run.toString().replace(/\s+/g, " ").slice(0, 700));
+console.log(
+  "z.file:",
+  typeof (z as any).file,
+  "| z.json:",
+  typeof (z as any).json,
+  "| z.custom:",
+  typeof (z as any).custom,
+);
+console.log(
+  "string._zod run src:",
+  (z.string() as any)._zod.run.toString().replace(/\s+/g, " ").slice(0, 700),
+);
 
 dump("string", z.string(), "");
 dump("string.min(3)", z.string().min(3), "ab");
@@ -103,27 +110,59 @@ dump("union", z.union([z.string(), z.number()]), true);
 dump("optional", z.string().optional(), 1);
 dump("default", z.string().default("d"), 1);
 dump("catch", z.string().catch("c"), 1);
-dump("transform", z.string().transform((s: string) => s.length), "x");
+dump(
+  "transform",
+  z.string().transform((s: string) => s.length),
+  "x",
+);
 dump("pipe", z.string().pipe(z.number() as any), "x");
-dump("lazy", z.lazy(() => z.string()), 1);
-dump("refine", z.string().refine((v: string) => v.length > 2), "ab");
+dump(
+  "lazy",
+  z.lazy(() => z.string()),
+  1,
+);
+dump(
+  "refine",
+  z.string().refine((v: string) => v.length > 2),
+  "ab",
+);
 dump("map", z.map(z.string(), z.number()), "x");
 dump("set", z.set(z.string()), "x");
-if (typeof (z as any).readonly === "function") dump("readonly", (z.object({ a: z.string() }) as any).readonly(), {});
-if (typeof (z as any).custom === "function") dump("custom", (z as any).custom(() => true), 1);
+if (typeof (z as any).readonly === "function")
+  dump("readonly", (z.object({ a: z.string() }) as any).readonly(), {});
+if (typeof (z as any).custom === "function")
+  dump(
+    "custom",
+    (z as any).custom(() => true),
+    1,
+  );
 {
   const so: any = z.strictObject({ a: z.string() });
   const lo: any = z.looseObject({ a: z.string() });
   console.log("\n=== object modes ===");
-  console.log("  plain object catchall:", JSON.stringify(ser((z.object({ a: z.string() }) as any)._zod.def.catchall)));
+  console.log(
+    "  plain object catchall:",
+    JSON.stringify(ser((z.object({ a: z.string() }) as any)._zod.def.catchall)),
+  );
   console.log("  strictObject catchall:", JSON.stringify(ser(so._zod.def.catchall)));
   console.log("  looseObject catchall:", JSON.stringify(ser(lo._zod.def.catchall)));
-  console.log("  object def keys:", Object.keys((z.object({ a: z.string() }) as any)._zod.def).join(","));
+  console.log(
+    "  object def keys:",
+    Object.keys((z.object({ a: z.string() }) as any)._zod.def).join(","),
+  );
 }
 {
-  const du: any = z.discriminatedUnion("t", [z.object({ t: z.literal("a") }), z.object({ t: z.literal("b") })]);
+  const du: any = z.discriminatedUnion("t", [
+    z.object({ t: z.literal("a") }),
+    z.object({ t: z.literal("b") }),
+  ]);
   console.log("\n=== discriminatedUnion ===");
-  console.log("  def keys:", Object.keys(du._zod.def).join(","), "| discriminator:", du._zod.def.discriminator);
+  console.log(
+    "  def keys:",
+    Object.keys(du._zod.def).join(","),
+    "| discriminator:",
+    du._zod.def.discriminator,
+  );
 }
 
 /* ──────────────────── 行为探针 ──────────────────── */
@@ -137,13 +176,31 @@ console.log("P3 absentOptionalKept(loose):", "a" in (SP.parse({ b: "x" }) as obj
 console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefined }) as object));
 {
   const O = z.object({ x: z.string(), y: z.string() });
-  console.log("P5 outputFollowsShapeOrder:", Object.keys(O.parse({ y: "1", x: "2" })).join("") === "xy");
-  console.log("P5b stripKeepsShapeOrder:", Object.keys(O.parse({ y: "1", extra: 9, x: "2" })).join("") === "xy");
+  console.log(
+    "P5 outputFollowsShapeOrder:",
+    Object.keys(O.parse({ y: "1", x: "2" })).join("") === "xy",
+  );
+  console.log(
+    "P5b stripKeepsShapeOrder:",
+    Object.keys(O.parse({ y: "1", extra: 9, x: "2" })).join("") === "xy",
+  );
 }
 {
   const r = z.strictObject({ a: z.string() }).safeParse({ a: "x", b: 1 } as never);
-  console.log("P6 strictIssue:", r.success ? "ok" : JSON.stringify({ code: r.error.issues[0]!.code, path: r.error.issues[0]!.path, keys: (r.error.issues[0] as any).keys, expected: (r.error.issues[0] as any).expected }));
-  const all = r.success ? [] : r.error.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}`);
+  console.log(
+    "P6 strictIssue:",
+    r.success
+      ? "ok"
+      : JSON.stringify({
+          code: r.error.issues[0]!.code,
+          path: r.error.issues[0]!.path,
+          keys: (r.error.issues[0] as any).keys,
+          expected: (r.error.issues[0] as any).expected,
+        }),
+  );
+  const all = r.success
+    ? []
+    : r.error.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}`);
   console.log("P6b strictAllIssues:", all.join(" | "));
 }
 {
@@ -156,31 +213,69 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
   console.log("P8 z.number() NaN:", r.success ? "accepted" : r.error.issues[0]!.code);
 }
 {
-  const r = z.number().int().default(1.5 as never).safeParse(undefined);
-  console.log("P9 default(1.5) on z.number().int():", r.success ? "short-circuit（默认值不校验）" : "validated（默认值过内层）", r.success ? "" : r.error.issues[0]!.code);
+  const r = z
+    .number()
+    .int()
+    .default(1.5 as never)
+    .safeParse(undefined);
+  console.log(
+    "P9 default(1.5) on z.number().int():",
+    r.success ? "short-circuit（默认值不校验）" : "validated（默认值过内层）",
+    r.success ? "" : r.error.issues[0]!.code,
+  );
 }
 {
   let keys: string[] = [];
-  const r = z.string().transform((v: string, p: any) => {
-    keys = Object.keys(p ?? {});
-    return `${v}!`;
-  }).safeParse("x");
-  console.log("P10 transform payload keys:", keys.join(","), "| result:", r.success ? (r as any).data : "fail");
+  const r = z
+    .string()
+    .transform((v: string, p: any) => {
+      keys = Object.keys(p ?? {});
+      return `${v}!`;
+    })
+    .safeParse("x");
+  console.log(
+    "P10 transform payload keys:",
+    keys.join(","),
+    "| result:",
+    r.success ? (r as any).data : "fail",
+  );
 }
 {
   let arg2: any = null;
-  z.string().refine(((_v: unknown, p: any) => {
-    arg2 = { keys: Object.keys(p ?? {}), hasIssues: Array.isArray(p?.issues), addIssue: typeof p?.addIssue === "function" };
-    return true;
-  }) as any).safeParse("x");
+  z.string()
+    .refine(((_v: unknown, p: any) => {
+      arg2 = {
+        keys: Object.keys(p ?? {}),
+        hasIssues: Array.isArray(p?.issues),
+        addIssue: typeof p?.addIssue === "function",
+      };
+      return true;
+    }) as any)
+    .safeParse("x");
   console.log("P11 refine arg2:", JSON.stringify(arg2));
-  const rf = z.string().refine((v: string) => v.length > 2).safeParse("ab");
-  console.log("P11b refine fail:", rf.success ? "ok" : JSON.stringify({ code: rf.error.issues[0]!.code }));
-  console.log("P11c .check API:", typeof (z.string() as any).check, "| .superRefine:", typeof (z.string() as any).superRefine);
+  const rf = z
+    .string()
+    .refine((v: string) => v.length > 2)
+    .safeParse("ab");
+  console.log(
+    "P11b refine fail:",
+    rf.success ? "ok" : JSON.stringify({ code: rf.error.issues[0]!.code }),
+  );
+  console.log(
+    "P11c .check API:",
+    typeof (z.string() as any).check,
+    "| .superRefine:",
+    typeof (z.string() as any).superRefine,
+  );
 }
 {
   const cs: any = z.string().catch("fb");
-  console.log("P12 catch def keys:", Object.keys(cs._zod.def).join(","), "| catchValue typeof:", typeof cs._zod.def.catchValue);
+  console.log(
+    "P12 catch def keys:",
+    Object.keys(cs._zod.def).join(","),
+    "| catchValue typeof:",
+    typeof cs._zod.def.catchValue,
+  );
   let args: any = null;
   const cs2: any = z.string().catch((a: any) => {
     args = a === undefined ? "undefined" : Object.keys(a).join(",");
@@ -188,7 +283,12 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
   });
   const r = cs2.safeParse(123);
   console.log("P12b catch fn args:", args, "| data:", r.success ? (r as any).data : "fail");
-  const thrower: any = z.string().refine(() => { throw new Error("boom"); }).catch("fb3");
+  const thrower: any = z
+    .string()
+    .refine(() => {
+      throw new Error("boom");
+    })
+    .catch("fb3");
   try {
     const rt = thrower.safeParse("x");
     console.log("P12c catch swallows throw:", rt.success ? (rt as any).data : "fail");
@@ -196,7 +296,10 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
     console.log("P12c catch swallows throw: NO — 异常向上传播:", e.message);
   }
 }
-console.log("P13 pipe def keys:", Object.keys((z.string().pipe(z.number() as any) as any)._zod.def).join(","));
+console.log(
+  "P13 pipe def keys:",
+  Object.keys((z.string().pipe(z.number() as any) as any)._zod.def).join(","),
+);
 {
   const em: any = (z as any).email();
   console.log("P14 email check:", JSON.stringify(ser(em._zod.def.checks?.[0]?._zod?.def)));
@@ -205,20 +308,40 @@ console.log("P13 pipe def keys:", Object.keys((z.string().pipe(z.number() as any
 }
 {
   const uf = z.union([z.string(), z.number()]).safeParse(true);
-  console.log("P15 union fail codes:", uf.success ? "ok" : uf.error.issues.map((i: any) => i.code).join(","));
+  console.log(
+    "P15 union fail codes:",
+    uf.success ? "ok" : uf.error.issues.map((i: any) => i.code).join(","),
+  );
 }
-console.log("P16 record number key {1:'a'}:", z.record(z.number(), z.string()).safeParse({ 1: "a" } as never).success);
+console.log(
+  "P16 record number key {1:'a'}:",
+  z.record(z.number(), z.string()).safeParse({ 1: "a" } as never).success,
+);
 {
   const tr: any = z.tuple([z.string()], z.number());
-  console.log("P17 tuple def keys:", Object.keys(tr._zod.def).join(","), "| rest:", JSON.stringify(ser(tr._zod.def.rest)));
+  console.log(
+    "P17 tuple def keys:",
+    Object.keys(tr._zod.def).join(","),
+    "| rest:",
+    JSON.stringify(ser(tr._zod.def.rest)),
+  );
 }
 {
   const asyncS: any = z.string().refine(async () => true);
-  console.log("P18 async flag:", asyncS._zod.async, "| sync string:", (z.string() as any)._zod.async);
+  console.log(
+    "P18 async flag:",
+    asyncS._zod.async,
+    "| sync string:",
+    (z.string() as any)._zod.async,
+  );
 }
 {
   const ddef: any = (z.string().default("d") as any)._zod.def;
-  console.log("P19 default defaultValue:", typeof ddef.defaultValue, JSON.stringify(ser(ddef.defaultValue)));
+  console.log(
+    "P19 default defaultValue:",
+    typeof ddef.defaultValue,
+    JSON.stringify(ser(ddef.defaultValue)),
+  );
 }
 {
   const inter = z.intersection(z.object({ p: z.string() }), z.object({ q: z.number() }));
@@ -240,7 +363,14 @@ console.log("P16 record number key {1:'a'}:", z.record(z.number(), z.string()).s
   const zs: any = z.string();
   const p = { value: "hi", issues: [] as any[] };
   const ret = zs._zod.run(p, undefined);
-  console.log("P23 run returns payload itself:", ret === p, "| ret.value:", ret.value, "| issues:", ret.issues?.length);
+  console.log(
+    "P23 run returns payload itself:",
+    ret === p,
+    "| ret.value:",
+    ret.value,
+    "| issues:",
+    ret.issues?.length,
+  );
 }
 /* ──────────────────── 第二轮补充探针 ──────────────────── */
 console.log("\n╔══════════ 补充探针 ══════════╗");
@@ -251,10 +381,21 @@ console.log("\n╔══════════ 补充探针 ══════
     if (c?.addIssue) c.addIssue({ code: "custom", message: "x" });
   });
   const r = s.safeParse("abc");
-  console.log("S1 .check() ctx keys:", ctxKeys.join(","), "| result:", r.success ? "ok" : r.error.issues[0]!.code);
+  console.log(
+    "S1 .check() ctx keys:",
+    ctxKeys.join(","),
+    "| result:",
+    r.success ? "ok" : r.error.issues[0]!.code,
+  );
   console.log("S1b .check() check def:", JSON.stringify(ser(s._zod.def.checks?.[0])));
-  console.log("S1c email() top-level def:", JSON.stringify(ser((z as any).email()._zod.def)).slice(0, 300));
-  console.log("S1d iso.datetime() def:", JSON.stringify(ser((z as any).iso.datetime()._zod.def)).slice(0, 300));
+  console.log(
+    "S1c email() top-level def:",
+    JSON.stringify(ser((z as any).email()._zod.def)).slice(0, 300),
+  );
+  console.log(
+    "S1d iso.datetime() def:",
+    JSON.stringify(ser((z as any).iso.datetime()._zod.def)).slice(0, 300),
+  );
 }
 {
   const zi: any = (z as any).int();
@@ -264,9 +405,17 @@ console.log("\n╔══════════ 补充探针 ══════
 }
 {
   const uf = z.union([z.string(), z.number()]).safeParse(true);
-  console.log("S3 union fail codes:", uf.success ? "ok" : uf.error.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}`).join(" | "));
+  console.log(
+    "S3 union fail codes:",
+    uf.success
+      ? "ok"
+      : uf.error.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}`).join(" | "),
+  );
 }
-console.log("S4 record number key {1:'a'}:", z.record(z.number(), z.string()).safeParse({ 1: "a" } as never).success);
+console.log(
+  "S4 record number key {1:'a'}:",
+  z.record(z.number(), z.string()).safeParse({ 1: "a" } as never).success,
+);
 {
   const asyncS: any = z.string().refine(async () => true);
   console.log("S5 async flag:", asyncS._zod.async, "| sync:", (z.string() as any)._zod.async);
@@ -274,23 +423,41 @@ console.log("S4 record number key {1:'a'}:", z.record(z.number(), z.string()).sa
 {
   const inter = z.intersection(z.object({ p: z.string() }), z.object({ q: z.number() }));
   const r: any = inter.safeParse({ p: "a", q: 1 });
-  console.log("S6 intersection objects:", r.success ? JSON.stringify(r.data) : "fail", r.success ? "" : r.error.issues[0]!.code);
+  console.log(
+    "S6 intersection objects:",
+    r.success ? JSON.stringify(r.data) : "fail",
+    r.success ? "" : r.error.issues[0]!.code,
+  );
 }
 {
   const cleanIn = { a: "x", b: 1 };
   const cleanOut: any = z.object({ a: z.string(), b: z.number() }).parse(cleanIn);
   console.log("S7 stock clean parse new object:", cleanOut !== cleanIn);
   const arr: any = z.array(z.string()).parse(["a"]);
-  console.log("S7b stock clean array parse new array:", arr !== (cleanIn && ["a"] ? arr : null) ? "(新数组)" : "");
+  console.log(
+    "S7b stock clean array parse new array:",
+    arr !== (cleanIn && ["a"] ? arr : null) ? "(新数组)" : "",
+  );
 }
 {
   const r = z.object({ a: z.string(), b: z.number() }).safeParse({ a: 1, b: "x" });
-  console.log("S8 multi-invalid issue count:", r.success ? 0 : r.error.issues.length, r.success ? "" : r.error.issues.map((i: any) => i.code).join(","));
+  console.log(
+    "S8 multi-invalid issue count:",
+    r.success ? 0 : r.error.issues.length,
+    r.success ? "" : r.error.issues.map((i: any) => i.code).join(","),
+  );
 }
 {
   const p = { value: "hi", issues: [] as any[] };
   const ret = (z.string() as any)._zod.run(p, undefined);
-  console.log("S9 run returns payload itself:", ret === p, "| ret.value:", JSON.stringify(ret.value), "| issues:", ret.issues?.length);
+  console.log(
+    "S9 run returns payload itself:",
+    ret === p,
+    "| ret.value:",
+    JSON.stringify(ret.value),
+    "| issues:",
+    ret.issues?.length,
+  );
 }
 {
   const r = z.array(z.number()).safeParse([1, "a", "b"] as never);
@@ -299,7 +466,12 @@ console.log("S4 record number key {1:'a'}:", z.record(z.number(), z.string()).sa
 {
   const LO = z.looseObject({ a: z.string() });
   const out: any = LO.parse({ zz: 1, a: "x" });
-  console.log("S11 loose extras kept:", Object.keys(out).join(","), "| same ref:", out === ({ zz: 1, a: "x" } as any));
+  console.log(
+    "S11 loose extras kept:",
+    Object.keys(out).join(","),
+    "| same ref:",
+    out === ({ zz: 1, a: "x" } as any),
+  );
 }
 {
   // optional 包 default 的顺序语义 & undefined 输入
@@ -310,13 +482,19 @@ console.log("S4 record number key {1:'a'}:", z.record(z.number(), z.string()).sa
 }
 {
   // number_format safeint 边界
-  const r1 = z.number().int().safeParse(Number.MAX_SAFE_INTEGER + 1);
+  const r1 = z
+    .number()
+    .int()
+    .safeParse(Number.MAX_SAFE_INTEGER + 1);
   console.log("S13 .int() rejects 2^53:", !r1.success, r1.success ? "" : r1.error.issues[0]!.code);
 }
 {
   // datetime check 结构（iso.datetime 参数）
   const dt2: any = (z as any).iso.datetime({ offset: true, precision: 3 });
-  console.log("S14 datetime(offset,precision) check:", JSON.stringify(ser(dt2._zod.def.checks?.[0]?._zod?.def)).slice(0, 220));
+  console.log(
+    "S14 datetime(offset,precision) check:",
+    JSON.stringify(ser(dt2._zod.def.checks?.[0]?._zod?.def)).slice(0, 220),
+  );
 }
 {
   // union 成功分支的 issue 截断（信息性）

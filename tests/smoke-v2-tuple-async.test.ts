@@ -108,7 +108,10 @@ head("tuple + rest → 逐槽引用比较");
   const r = C.safeParse(input);
   assert.ok(r.success && (r.data as unknown[]) === input, "rest 全干净 → 原引用");
   // rest 元素转换（number → string 键重试不适用；用 rest schema transform）
-  const S2 = z.tuple([z.string()], z.string().transform((s) => s.length));
+  const S2 = z.tuple(
+    [z.string()],
+    z.string().transform((s) => s.length),
+  );
   const C2 = compileV2(S2);
   const input2 = ["a", "bb", "ccc"] as unknown[];
   const stock2 = S2.safeParse(input2 as never);
@@ -141,10 +144,9 @@ head("tuple + refine（容器自身 checks 双路径）");
   assert.equal(rb.success, stockB.success, "checks 失败一致");
   assert.ok(!rb.success);
   // 元素脏 + checks 作用于重建输出
-  const S2 = z.tuple([z.string(), z.string().transform((s) => `${s}!`)]).refine(
-    (t) => (t[1] as string).endsWith("!"),
-    { error: "need bang" },
-  );
+  const S2 = z
+    .tuple([z.string(), z.string().transform((s) => `${s}!`)])
+    .refine((t) => (t[1] as string).endsWith("!"), { error: "need bang" });
   const C2 = compileV2(S2);
   const r2 = C2.safeParse(["x", "y"] as unknown[]);
   assert.ok(r2.success);
@@ -198,7 +200,8 @@ head("tuple 短输入落入 defaulted 槽区（optinStart < L < optoutStart）")
     const stock = S2.safeParse(inp as never);
     const r = C2.safeParse(inp);
     assert.equal(r.success, stock.success, `L=${inp.length} 成败一致`);
-    if (r.success && stock.success) assert.deepEqual(r.data, stock.data, `L=${inp.length} 输出一致`);
+    if (r.success && stock.success)
+      assert.deepEqual(r.data, stock.data, `L=${inp.length} 输出一致`);
   }
   ok("defaulted 槽区四态一致");
 }
@@ -306,11 +309,16 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   const C = compileV2(S);
   assert.ok(C.async, "async 容器 checks → async 骨架");
   const r1 = await C.safeParseAsync(["a", "b"]);
-  assert.ok(r1.success && (r1.data as never) === (await Promise.resolve(["a", "b"])) || r1.success);
+  assert.ok(
+    (r1.success && (r1.data as never) === (await Promise.resolve(["a", "b"]))) || r1.success,
+  );
   const r2 = await C.safeParseAsync(["a"]);
   assert.ok(!r2.success, "async min 谓词失败");
   // map 值 async
-  const S3 = z.map(z.string(), z.number().transform(async (n) => n * 2));
+  const S3 = z.map(
+    z.string(),
+    z.number().transform(async (n) => n * 2),
+  );
   const C3 = compileV2(S3);
   const m = new Map([["k", 21]]);
   const r3 = await C3.safeParseAsync(m);
@@ -325,7 +333,10 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   assert.ok(r4.success);
   assert.deepEqual([...(r4.data as Set<string>)], ["A"]);
   // record 值 async
-  const S5 = z.record(z.string(), z.number().transform(async (n) => n + 1));
+  const S5 = z.record(
+    z.string(),
+    z.number().transform(async (n) => n + 1),
+  );
   const C5 = compileV2(S5);
   const rec = { a: 1 };
   const r5 = await C5.safeParseAsync(rec);

@@ -12,7 +12,11 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const input = { a: "abc", b: "u@e.com", c: "x" };
   const out = C.parse(input);
   console.log("── 基础 object ──");
-  console.log(`  骨架源码:\n${C.code!.split("\n").map((l) => `    ${l}`).join("\n")}`);
+  console.log(
+    `  骨架源码:\n${C.code!.split("\n")
+      .map((l) => `    ${l}`)
+      .join("\n")}`,
+  );
   console.log("  干净输入 out === input:", out === input, "（期望 true）");
   assert.equal(out, input);
 
@@ -20,7 +24,12 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const bad = C.safeParse({ a: "toolong", b: "u@e.com", c: "x" });
   assert.equal(bad.success, false);
   if (!bad.success) {
-    console.log("  失败路径 issues:", bad.error.issues.length, "path:", JSON.stringify(bad.error.issues[0]!.path));
+    console.log(
+      "  失败路径 issues:",
+      bad.error.issues.length,
+      "path:",
+      JSON.stringify(bad.error.issues[0]!.path),
+    );
   }
 
   // validate：官方 assertOnly 整树产物
@@ -59,7 +68,13 @@ import { compileV2 } from "../src/index-z4-v2.js";
   const outDirty = C.parse(dirty) as { name: string; role: string };
   console.log("\n── default 注入 ──");
   console.log("  干净 out === clean:", outClean === clean, "（期望 true）");
-  console.log("  脏 out.role:", outDirty.role, " out === dirty:", outDirty === dirty, "（期望 false）");
+  console.log(
+    "  脏 out.role:",
+    outDirty.role,
+    " out === dirty:",
+    outDirty === dirty,
+    "（期望 false）",
+  );
   console.log("  dirty 未失真:", !("role" in dirty));
   assert.equal(outClean, clean);
   assert.equal(outDirty.role, "b");
@@ -187,7 +202,13 @@ import { compileV2 } from "../src/index-z4-v2.js";
 
   const Async = z.string().refine(async (s) => s.length > 0);
   const CA = compileV2(Async);
-  console.log("  async refine → stock:", CA.stock, "async 通道:", CA.async, "（Task 6 起不再整树降级，期望 stock=false async=true）");
+  console.log(
+    "  async refine → stock:",
+    CA.stock,
+    "async 通道:",
+    CA.async,
+    "（Task 6 起不再整树降级，期望 stock=false async=true）",
+  );
   assert.equal(CA.stock, false);
   assert.equal(CA.async, true);
   // sync API 对 async 骨架抛 $ZodAsyncError（官方同款语义）

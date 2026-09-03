@@ -40,21 +40,43 @@ function makeRng(seed: number): RNG {
 
 const ABSENT = Symbol("absent");
 
-const STRINGS = ["", "a", "ab", "abc", "abcd", "hello", "AB1", "a@b.co", "  pad  ", "aaaab", "forbidden", "x".repeat(12)] as const;
+const STRINGS = [
+  "",
+  "a",
+  "ab",
+  "abc",
+  "abcd",
+  "hello",
+  "AB1",
+  "a@b.co",
+  "  pad  ",
+  "aaaab",
+  "forbidden",
+  "x".repeat(12),
+] as const;
 const NON_STRINGS = [1, null, true, undefined, 4.5] as const;
 const NUMBERS = [0, 1, 2, 3, 7, 10, -1, -7, 4.5, 100, NaN, "5", null] as const;
 const BOOLEANS = [true, false, "true", 0, null] as const;
 const BIGINTS = [1n, 0n, 99n, -5n, 1, "x", null] as const;
-const DATES = [new Date(0), new Date(1700000000000), new Date(NaN), "not a date", 123, null] as const;
+const DATES = [
+  new Date(0),
+  new Date(1700000000000),
+  new Date(NaN),
+  "not a date",
+  123,
+  null,
+] as const;
 
 function repr(v: unknown): string {
   try {
-    return JSON.stringify(v, (_k, x) => {
-      if (typeof x === "bigint") return `${x}n`;
-      if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
-      if (typeof x === "symbol") return String(x);
-      return x;
-    }) ?? String(v);
+    return (
+      JSON.stringify(v, (_k, x) => {
+        if (typeof x === "bigint") return `${x}n`;
+        if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
+        if (typeof x === "symbol") return String(x);
+        return x;
+      }) ?? String(v)
+    );
   } catch {
     return String(v);
   }
@@ -205,7 +227,9 @@ function bWrap(rng: RNG, inner: Built): Built {
   }
   if (which === 3) {
     return {
-      schema: inner.schema.refine((v: unknown) => v !== "forbidden", { error: "value is forbidden" }),
+      schema: inner.schema.refine((v: unknown) => v !== "forbidden", {
+        error: "value is forbidden",
+      }),
       desc: `${inner.desc}.refine(≠forbidden)`,
       gen: inner.gen,
     };
@@ -381,14 +405,21 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         console.log("element null parse:", JSON.stringify(el.safeParse(null)));
         console.log("element null parse (2nd):", JSON.stringify(el.safeParse(null)));
       }
-      console.log("stock:", JSON.stringify(built.schema.safeParse(input as never), (_k, v) => (typeof v === "bigint" ? `${v}n` : v instanceof Date ? v.toISOString() : v)));
+      console.log(
+        "stock:",
+        JSON.stringify(built.schema.safeParse(input as never), (_k, v) =>
+          typeof v === "bigint" ? `${v}n` : v instanceof Date ? v.toISOString() : v,
+        ),
+      );
     }
 
     let stock: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
     let stockThrew: Error | null = null;
     try {
       const r = built.schema.safeParse(input as never);
-      stock = r.success ? { success: true, data: r.data } : { success: false, error: r.error as never };
+      stock = r.success
+        ? { success: true, data: r.data }
+        : { success: false, error: r.error as never };
     } catch (e) {
       stockThrew = e as Error;
     }
@@ -397,7 +428,9 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     let oursThrew: Error | null = null;
     try {
       const r = compiled.safeParse(input);
-      ours = r.success ? { success: true, data: r.data } : { success: false, error: r.error as never };
+      ours = r.success
+        ? { success: true, data: r.data }
+        : { success: false, error: r.error as never };
     } catch (e) {
       oursThrew = e as Error;
     }
@@ -443,18 +476,28 @@ for (let seed = 1; seed <= SEEDS; seed++) {
   }
 }
 
-
 /** 失败诊断用：def 树轻量转储（截断） */
 function defRepr(schema: any, depth = 0): string {
   try {
     if (depth > 4) return "…";
     const d = schema?._zod?.def ?? {};
     const parts: string[] = [d.type ?? d.check ?? "?"];
-    for (const k of ["innerType", "element", "in", "out", "keyType", "valueType", "left", "right"]) {
+    for (const k of [
+      "innerType",
+      "element",
+      "in",
+      "out",
+      "keyType",
+      "valueType",
+      "left",
+      "right",
+    ]) {
       if (d[k]) parts.push(`${k}=${defRepr(d[k], depth + 1)}`);
     }
-    if (d.options) parts.push(`options=[${d.options.map((o: any) => defRepr(o, depth + 1)).join(",")}]`);
-    if (d.checks) parts.push(`checks=[${d.checks.map((c: any) => (c?._zod?.def ?? c)?.check).join(",")}]`);
+    if (d.options)
+      parts.push(`options=[${d.options.map((o: any) => defRepr(o, depth + 1)).join(",")}]`);
+    if (d.checks)
+      parts.push(`checks=[${d.checks.map((c: any) => (c?._zod?.def ?? c)?.check).join(",")}]`);
     return parts.join("(") + ")".repeat(parts.length - 1);
   } catch {
     return "?";

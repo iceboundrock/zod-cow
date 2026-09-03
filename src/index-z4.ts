@@ -28,9 +28,7 @@ export type DeepReadonly<T> = T extends (infer U)[]
         ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
         : T;
 
-export type SafeParseResult<T> =
-  | { success: true; data: T }
-  | { success: false; error: ZcError };
+export type SafeParseResult<T> = { success: true; data: T } | { success: false; error: ZcError };
 
 export interface Compiled<T extends z.ZodType> {
   /** 原始 zod4 schema（仍可用作类型推断 / .extend / stock parse） */

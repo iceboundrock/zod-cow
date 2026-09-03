@@ -75,7 +75,16 @@ function genericCheck(chk: any): (v: any, ctx: Ctx) => any {
           message: iss.message ?? `Invalid input (${iss.code ?? "custom"}).`,
           path: [...ctx.path, ...((iss as any).path ?? [])],
         };
-        for (const k of ["minimum", "maximum", "multipleOf", "keys", "expected", "received", "format", "validation"]) {
+        for (const k of [
+          "minimum",
+          "maximum",
+          "multipleOf",
+          "keys",
+          "expected",
+          "received",
+          "format",
+          "validation",
+        ]) {
           if (iss[k] !== undefined) out[k] = iss[k];
         }
         ctx.issues.push(out);
@@ -215,7 +224,9 @@ function numberStep(chk: any): NumStep {
           pushIssue(
             ctx,
             "too_small",
-            inc ? `Too small: expected number to be >=${n}` : `Too small: expected number to be >${n}`,
+            inc
+              ? `Too small: expected number to be >=${n}`
+              : `Too small: expected number to be >${n}`,
             { minimum: n, origin: "number", inclusive: inc },
           );
           return FAILED;
@@ -251,11 +262,16 @@ function numberStep(chk: any): NumStep {
             return FAILED;
           }
           if (v > Number.MAX_SAFE_INTEGER || v < Number.MIN_SAFE_INTEGER) {
-            pushIssue(ctx, "too_big", `Too big: expected number to be <=${Number.MAX_SAFE_INTEGER}`, {
-              maximum: Number.MAX_SAFE_INTEGER,
-              origin: "number",
-              inclusive: true,
-            });
+            pushIssue(
+              ctx,
+              "too_big",
+              `Too big: expected number to be <=${Number.MAX_SAFE_INTEGER}`,
+              {
+                maximum: Number.MAX_SAFE_INTEGER,
+                origin: "number",
+                inclusive: true,
+              },
+            );
             return FAILED;
           }
           return v;
@@ -362,13 +378,20 @@ function makeLiteral(def: any): Validator {
   const values: unknown[] = def.values ?? [];
   const set = new Set<unknown>(values);
   const hasNaN = values.some((v) => typeof v === "number" && Number.isNaN(v));
-  const expected = values.map((v) => (typeof v === "bigint" ? `${v}n` : JSON.stringify(v) ?? String(v))).join(" | ");
+  const expected = values
+    .map((v) => (typeof v === "bigint" ? `${v}n` : (JSON.stringify(v) ?? String(v))))
+    .join(" | ");
   return (data, ctx) => {
     if (set.has(data) || (hasNaN && Number.isNaN(data))) return data;
-    pushIssue(ctx, "invalid_value", `Invalid input: expected ${expected}, received ${parsedType(data)}`, {
-      expected: String(values[0]),
-      received: parsedType(data),
-    });
+    pushIssue(
+      ctx,
+      "invalid_value",
+      `Invalid input: expected ${expected}, received ${parsedType(data)}`,
+      {
+        expected: String(values[0]),
+        received: parsedType(data),
+      },
+    );
     return FAILED;
   };
 }
@@ -378,9 +401,14 @@ function makeEnum(def: any): Validator {
   const expected = [...set].map((v) => JSON.stringify(v)).join(" | ");
   return (data, ctx) => {
     if (set.has(data)) return data;
-    pushIssue(ctx, "invalid_value", `Invalid input: expected ${expected}, received ${typeof data === "string" ? JSON.stringify(data) : parsedType(data)}`, {
-      received: String(data),
-    });
+    pushIssue(
+      ctx,
+      "invalid_value",
+      `Invalid input: expected ${expected}, received ${typeof data === "string" ? JSON.stringify(data) : parsedType(data)}`,
+      {
+        received: String(data),
+      },
+    );
     return FAILED;
   };
 }
@@ -507,9 +535,14 @@ function makeObject(def: any): Validator {
         extras.push(k);
       }
       if (extras.length > 0) {
-        pushIssue(ctx, "unrecognized_keys", `Unrecognized key(s) in object: ${extras.map((k) => `'${k}'`).join(", ")}`, {
-          keys: extras,
-        });
+        pushIssue(
+          ctx,
+          "unrecognized_keys",
+          `Unrecognized key(s) in object: ${extras.map((k) => `'${k}'`).join(", ")}`,
+          {
+            keys: extras,
+          },
+        );
         return FAILED;
       }
     } else if (mode === 3) {
@@ -585,12 +618,17 @@ function arrayStep(chk: any): ArrStep {
       const n: number = c.length;
       return (v, ctx) => {
         if (v.length !== n) {
-          pushIssue(ctx, v.length < n ? "too_small" : "too_big", `Invalid input: expected array to have exactly ${n} item(s)`, {
-            minimum: n,
-            maximum: n,
-            origin: "array",
-            inclusive: true,
-          });
+          pushIssue(
+            ctx,
+            v.length < n ? "too_small" : "too_big",
+            `Invalid input: expected array to have exactly ${n} item(s)`,
+            {
+              minimum: n,
+              maximum: n,
+              origin: "array",
+              inclusive: true,
+            },
+          );
           return FAILED;
         }
         return v;
@@ -739,9 +777,14 @@ function makeRecord(def: any): Validator {
         if (hasOwn(data, k) && !declaredSet.has(k)) extras.push(k);
       }
       if (extras.length > 0) {
-        pushIssue(ctx, "unrecognized_keys", `Unrecognized key(s) in record: ${extras.map((k) => `'${k}'`).join(", ")}`, {
-          keys: extras,
-        });
+        pushIssue(
+          ctx,
+          "unrecognized_keys",
+          `Unrecognized key(s) in record: ${extras.map((k) => `'${k}'`).join(", ")}`,
+          {
+            keys: extras,
+          },
+        );
         return FAILED;
       }
       return out;
@@ -823,21 +866,29 @@ function makeMap(def: any): Validator {
       const n = c.size ?? c.minimum;
       return (v: Map<any, any>, ctx: Ctx) => {
         if (v.size < n) {
-          pushIssue(ctx, "too_small", `Too small: expected map to have >=${n} entries`, { minimum: n, origin: "map", inclusive: true });
+          pushIssue(ctx, "too_small", `Too small: expected map to have >=${n} entries`, {
+            minimum: n,
+            origin: "map",
+            inclusive: true,
+          });
           return FAILED;
         }
         return v;
-        };
+      };
     }
     if (c.check === "max_size" || c.check === "max_length") {
       const n = c.size ?? c.maximum;
       return (v: Map<any, any>, ctx: Ctx) => {
         if (v.size > n) {
-          pushIssue(ctx, "too_big", `Too big: expected map to have <=${n} entries`, { maximum: n, origin: "map", inclusive: true });
+          pushIssue(ctx, "too_big", `Too big: expected map to have <=${n} entries`, {
+            maximum: n,
+            origin: "map",
+            inclusive: true,
+          });
           return FAILED;
         }
         return v;
-        };
+      };
     }
     return genericCheck(chk);
   });
@@ -883,31 +934,44 @@ function makeSet(def: any): Validator {
       const n = c.size ?? c.minimum;
       return (v: Set<any>, ctx: Ctx) => {
         if (v.size < n) {
-          pushIssue(ctx, "too_small", `Too small: expected set to have >=${n} entries`, { minimum: n, origin: "set", inclusive: true });
+          pushIssue(ctx, "too_small", `Too small: expected set to have >=${n} entries`, {
+            minimum: n,
+            origin: "set",
+            inclusive: true,
+          });
           return FAILED;
         }
         return v;
-        };
+      };
     }
     if (c.check === "max_size" || c.check === "max_length") {
       const n = c.size ?? c.maximum;
       return (v: Set<any>, ctx: Ctx) => {
         if (v.size > n) {
-          pushIssue(ctx, "too_big", `Too big: expected set to have <=${n} entries`, { maximum: n, origin: "set", inclusive: true });
+          pushIssue(ctx, "too_big", `Too big: expected set to have <=${n} entries`, {
+            maximum: n,
+            origin: "set",
+            inclusive: true,
+          });
           return FAILED;
         }
         return v;
-        };
+      };
     }
     if (c.check === "size_equals" || c.check === "length_equals") {
       const n = c.size ?? c.length;
       return (v: Set<any>, ctx: Ctx) => {
         if (v.size !== n) {
-          pushIssue(ctx, v.size < n ? "too_small" : "too_big", `Invalid input: expected set to have exactly ${n} entries`, { minimum: n, maximum: n, origin: "set", inclusive: true });
+          pushIssue(
+            ctx,
+            v.size < n ? "too_small" : "too_big",
+            `Invalid input: expected set to have exactly ${n} entries`,
+            { minimum: n, maximum: n, origin: "set", inclusive: true },
+          );
           return FAILED;
         }
         return v;
-        };
+      };
     }
     return genericCheck(chk);
   });
@@ -1260,7 +1324,11 @@ export function isStaticPure(schema: any, seen: Set<object> = new Set()): boolea
       for (const k of Object.keys(def.shape)) {
         if (!isStaticPure(def.shape[k], seen)) return false;
       }
-      if (def.catchall && getDef(def.catchall)?.type !== "never" && getDef(def.catchall)?.type !== "unknown") {
+      if (
+        def.catchall &&
+        getDef(def.catchall)?.type !== "never" &&
+        getDef(def.catchall)?.type !== "unknown"
+      ) {
         return isStaticPure(def.catchall, seen);
       }
       return true;
@@ -1268,7 +1336,10 @@ export function isStaticPure(schema: any, seen: Set<object> = new Set()): boolea
     case "array":
       return checksPure && isStaticPure(def.element, seen);
     case "tuple":
-      return (def.items ?? []).every((it: any) => isStaticPure(it, seen)) && (!def.rest || isStaticPure(def.rest, seen));
+      return (
+        (def.items ?? []).every((it: any) => isStaticPure(it, seen)) &&
+        (!def.rest || isStaticPure(def.rest, seen))
+      );
     case "record":
     case "map":
       return isStaticPure(def.keyType, seen) && isStaticPure(def.valueType, seen);

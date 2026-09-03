@@ -9,7 +9,7 @@
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
-import { compile, } from "../src/index.js";
+import { compile } from "../src/index.js";
 
 /* ─────────────────────────── 确定性 RNG ─────────────────────────── */
 
@@ -41,21 +41,43 @@ function makeRng(seed: number): RNG {
 
 const ABSENT = Symbol("absent");
 
-const STRINGS = ["", "a", "ab", "abc", "abcd", "hello", "AB1", "a@b.co", "  pad  ", "aaaab", "forbidden", "x".repeat(12)] as const;
+const STRINGS = [
+  "",
+  "a",
+  "ab",
+  "abc",
+  "abcd",
+  "hello",
+  "AB1",
+  "a@b.co",
+  "  pad  ",
+  "aaaab",
+  "forbidden",
+  "x".repeat(12),
+] as const;
 const NON_STRINGS = [1, null, true, undefined, 4.5] as const;
 const NUMBERS = [0, 1, 2, 3, 7, 10, -1, -7, 4.5, 100, NaN, "5", null] as const;
 const BOOLEANS = [true, false, "true", 0, null] as const;
 const BIGINTS = [1n, 0n, 99n, -5n, 1, "x", null] as const;
-const DATES = [new Date(0), new Date(1700000000000), new Date(NaN), "not a date", 123, null] as const;
+const DATES = [
+  new Date(0),
+  new Date(1700000000000),
+  new Date(NaN),
+  "not a date",
+  123,
+  null,
+] as const;
 
 function repr(v: unknown): string {
   try {
-    return JSON.stringify(v, (_k, x) => {
-      if (typeof x === "bigint") return `${x}n`;
-      if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
-      if (typeof x === "symbol") return String(x);
-      return x;
-    }) ?? String(v);
+    return (
+      JSON.stringify(v, (_k, x) => {
+        if (typeof x === "bigint") return `${x}n`;
+        if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
+        if (typeof x === "symbol") return String(x);
+        return x;
+      }) ?? String(v)
+    );
   } catch {
     return String(v);
   }
@@ -312,11 +334,9 @@ function bUnion(rng: RNG, _depth: number): Built {
     kinds.push(b.desc);
   }
   return {
-    schema: z.union(branches.map((b) => b.schema) as [
-      z.ZodTypeAny,
-      z.ZodTypeAny,
-      ...z.ZodTypeAny[],
-    ]),
+    schema: z.union(
+      branches.map((b) => b.schema) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]],
+    ),
     desc: `union(${kinds.join(", ")})`,
     gen: (r) => r.pick(branches).gen(r),
   };
@@ -430,7 +450,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
 console.log(`differential: ${total} cases | success=${bothOk} fail=${bothFail}`);
 if (refSharedSuccess > 0) {
   console.log(
-    `CoW 顶层引用共享率: ${(refShared / refSharedSuccess * 100).toFixed(1)}% ` +
+    `CoW 顶层引用共享率: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +
       `(${refShared}/${refSharedSuccess} 成功 case 返回输入原引用)`,
   );
 }

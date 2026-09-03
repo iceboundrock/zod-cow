@@ -86,19 +86,40 @@ test("number: int/min/max/multipleOf/NaN/coerce", () => {
 test("number: safeint 上界（.int() 的 number_format 语义）", () => {
   const c = compile(z.number().int());
   assert.equal(c.safeParse(Number.MAX_SAFE_INTEGER + 1).success, false); // stock: too_big
-  assert.equal(z.number().int().safeParse(Number.MAX_SAFE_INTEGER + 1).success, false);
+  assert.equal(
+    z
+      .number()
+      .int()
+      .safeParse(Number.MAX_SAFE_INTEGER + 1).success,
+    false,
+  );
 });
 
 test("bigint / date / boolean / symbol / nan / null / undefined", () => {
   assert.equal(compile(z.bigint()).parse(1n), 1n);
   assert.equal(compile(z.bigint().min(0n)).safeParse(-1n).success, false);
-  assert.equal(z.bigint().min(0n).safeParse(-1n as never).success, false);
+  assert.equal(
+    z
+      .bigint()
+      .min(0n)
+      .safeParse(-1n as never).success,
+    false,
+  );
 
   const d = new Date(0);
   assert.ok(compile(z.date()).parse(d) === d, "Date 原引用透传");
   assert.equal(compile(z.date()).safeParse("nope" as never).success, false);
-  assert.equal(compile(z.date().min(new Date("2020-01-01"))).safeParse(new Date("2019-01-01")).success, false);
-  assert.equal(z.date().min(new Date("2020-01-01")).safeParse(new Date("2019-01-01") as never).success, false);
+  assert.equal(
+    compile(z.date().min(new Date("2020-01-01"))).safeParse(new Date("2019-01-01")).success,
+    false,
+  );
+  assert.equal(
+    z
+      .date()
+      .min(new Date("2020-01-01"))
+      .safeParse(new Date("2019-01-01") as never).success,
+    false,
+  );
 
   assert.equal(compile(z.boolean()).parse(true), true);
   assert.equal(compile(z.boolean()).safeParse(1).success, false);
@@ -373,7 +394,10 @@ test("optional / nullable", () => {
 
 test("default: z4 短路语义 —— 默认值不再过内层校验（与 z3 相反）", () => {
   // 1.5 不是合法 int，但 z4 default 短路 → 成功
-  const D = z.number().int().default(1.5 as never);
+  const D = z
+    .number()
+    .int()
+    .default(1.5 as never);
   const c = compile(D);
   assert.equal(c.parse(undefined), 1.5);
   assert.equal(D.parse(undefined), 1.5);
@@ -397,9 +421,12 @@ test("catch: 校验失败兜底；异常向上传播（z4 语义，与 z3 相反
   assert.equal(c.parse(123 as never), "fb");
   assert.equal(C.parse(123 as never), "fb");
 
-  const T: any = z.string().refine(() => {
-    throw new Error("boom");
-  }).catch("fb2");
+  const T: any = z
+    .string()
+    .refine(() => {
+      throw new Error("boom");
+    })
+    .catch("fb2");
   const cT = compile(T);
   assert.throws(() => cT.parse("x"), /boom/, "z4 catch 不吞异常");
   assert.throws(() => T.safeParse("x"), /boom/);
@@ -462,7 +489,8 @@ test("refine / .check(): 纯谓词不判脏", () => {
   assert.equal(c.safeParse({ v: "a" }).success, false);
 
   const C = z.string().check((ctx: any) => {
-    if (ctx.value.length < 2) ctx.issues.push({ code: "custom", message: "too short", input: ctx.value });
+    if (ctx.value.length < 2)
+      ctx.issues.push({ code: "custom", message: "too short", input: ctx.value });
   });
   const cC = compile(C);
   assert.equal(cC.parse("abc"), "abc");
@@ -514,7 +542,10 @@ test("safeParse / validate 形态", () => {
 });
 
 test("compile 拒绝 intersection（不支持，显式报错）", () => {
-  assert.throws(() => compile(z.intersection(z.object({ p: z.string() }), z.object({ q: z.number() }))), ZcNotSupportedError);
+  assert.throws(
+    () => compile(z.intersection(z.object({ p: z.string() }), z.object({ q: z.number() }))),
+    ZcNotSupportedError,
+  );
 });
 
 test("compile 拒绝 async refine（运行时检测）", () => {

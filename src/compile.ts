@@ -1228,9 +1228,9 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
       return true;
     case "ZodObject":
       // strip 视为纯：仅当输入确有多余键时才拷贝（运行时以引用比较为准）
-      return Object
-        .values(def.shape() as Record<string, z.ZodTypeAny>)
-        .every((c) => isStaticPure(c, seen));
+      return Object.values(def.shape() as Record<string, z.ZodTypeAny>).every((c) =>
+        isStaticPure(c, seen),
+      );
     case "ZodArray":
       return isStaticPure(def.type, seen);
     case "ZodTuple":

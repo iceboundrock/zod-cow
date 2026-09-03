@@ -45,7 +45,10 @@ function computeProbe(): ProbeResult {
   // strict 模式下 unrecognized_keys 的 path（信息性）
   let strictPath = "";
   {
-    const r = z.object({ a: z.string() }).strict().safeParse({ b: 1 } as never);
+    const r = z
+      .object({ a: z.string() })
+      .strict()
+      .safeParse({ b: 1 } as never);
     if (!r.success) strictPath = JSON.stringify(r.error.issues[0]?.path ?? []);
   }
 

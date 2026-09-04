@@ -21,7 +21,8 @@ permissions:
   contents: read
 
 env:
-  # Reduced record count so a smoke run stays fast (the scripts default to 500 000).
+  # Record count behind the published tables. The scripts default to 500 000
+  # for local runs; 50 000 keeps a workflow run under a few minutes.
   BENCH_N: ${{ inputs.bench_n || '50000' }}
 
 jobs:
@@ -80,10 +81,10 @@ jobs:
             echo
           }
           {
-            echo "## Benchmark smoke run"
+            echo "## Benchmark run"
             echo
-            echo "> Smoke results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
-            echo "> The README tables quote one run of this workflow by run id; runner noise is a few milliseconds at this record count."
+            echo "> Results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
+            echo "> The README and docs tables quote one run of this workflow by run id. Other runs (weekly schedule, manual re-runs) check that the bench scripts still work and can be compared against that cited run; runner noise is a few milliseconds at this record count."
             echo
             section "zod 4 (bench:z4)" bench-z4.txt
             section "zod 3 (bench)" bench-z3.txt

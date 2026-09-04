@@ -18,7 +18,7 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 ### Added
 
 - GitHub Actions CI: typecheck plus both test lines on a Node 22/24/26 matrix, and a separate Biome lint job (`.github/workflows/ci.yml`).
-- A manual/weekly benchmark workflow (`.github/workflows/bench.yml`) that runs `bench:z4` and `bench` with a reduced `BENCH_N` and writes the tables to the job summary. Those are smoke results, not reference numbers.
+- A manual/weekly benchmark workflow (`.github/workflows/bench.yml`) that runs `bench:z4` and `bench` on a GitHub-hosted runner (node 24, `BENCH_N=50 000`) and writes the tables to the job summary. The published benchmark tables quote one run of it by run id (see Changed above); the other runs check that the bench scripts still work and can be compared against the cited run.
 - Biome for linting and formatting (`biome.json`).
 
 ## [0.5.0]

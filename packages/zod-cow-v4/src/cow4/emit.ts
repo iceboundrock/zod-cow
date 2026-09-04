@@ -3,7 +3,7 @@
  * subroutines. Forms an import cycle with the emit-*.ts skeletons (mutual recursion through
  * hoisted function declarations only; nothing in the cycle runs at module load).
  */
-import { compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod4/v4/core";
+import { compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
 import { buildFn, CodeCtx } from "./codectx.js";
 import { emitCoWArray } from "./emit-array.js";
 import { emitCoWMap } from "./emit-map.js";

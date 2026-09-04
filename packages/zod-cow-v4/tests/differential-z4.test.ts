@@ -6,8 +6,8 @@
  * Failures print seed/case for replay (REPRO=seed:case).
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
-import { z } from "zod4";
-import { compile } from "../src/index-z4.js";
+import { z } from "zod";
+import { compile } from "../src/index.js";
 
 interface RNG {
   next(): number;

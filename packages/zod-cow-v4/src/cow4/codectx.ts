@@ -1,5 +1,5 @@
 /** Codegen context and the Function-constructor build step shared by all skeletons. */
-import { INVALID } from "zod4/v4/core";
+import { INVALID } from "zod/v4/core";
 import { type Fn, markAsync } from "./product.js";
 
 /* ═══════════════════ Codegen context (minimal equivalent of the official CodeCtx/Doc) ═══════════════════ */

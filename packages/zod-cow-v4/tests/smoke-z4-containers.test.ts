@@ -2,8 +2,8 @@
  * Smoke: CoW skeleton behavior for record/map/set.
  */
 import assert from "node:assert/strict";
-import { z } from "zod4";
-import { compile } from "../src/index-z4.js";
+import { z } from "zod";
+import { compile } from "../src/index.js";
 
 /* ── record: bare-string keys ── */
 {

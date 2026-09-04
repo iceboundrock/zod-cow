@@ -25,13 +25,13 @@
  *    assertOnly product → parser product → runtime island (black-box _zod.run)
  *    → whole-tree stock (async/recursion and other cases this layer does not handle at all).
  *
- *  Official internal APIs reused (publicly re-exported from zod4/v4/core, version anchor 4.5.4):
+ *  Official internal APIs reused (publicly re-exported from zod/v4/core, version anchor 4.5.4):
  *    compileFn(schema, { assertOnly?, debug? })  monolithic function generation
  *    INVALID                                     failure sentinel
  *    ZodCompileUnsupportedError / ZodCompileAsyncError
  * ═══════════════════════════════════════════════════════════════════
  */
-import { INVALID } from "zod4/v4/core";
+import { INVALID } from "zod/v4/core";
 import { buildFn, CodeCtx } from "./codectx.js";
 import { emitNode } from "./emit.js";
 import type { Fn, Node } from "./product.js";

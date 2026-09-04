@@ -2,7 +2,7 @@
  * Tuple skeleton: mirrors zod's generateTupleCheck with fillLen truncation tracking
  * + CoW decoration.
  */
-import { ZodCompileUnsupportedError } from "zod4/v4/core";
+import { ZodCompileUnsupportedError } from "zod/v4/core";
 import type { CodeCtx } from "./codectx.js";
 import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";

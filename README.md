@@ -5,7 +5,7 @@
 Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) 思路的延伸。
 
 > **当前在仓库里的两条编译线**：zod3 前端（`src/compile.ts` + `src/index.ts`，自研闭包树，冻结参考实现）
-> 与 zod4 前端（`src/cow4.ts` + `src/index-z4.ts`，复用官方 codegen，活跃开发线）。
+> 与 zod4 前端（`src/cow4/` + `src/index-z4.ts`，复用官方 codegen，活跃开发线）。
 > 早期的 zod4 自研前端（当时的 `compile-z4.ts` + `index-z4.ts`）已被当前这条线完全取代并移除
 > —— `src/index-z4.ts` 这个路径现在指的是当前前端的入口。其适配结论与实测数字作为历史记录
 > 保留在 [zod4 适配（v0.2）](#zod4-适配v02历史) 一节。
@@ -201,7 +201,7 @@ src/probe-z4-flags.ts   zod4 语义金丝 flag（版本升级自动报警）
 src/regexes.ts          zod 3.24.1 内部格式正则的逐字拷贝（z3 前端用）
 src/compile.ts          zod3 前端编译器
 src/index.ts            zod3 compile() API
-src/cow4.ts             zod4 引擎（官方 codegen + CoW 容器骨架 + async 通道）
+src/cow4/               zod4 引擎（官方 codegen + CoW 容器骨架 + async 通道；模块布局见 AGENTS.md）
 src/index-z4.ts         zod4 compile() API
 tests/harness.ts            零依赖测试框架（test/summary/deepEqual）
 tests/unit.test.ts          z3 单元测试（27 项）

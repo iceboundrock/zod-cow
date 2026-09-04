@@ -1,7 +1,7 @@
 # zc-z4 架构对比：自研 codegen vs 复用 zod4 官方 codegen
 
 > 版本锚点：zod 4.5.4 · 本文所有生成代码均为真实产物 dump（`compileFn(schema, {debug:true})` 与 `compileCowDebug(schema)`）。
-> 配套代码：`src/cow4.ts`（当前 zod4 线，复用官方）。
+> 配套代码：`src/cow4/`（当前 zod4 线，复用官方；模块布局见 §11）。
 >
 > **v1 已不在仓库里**：自研 zod4 前端（当时的 `src/compile-z4.ts` + `src/index-z4.ts`）在
 > zc-z4 落地后被删除（issue #4）——`src/index-z4.ts` 这个路径今天指的是 zc-z4 的入口。
@@ -533,3 +533,22 @@ async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器�
   （对 stock 2.3~4.6x），GC 驻留归零。
 - 两条路线共享同一个 CoW 心智模型：**引用比较即脏信号，path-copying 即拷贝策略**。
   差别只在"校验与变换这一层由谁实现"。
+
+## 11. Source layout (issue #5)
+
+The engine lives in `src/cow4/` as a set of modules cut along the seams described above; every function kept its body and comments when it moved, so the sections of this document still map one-to-one onto the code.
+
+| Module | Section of this doc | Holds |
+|---|---|---|
+| `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator` |
+| `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
+| `codectx.ts` | §3 | `CodeCtx`, `escKey`, `buildFn` |
+| `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
+| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
+| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync` |
+| `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
+| `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
+| `emit-tuple.ts` | §5.4 | `emitCoWTuple` |
+| `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
+
+`emit.ts` and the six `emit-*.ts` modules import each other: `emitBoxedContainer` dispatches to the skeletons, and the skeletons recurse into child containers through `containerChildFn` / `childProduct`. The cycle is safe because every binding involved is a hoisted function declaration and none of these modules executes anything at load time. Do not add top-level code that calls across the cycle.

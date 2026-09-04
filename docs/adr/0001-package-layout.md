@@ -1,8 +1,8 @@
 # ADR 0001: Package layout: one package per zod major in a pnpm workspace
 
-- Status: accepted, 2026-09-04
+- Status: accepted, 2026-09-04 (this record closes [#8](https://github.com/iceboundrock/zod-cow/issues/8) on merge)
 - Decided in: [#8](https://github.com/iceboundrock/zod-cow/issues/8)
-- Implemented by: [#9](https://github.com/iceboundrock/zod-cow/issues/9)
+- Implementation tracked in: [#9](https://github.com/iceboundrock/zod-cow/issues/9)
 
 ## Context
 
@@ -10,8 +10,8 @@ The repository holds two compiler lines that share no code:
 
 | Line | Source today | Size | Anchored to |
 |---|---|---|---|
-| zod4 (active) | `src/index-z4.ts`, `src/cow4/`, `src/probe-z4*.ts` | about 1 800 lines | zod 4.5.4, through the internal `zod/v4/core` namespace (`compileFn`, `INVALID`, `ZodCompileAsyncError`, `ZodCompileUnsupportedError`, `$ZodAsyncError`, `regexes`, `util`) |
-| zod3 (frozen reference) | `src/index.ts`, `src/compile.ts`, `src/internal.ts`, `src/regexes.ts`, `src/probe.ts` | about 1 600 lines | zod 3.24.1, with that version's format regexes copied verbatim |
+| zod4 (active) | `src/index-z4.ts`, `src/cow4/`, `src/probe-z4*.ts` | about 1 800 lines of engine (entry plus `cow4/`); the probes add about 630 | zod 4.5.4, through the internal `zod/v4/core` namespace (`compileFn`, `INVALID`, `ZodCompileAsyncError`, `ZodCompileUnsupportedError`, `$ZodAsyncError`, `regexes`, `util`) |
+| zod3 (frozen reference) | `src/index.ts`, `src/compile.ts`, `src/internal.ts`, `src/regexes.ts`, `src/probe.ts` | about 1 600 lines including the probe | zod 3.24.1, with that version's format regexes copied verbatim |
 
 After #4 removed the zod4 v1 line, the only candidate for "shared code" is `src/internal.ts`, a 141-line protocol module used solely by the zod3 line. The test harness (`tests/harness.ts`: `test`, `summary`, `deepEqual`) is shared, but it is test infrastructure, not runtime code.
 
@@ -75,7 +75,7 @@ If it is ever published, it becomes a release of its own package under this layo
 ### 5. Build and artifact shape
 
 - ESM only, plus `.d.ts` declarations, emitted by `tsc`. No CJS build: the engine floor is Node.js >= 22.13.0, which supports `require(esm)`, so CommonJS consumers on the supported Node range can still `require("zod-cow")`.
-- `exports` lists `.` and `./package.json` only. `files` restricts the tarball to the build output.
+- `exports` lists `.` and `./package.json` only. `files` restricts the tarball to the build output. npm adds `package.json`, `README` and `LICENSE` to every tarball regardless of `files`, but it takes them from the package directory, so `packages/zod-cow/` carries its own README and a copy of the root `LICENSE`; the root copies are not in the tarball.
 - Probes (`probe-z4.ts`), canary flags (`probe-z4-flags.ts`), tests, benchmarks and examples live in the package directory but stay outside the build's `include` and outside `files`. They are diagnostics, not API.
 
 ## Consequences

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod4";
-import { compileV2 } from "../src/index-z4-v2.js";
+import { compile } from "../src/index-z4.js";
 
 let group = "";
 function head(s: string): void {
@@ -20,7 +20,7 @@ function ok(msg: string): void {
 head("tuple 满长干净 → 原引用");
 {
   const S = z.tuple([z.string(), z.number(), z.boolean()]);
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(!C.stock);
   const input = ["a", 1, true] as unknown[];
   const r = C.safeParse(input);
@@ -32,7 +32,7 @@ head("tuple 满长干净 → 原引用");
 head("tuple 元素脏（transform）→ slice 写回");
 {
   const S = z.tuple([z.string(), z.string().transform((s) => s.toUpperCase())]);
-  const C = compileV2(S);
+  const C = compile(S);
   const input = ["a", "b"] as unknown[];
   const r = C.safeParse(input);
   assert.ok(r.success);
@@ -47,7 +47,7 @@ head("tuple 元素脏（transform）→ slice 写回");
 head("tuple 短输入 trailing optional → 截断（截断目标=输入长 → 原引用）");
 {
   const S = z.tuple([z.string(), z.optional(z.string()), z.optional(z.string())]);
-  const C = compileV2(S);
+  const C = compile(S);
   const input = ["a"] as unknown[];
   const stock = S.safeParse(input as never);
   assert.ok(stock.success);
@@ -72,7 +72,7 @@ head("tuple 短输入 trailing optional → 截断（截断目标=输入长 → 
 head("tuple default 尾槽缺席 → 填充（结构扩展必拷贝）");
 {
   const S = z.tuple([z.string(), z.string().default("D")]);
-  const C = compileV2(S);
+  const C = compile(S);
   const input = ["a"] as unknown[];
   const stock = S.safeParse(input as never);
   const r = C.safeParse(input);
@@ -90,7 +90,7 @@ head("tuple default 尾槽缺席 → 填充（结构扩展必拷贝）");
 head("tuple 超长无 rest → 拒绝（回退 stock too_big）");
 {
   const S = z.tuple([z.string(), z.optional(z.string())]);
-  const C = compileV2(S);
+  const C = compile(S);
   const input = ["a", "b", "c"] as unknown[];
   const stock = S.safeParse(input as never);
   const r = C.safeParse(input);
@@ -102,7 +102,7 @@ head("tuple 超长无 rest → 拒绝（回退 stock too_big）");
 head("tuple + rest → 逐槽引用比较");
 {
   const S = z.tuple([z.string()], z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(!C.stock);
   const input = ["a", 1, 2] as unknown[];
   const r = C.safeParse(input);
@@ -112,7 +112,7 @@ head("tuple + rest → 逐槽引用比较");
     [z.string()],
     z.string().transform((s) => s.length),
   );
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const input2 = ["a", "bb", "ccc"] as unknown[];
   const stock2 = S2.safeParse(input2 as never);
   const r2 = C2.safeParse(input2);
@@ -133,7 +133,7 @@ head("tuple + rest → 逐槽引用比较");
 head("tuple + refine（容器自身 checks 双路径）");
 {
   const S = z.tuple([z.string(), z.string()]).refine((t) => t[0] === t[1], { error: "mismatch" });
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(!C.stock);
   const good = ["a", "a"] as unknown[];
   const r = C.safeParse(good);
@@ -147,7 +147,7 @@ head("tuple + refine（容器自身 checks 双路径）");
   const S2 = z
     .tuple([z.string(), z.string().transform((s) => `${s}!`)])
     .refine((t) => (t[1] as string).endsWith("!"), { error: "need bang" });
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const r2 = C2.safeParse(["x", "y"] as unknown[]);
   assert.ok(r2.success);
   assert.deepEqual(r2.data, ["x", "y!"]);
@@ -157,7 +157,7 @@ head("tuple + refine（容器自身 checks 双路径）");
 head("嵌套：tuple 内 object（CoW 子骨架）+ tuple 被 optional 包装");
 {
   const S = z.tuple([z.object({ a: z.string(), b: z.number() }), z.string()]);
-  const C = compileV2(S);
+  const C = compile(S);
   const inner = { a: "x", b: 1 };
   const input = [inner, "s"] as unknown[];
   const r = C.safeParse(input);
@@ -167,7 +167,7 @@ head("嵌套：tuple 内 object（CoW 子骨架）+ tuple 被 optional 包装");
   assert.ok((out[0] as unknown) === inner, "内层共享");
   // 内层 strip 触发
   const S2 = z.tuple([z.object({ a: z.string() }), z.string()]);
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const dirty = [{ a: "x", extra: true }, "s"] as unknown[];
   const r2 = C2.safeParse(dirty);
   assert.ok(r2.success);
@@ -175,7 +175,7 @@ head("嵌套：tuple 内 object（CoW 子骨架）+ tuple 被 optional 包装");
   assert.ok((r2.data as unknown[]) !== dirty, "strip 触发拷贝");
   // optional(tuple)
   const S3 = z.optional(z.tuple([z.string()]));
-  const C3 = compileV2(S3);
+  const C3 = compile(S3);
   const r3 = C3.safeParse(["a"] as unknown);
   assert.ok(r3.success && Array.isArray(r3.data));
   const r4 = C3.safeParse(undefined);
@@ -187,7 +187,7 @@ head("tuple 短输入落入 defaulted 槽区（optinStart < L < optoutStart）")
 {
   // z.tuple([z.string().default("D")])：optinStart=0, optoutStart=1
   const S = z.tuple([z.string().default("D")]);
-  const C = compileV2(S);
+  const C = compile(S);
   const stockEmpty = S.safeParse([] as never);
   const rEmpty = C.safeParse([] as unknown[]);
   assert.ok(rEmpty.success && stockEmpty.success);
@@ -195,7 +195,7 @@ head("tuple 短输入落入 defaulted 槽区（optinStart < L < optoutStart）")
   assert.deepEqual(rEmpty.data, ["D"]);
   // 混合：[optional, defaulted]：optinStart=0, optoutStart=2
   const S2 = z.tuple([z.string().optional(), z.string().default("D")]);
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   for (const inp of [[], ["a"], ["a", "b"]] as unknown[][]) {
     const stock = S2.safeParse(inp as never);
     const r = C2.safeParse(inp);
@@ -212,7 +212,7 @@ head("tuple 与 union/discriminated 组合 + 差分外的 stock 对齐抽查");
     pair: z.tuple([z.string(), z.number()]),
     list: z.array(z.tuple([z.string(), z.optional(z.string())])),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { pair: ["a", 1], list: [["x"], ["y", "z"]] } as never;
   const r = C.safeParse(input);
   assert.ok(r.success);
@@ -228,7 +228,7 @@ head("async refine 在 object 键（其余键 CoW）");
     keep: z.object({ n: z.number() }), // 纯容器 → CoW 子骨架
     check: z.string().refine(async (s) => s.length > 2),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(!C.stock, "不再整树降级");
   assert.ok(C.async, "async 骨架");
   // sync API 抛 $ZodAsyncError
@@ -257,7 +257,7 @@ head("async transform → 引用比较判脏");
     name: z.string().transform(async (s) => s.toUpperCase()),
     tag: z.string(),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async);
   const input = { name: "a", tag: "t" };
   const r = await C.safeParseAsync(input);
@@ -267,7 +267,7 @@ head("async transform → 引用比较判脏");
   assert.equal((r.data as { tag: string }).tag, input.tag, "未变键共享");
   // 数组内 async transform
   const S2 = z.array(z.string().transform(async (s) => `${s}!`));
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const in2 = ["a", "b"];
   const r2 = await C2.safeParseAsync(in2);
   assert.ok(r2.success);
@@ -279,7 +279,7 @@ head("async transform → 引用比较判脏");
 head("lazy(async) 静态探测 → async 岛");
 {
   const S = z.object({ v: z.lazy(() => z.string().transform(async (s) => `${s}?`)) });
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async, "lazy(async) 被静态识破");
   const r = await C.safeParseAsync({ v: "x" });
   assert.ok(r.success);
@@ -291,7 +291,7 @@ head("lazy(async) 静态探测 → async 岛");
 head("union 含 async 分支 → async 岛");
 {
   const S = z.union([z.string().refine(async (s) => s.length > 2), z.number()]);
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async);
   const r1 = await C.safeParseAsync("hello");
   assert.ok(r1.success && r1.data === "hello");
@@ -306,7 +306,7 @@ head("union 含 async 分支 → async 岛");
 head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async）");
 {
   const S = z.array(z.string()).refine(async (a) => a.length > 1);
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async, "async 容器 checks → async 骨架");
   const input1 = ["a", "b"];
   const r1 = await C.safeParseAsync(input1);
@@ -322,7 +322,7 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
     z.string(),
     z.number().transform(async (n) => n * 2),
   );
-  const C3 = compileV2(S3);
+  const C3 = compile(S3);
   const m = new Map([["k", 21]]);
   const r3 = await C3.safeParseAsync(m);
   assert.ok(r3.success);
@@ -330,7 +330,7 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
   assert.ok((r3.data as Map<unknown, unknown>) !== m, "值变 → 拷贝");
   // set 成员 async
   const S4 = z.set(z.string().transform(async (s) => s.toUpperCase()));
-  const C4 = compileV2(S4);
+  const C4 = compile(S4);
   const st = new Set(["a"]);
   const r4 = await C4.safeParseAsync(st);
   assert.ok(r4.success);
@@ -340,14 +340,14 @@ head("async refine 挂在 array/map/set/record/tuple 上（容器 checks async�
     z.string(),
     z.number().transform(async (n) => n + 1),
   );
-  const C5 = compileV2(S5);
+  const C5 = compile(S5);
   const rec = { a: 1 };
   const r5 = await C5.safeParseAsync(rec);
   assert.ok(r5.success);
   assert.deepEqual(r5.data, { a: 2 });
   // tuple 槽 async
   const S6 = z.tuple([z.string(), z.string().transform(async (s) => `${s}!`)]);
-  const C6 = compileV2(S6);
+  const C6 = compile(S6);
   const r6 = await C6.safeParseAsync(["a", "b"]);
   assert.ok(r6.success);
   assert.deepEqual(r6.data, ["a", "b!"]);
@@ -361,7 +361,7 @@ head("async 失败路径回退 stock safeParseAsync（issues 结构官方）");
     a: z.string().refine(async (s) => s.length > 5),
     b: z.number(),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { a: "x", b: 1 };
   const r = await C.safeParseAsync(input);
   const stock = await S.safeParseAsync(input as never);
@@ -376,7 +376,7 @@ head("async 失败路径回退 stock safeParseAsync（issues 结构官方）");
 head("顶层 async pipe（z.string().transform(async)）");
 {
   const S = z.string().transform(async (s) => s.trim());
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async && !C.stock);
   const r = await C.parseAsync("  hi  ");
   assert.equal(r, "hi");
@@ -395,7 +395,7 @@ head("混合树：纯大容器 + 深 async 叶（CoW 与 async 共存）");
       flags: z.record(z.string(), z.boolean()),
     }),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   assert.ok(C.async && !C.stock);
   const input = {
     users: [

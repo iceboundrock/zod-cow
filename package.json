@@ -7,7 +7,7 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "description": "Zod-compatible CoW compilation layer — v2: reuses the official zod4 codegen (compileFn/assertOnly) as the semantic backend, adds CoW container skeletons (object/array/tuple/record/map/set) + async support",
+  "description": "Zod-compatible CoW compilation layer — the zod4 line reuses the official zod4 codegen (compileFn/assertOnly) as the semantic backend, adds CoW container skeletons (object/array/tuple/record/map/set) + async support",
   "scripts": {
     "probe": "tsx src/probe.ts",
     "probe:z4": "tsx src/probe-z4.ts",
@@ -17,8 +17,8 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "bench": "node --expose-gc --import tsx bench/bench.ts",
-    "test:v2": "tsx tests/canary-z4.test.ts && tsx tests/smoke-v2.ts && tsx tests/smoke-v2-containers.test.ts && tsx tests/smoke-v2-tuple-async.test.ts && tsx tests/differential-z4-v2.test.ts",
-    "bench:v2": "node --expose-gc --import tsx bench/bench-z4-v2.ts"
+    "test:z4": "tsx tests/canary-z4.test.ts && tsx tests/smoke-z4.test.ts && tsx tests/smoke-z4-containers.test.ts && tsx tests/smoke-z4-tuple-async.test.ts && tsx tests/differential-z4.test.ts",
+    "bench:z4": "node --expose-gc --import tsx bench/bench-z4.ts"
   },
   "dependencies": {
     "zod": "3.24.1",

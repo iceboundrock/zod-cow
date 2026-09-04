@@ -1,5 +1,5 @@
 /**
- * zc-v2 —— CoW 容器修饰层（复用 zod4 官方 codegen 作为语义后端）。
+ * zc-z4 —— CoW 容器修饰层（复用 zod4 官方 codegen 作为语义后端）。
  *
  * ═══════════════════════════════════════════════════════════════════
  *  设计原则：zod4（>=4.1）自带的 JIT 编译器（src/v4/core/compile.ts，
@@ -47,7 +47,7 @@ type Node = any;
 export type Fn = (input: any) => unknown;
 
 /** 产物返回 Promise（async 骨架）的标记 —— buildFn/officialFn/island 挂载，调用点据此发射 await */
-export const ZC_ASYNC = Symbol.for("zc-v2.async");
+export const ZC_ASYNC = Symbol.for("zc-z4.async");
 
 function markAsync(fn: Fn): Fn {
   (fn as unknown as Record<symbol, boolean>)[ZC_ASYNC] = true;

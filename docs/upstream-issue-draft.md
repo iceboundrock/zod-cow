@@ -3,8 +3,8 @@
 > **使用说明（给本项目维护者）**：以下英文正文可直接粘贴到 colinhacks/zod 的新 issue。
 > 标题建议：`[v4] Promote the internal JIT compiler (compileFn / assertOnly) to a public, supported API`
 >
-> 素材来源：`docs/ARCHITECTURE-v2.md`（架构对比文档）、`bench/bench-z4-v2.ts`（可复现基准）、
-> `tests/differential-z4-v2.test.ts`（5 万 case 差分）。
+> 素材来源：`docs/ARCHITECTURE-z4.md`（架构对比文档）、`bench/bench-z4.ts`（可复现基准）、
+> `tests/differential-z4.test.ts`（5 万 case 差分）。
 > 数据锚点：zod 4.5.4，node v24.19.0，`--expose-gc`，3 轮取中位，50 万条记录。
 > §7 的 runtime quirk 若上游更愿意先修 bug，可拆成独立 issue 提交。
 
@@ -14,7 +14,7 @@
 
 ### Summary
 
-Zod 4 ships a production-grade JIT compiler for schemas — `src/v4/core/compile.ts` (~2.2k lines), already powering the `zod/compile` side-effect entry. It is however only reachable through the `zod/v4/core` internal re-export path and carries no stability guarantee. We built a Copy-on-Write (CoW) compilation layer on top of it ([zc-v2](#what-we-built--measured)) and found the compiler's surface to be *exactly* what third-party tooling needs. We're asking for `compileFn` (and a small, closed set of companions) to be promoted to a documented, semver-supported public API.
+Zod 4 ships a production-grade JIT compiler for schemas — `src/v4/core/compile.ts` (~2.2k lines), already powering the `zod/compile` side-effect entry. It is however only reachable through the `zod/v4/core` internal re-export path and carries no stability guarantee. We built a Copy-on-Write (CoW) compilation layer on top of it ([zc-z4](#what-we-built--measured)) and found the compiler's surface to be *exactly* what third-party tooling needs. We're asking for `compileFn` (and a small, closed set of companions) to be promoted to a documented, semver-supported public API.
 
 ### Motivation
 
@@ -54,11 +54,11 @@ Three artifact contracts we rely on:
 
 ### What we built & measured
 
-zc-v2: a CoW *post-processor* over the official compiler — purity analysis picks official artifacts per subtree; the layer itself only emits container skeletons (object/array/tuple/record/map/set) that replace "unconditional new container" with "reference-compare dirty signal + copy on first forced write". Any `INVALID` falls back to stock `safeParse`, so issues/path/ZodError semantics are 100% stock. 50k-case randomized differential testing against stock: 0 divergences.
+zc-z4: a CoW *post-processor* over the official compiler — purity analysis picks official artifacts per subtree; the layer itself only emits container skeletons (object/array/tuple/record/map/set) that replace "unconditional new container" with "reference-compare dirty signal + copy on first forced write". Any `INVALID` falls back to stock `safeParse`, so issues/path/ZodError semantics are 100% stock. 50k-case randomized differential testing against stock: 0 divergences.
 
 Node v24, `--expose-gc`, median of 3 passes, 500k records (`BENCH_N` adjustable):
 
-| Scenario | stock zod4 | official parser (JIT) | **zc-v2 (CoW)** | stock/v2 | JIT/v2 | allocation (stock → v2) | retained after GC |
+| Scenario | stock zod4 | official parser (JIT) | **zc-z4 (CoW)** | stock/z4 | JIT/z4 | allocation (stock → z4) | retained after GC |
 |---|---|---|---|---|---|---|---|
 | S1 pure objects | 654ms | 263ms | **283ms** | 2.31x | 0.93x | 162MB → 30.5MB | 123MB → **0** |
 | S2 dirty 10% (default inject) | 619ms | 363ms | **247ms** | 2.50x | 1.47x | 149MB → 41.6MB | 123MB → 10.3MB* |
@@ -131,8 +131,8 @@ Reproduction, differential suite, and benchmarks: `cow-zod-prototype` (local pro
 
 ### 附：草稿要点自查（维护者用，不随 issue 提交）
 
-- [x] 每个基准数字都能在 `bench/bench-z4-v2.ts` 中复现（S1–S7 全场景）
-- [x] 依赖表与 `docs/ARCHITECTURE-v2.md` §9 一致，新增 `getTupleOptStart`/`dropsWhenAbsent`（Task 6 tuple 骨架引入）
+- [x] 每个基准数字都能在 `bench/bench-z4.ts` 中复现（S1–S7 全场景）
+- [x] 依赖表与 `docs/ARCHITECTURE-z4.md` §9 一致，新增 `getTupleOptStart`/`dropsWhenAbsent`（Task 6 tuple 骨架引入）
 - [x] §7 的 quirk 最小复现已在本项目 `node` REPL 验证（ownKeys 稳定 "0,2,length"，sync rest 正常）
 - [x] 语气：请求转正 + 附带 bug 报告（非需求清单）；API 形状刻意保持最小
 - [ ] 提交前建议：检查 colinhacks/zod 是否已有 `zod/compile` 相关 issue/PR，引用并补充而非重开

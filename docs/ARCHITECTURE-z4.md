@@ -1,16 +1,17 @@
-# zc-v2 架构对比：自研 codegen vs 复用 zod4 官方 codegen
+# zc-z4 架构对比：自研 codegen vs 复用 zod4 官方 codegen
 
 > 版本锚点：zod 4.5.4 · 本文所有生成代码均为真实产物 dump（`compileFn(schema, {debug:true})` 与 `compileCowDebug(schema)`）。
-> 配套代码：`src/cow4-v2.ts`（v2，复用官方）。
+> 配套代码：`src/cow4.ts`（当前 zod4 线，复用官方）。
 >
-> **v1 已不在仓库里**：自研 zod4 前端（`src/compile-z4.ts` + `src/index-z4.ts`）在 v2
-> 落地后被删除（issue #4）。本文对 v1 的全部描述、代码引用与基准数字都是**历史对照**，
-> 记录"为什么从自研 codegen 走到复用官方 codegen"这条决策路径；对应源码需回溯到
-> 删除前的提交。当前仓库里的 zod4 编译线只有 v2。
+> **v1 已不在仓库里**：自研 zod4 前端（当时的 `src/compile-z4.ts` + `src/index-z4.ts`）在
+> zc-z4 落地后被删除（issue #4）——`src/index-z4.ts` 这个路径今天指的是 zc-z4 的入口。
+> 本文对 v1 的全部描述、代码引用与基准数字都是**历史对照**，记录"为什么从自研 codegen
+> 走到复用官方 codegen"这条决策路径；对应源码需回溯到删除前的提交。当前仓库里的 zod4
+> 编译线只有 zc-z4。
 
 ## TL;DR
 
-| | v1（自研 codegen） | v2（官方 codegen + CoW 修饰） |
+| | v1（自研 codegen） | zc-z4（官方 codegen + CoW 修饰） |
 |---|---|---|
 | 自研代码量 | ~1100 行语义 codegen + 官方正则逐字拷贝 | ~760 行（纯度分析 + 6 个容器骨架 + async 通道） |
 | 语义正确性来源 | 自己复刻 zod 语义（issue/format/check 全套） | 官方编译器 + 官方 runtime fallback |
@@ -36,7 +37,7 @@ Numeric 文章的 fork 思路是"砍特性换性能"（删掉 default/transform/
 子节点返回原引用 = 没变，返回新值 = 变了，父层此刻才第一次浅拷贝（path-copying）。
 
 在 zod3 时代这需要自研整套编译层（v1 路线）。zod 4.1 起，官方自己也上了 JIT
-（`import "zod/compile"` 或 `z.compile()`），并且暴露了可编程的内部 API。v2 路线
+（`import "zod/compile"` 或 `z.compile()`），并且暴露了可编程的内部 API。zc-z4 路线
 由此而来：**不自研语义 codegen，把官方编译器当"叶子级/表达式级"后端**。
 
 ## 2. 官方 codegen 的可复用面（源码取证）
@@ -64,7 +65,7 @@ import {
 
 另一个官方挂载点是 `globalConfig.postProcessor`（`zod/compile` 的 side-effect
 入口就是往这里装 shim）——本层没用它（它是"每个实例克隆替换 run"的路线，
-与 CoW 的"整树单体产物"不兼容），但注意两者**可以共存**：v2 的失败回退调用
+与 CoW 的"整树单体产物"不兼容），但注意两者**可以共存**：zc-z4 的失败回退调用
 `schema.safeParse`，若用户同时启用了 `zod/compile`，回退路径自动享受官方 JIT。
 
 ### 2.1 官方 object 生成的真实代码（parser 模式）
@@ -147,14 +148,14 @@ if (v2 !== undefined || "role" in input) v9["role"] = v2;   // mayOutputUndefine
 ```
 
 这些正是 v1 在差分测试里反复踩坑的语义（default 短路、缺席不物化、exactOptional、
-catch 常量值、record 数值键重试、for...in 继承键……）。**v2 让官方消化全部这些细节，
+catch 常量值、record 数值键重试、for...in 继承键……）。**zc-z4 让官方消化全部这些细节，
 自研层只做纯度分派**——这是代码量 1100→600 行且正确性反超的原因。
 
-（未完，下一节：v2 骨架 dump 并排对照）
+（未完，下一节：zc-z4 骨架 dump 并排对照）
 
-## 3. v2 的生成代码：官方产物如何被 CoW 修饰
+## 3. zc-z4 的生成代码：官方产物如何被 CoW 修饰
 
-v2 的编译期分派（`emitNode`）：
+zc-z4 的编译期分派（`emitNode`）：
 
 ```
 needsValue && cowSafeContainerForChild(schema)?
@@ -164,12 +165,12 @@ needsValue && cowSafeContainerForChild(schema)?
         └─ 否 → 官方 parser 产物（引用比较判脏，由宿主骨架执行）
 ```
 
-### 3.1 官方 object 骨架 vs v2 CoW 骨架（同一 schema 并排）
+### 3.1 官方 object 骨架 vs zc-z4 CoW 骨架（同一 schema 并排）
 
 schema：`z.object({ id: number.int(), firstName: string.max(64), email: z.email(), tags: array(string).max(8), address: object({...}) })`
 
 ```js
-// ═══ v2 CoW 骨架（真实 dump）═══
+// ═══ zc-z4 CoW 骨架（真实 dump）═══
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
 let x0 = false, x1 = false;                                // dirty / extra
 const x2 = input["id"];
@@ -201,7 +202,7 @@ return out;
 
 与官方 dump 的逐点对应关系：
 
-| 官方 parser | v2 骨架 | 说明 |
+| 官方 parser | zc-z4 骨架 | 说明 |
 |---|---|---|
 | `const v8 = {...}` 无条件 | `if (!dirty && !extra) return input;` | CoW 核心：干净输入零分配 |
 | `const v5 = new Array(len)` | （元素循环内）`out = input.slice()` | 数组同理，首脏才 slice |
@@ -212,7 +213,7 @@ return out;
 ### 3.2 容器自身 checks：双路径时点
 
 `.refine()` / `.min()` 挂在容器上时，stock 语义是"输出构造后对输出跑 checks"。
-v2 把 checks 编译成独立校验子程序，**双路径调用**：
+zc-z4 把 checks 编译成独立校验子程序，**双路径调用**：
 
 ```js
 const cChecks = /* containerChecksFn 产物 */;
@@ -257,7 +258,7 @@ stock 输出 "ab1" vs ours "AB1"。修复：叶子纯度必须检查自身 check
 
 `.max(64)` 的 check 实例上有 `when: [Function: _whenHasLength]`——官方
 `generateChecks` 用 `WHEN_DEFAULTED_CHECKS` 白名单豁免（max_size/min_size/
-size_equals/max_length/min_length/length_equals）。v2 最初把任何 truthy `when`
+size_equals/max_length/min_length/length_equals）。zc-z4 最初把任何 truthy `when`
 当"自定义 when"拒绝 → `.max(8)` 的 array 被误判非纯 → 走 parser → 每元素新数组
 → CoW 全灭（S1 分配 98MB 的根因）。修复：照抄官方白名单，
 `hasCustomWhen = when && !WHEN_DEFAULTED_CHECKS.has(check)`。
@@ -396,7 +397,7 @@ return out;
    容器 checks 的 async refine 谓词）检测 `isAsyncProduct(fn)` → 发射 `await` + `ctx.async = true`。
 3. **骨架 async 化**：`buildFn` 依 `ctx.async` 决定 `async (input) =>` 还是 `(input) =>`，
    产物挂 `ZC_ASYNC` → 子骨架父层自动感知（`childProduct` 返回 `kind: "async"`）。
-4. **公开 API**：`CompiledV2` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
+4. **公开 API**：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
    async 骨架下 sync API 抛 `$ZodAsyncError`（官方同款语义，实测 sync parse 对 async 树就是抛）。
 5. **lazy(async) 补漏**：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
    Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
@@ -411,7 +412,7 @@ compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支�
 ## 6. 降级链状态机
 
 ```
-compileV2(schema)
+compile(schema)
   │
   ├─ compileCowFn（整树骨架编译）
   │     ├─ emitBoxedContainer ── cowSafeContainerForChild（剥壳 + checks 安全）
@@ -433,7 +434,7 @@ compileV2(schema)
            （官方 zod/compile shim 同语义，README 已标注）
 
 async 骨架（ctx.async = true）的顶层契约：
-  CompiledV2.async = true → sync parse/safeParse/validate 抛 $ZodAsyncError；
+  Compiled.async = true → sync parse/safeParse/validate 抛 $ZodAsyncError；
   parseAsync/safeParseAsync 可用，失败路径回退 stock safeParseAsync。
 ```
 
@@ -444,16 +445,16 @@ async 骨架（ctx.async = true）的顶层契约：
 
 ## 7. 基准（50 万账户，node v24，--expose-gc，3 轮中位）
 
-`zc-v1` 列是该前端删除前的最后一次测量，保留为历史对照；今天的 `bench:v2` 不再跑这一列。
+`zc-v1` 列是该前端删除前的最后一次测量，保留为历史对照；今天的 `bench:z4` 不再跑这一列。
 
-| 场景 | stock | 官方 compileFn parser | zc-v2 | zc-v1 | arktype |
+| 场景 | stock | 官方 compileFn parser | zc-z4 | zc-v1 | arktype |
 |---|---|---|---|---|---|
 | S1 纯校验 | 654ms | 263ms | **283ms** | 521ms | 144ms |
 | S1 分配压力 | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
 | S1 gc 后驻留 | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
 | S2 脏负载（10% default） | 619ms | 363ms | **247ms** | 504ms | — |
 | S3 扫描 0% / 25% / 50% / 100% 脏 | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
-| S3 v2 驻留 | +123.3MB 恒定 | — | **0 / 20 / 36 / 68.7MB** | — | — |
+| S3 zc-z4 驻留 | +123.3MB 恒定 | — | **0 / 20 / 36 / 68.7MB** | — | — |
 | S4 validate | — | 219ms(逐账户) | **50ms** | — | 144ms |
 | S5 record/map/set | 922ms | 681ms | **353ms** | 不支持 | — |
 | S5 分配压力 | +256.1MB | +245.3MB | **+38.1MB** | — | — |
@@ -479,14 +480,14 @@ async 骨架（ctx.async = true）的顶层契约：
 
 S1 的 +30.5MB 短命分配来自官方叶子产物内部（datetime/email 格式校验的临时值），
 gc 后驻留 0——CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍；速度与微量短命
-分配之间的取舍，在生产语境（minor GC 便宜）下选了 v2——这也是 v1 最终被移除的原因之一。
+分配之间的取舍，在生产语境（minor GC 便宜）下选了 zc-z4——这也是 v1 最终被移除的原因之一。
 
 ## 8. 正确性证据
 
-- `tests/smoke-v2.ts`（11 组行为断言）+ `tests/smoke-v2-containers.test.ts`
-  （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-v2-tuple-async.test.ts`
+- `tests/smoke-z4.test.ts`（11 组行为断言）+ `tests/smoke-z4-containers.test.ts`
+  （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
-- `tests/differential-z4-v2.test.ts`：**50000 case**（seeds=500×100，随机嵌套
+- `tests/differential-z4.test.ts`：**50000 case**（seeds=500×100，随机嵌套
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + **async refine/async transform** 包装），与 stock zod4 全量一致：
   - 成败奇偶一致（成功 20813 / 失败 29187）
@@ -497,7 +498,7 @@ gc 后驻留 0——CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）——
   骨架输出稠密数组（更正确），差分生成器规避该组合；详见 upstream-issue-draft.md §Bonus。
-- 失败诊断钩子：`REPRO=seed:case node --import tsx tests/differential-z4-v2.test.ts`
+- 失败诊断钩子：`REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
   打印 schema desc、input、CoW 骨架源码。
 
 ## 9. 版本锚点与风险
@@ -526,7 +527,7 @@ async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器�
   （只读 `_zod.def`）、分配更低、可以锁定旧版 zod。本仓库不再需要这个域——
   它只维护一条 zod4 线，v1 已随 issue #4 移除；下面的对比因此是决策记录，
   而不是仍在维护的两个选项。
-- **v2（官方 codegen + CoW 修饰）** 是 zod4 时代的正解：语义正确性外包给官方
+- **zc-z4（官方 codegen + CoW 修饰）** 是 zod4 时代的正解：语义正确性外包给官方
   编译器与 runtime，自研面缩到"纯度分析 + 6 个容器骨架 + async 通道"，跟随上游
   优化自动受益；速度与官方 JIT 持平，脏场景反超 1.5~1.9x、tuple 3.1x、async 2.5x
   （对 stock 2.3~4.6x），GC 驻留归零。

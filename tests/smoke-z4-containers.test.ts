@@ -3,19 +3,19 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod4";
-import { compileV2 } from "../src/index-z4-v2.js";
+import { compile } from "../src/index-z4.js";
 
 /* ── record：bare-string 键 ── */
 {
   const S = z.record(z.string(), z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { a: 1, b: 2 };
   console.log("── record bare-string ──");
   console.log("  干净 out === input:", C.parse(input) === input);
   assert.equal(C.parse(input), input);
 
   const S2 = z.record(z.string(), z.object({ n: z.number(), flag: z.boolean() }));
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const inner = { n: 1, flag: true };
   const input2 = { a: inner, b: { n: 2, flag: false } };
   const out2 = C2.parse(input2) as typeof input2;
@@ -30,7 +30,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 
   // 值含 default → 脏
   const S3 = z.record(z.string(), z.object({ n: z.number(), tag: z.string().default("x") }));
-  const C3 = compileV2(S3);
+  const C3 = compile(S3);
   const input3 = { a: { n: 1 } };
   const out3 = C3.parse(input3) as any;
   console.log("  值 default 注入: out.a.tag =", out3.a.tag, " input 未失真:", !("tag" in input3.a));
@@ -41,7 +41,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── record：数值键重试（键名转换） ── */
 {
   const S = z.record(z.number(), z.string());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { 1: "a", 2: "b" }; // JS 对象键恒为字符串 "1","2"
   const out = C.parse(input) as Record<string, string>;
   console.log("\n── record 数值键（键名转换） ──");
@@ -61,7 +61,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── record：enum 键声明驱动 ── */
 {
   const S = z.record(z.enum(["a", "b"]), z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { a: 1, b: 2 };
   const out = C.parse(input) as typeof input;
   console.log("\n── record enum 键（声明驱动） ──");
@@ -74,7 +74,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   assert.equal(C.safeParse(input3).success, false);
   // 缺失但值 optional → stock 物化 undefined → 脏
   const S2 = z.record(z.enum(["a", "b"]), z.number().optional());
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const input4 = { a: 1 };
   const out4 = C2.parse(input4) as any;
   console.log(
@@ -92,7 +92,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── record：string format 键（general path，键名不变） ── */
 {
   const S = z.record(z.email(), z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { "a@b.co": 1, "c@d.co": 2 };
   const out = C.parse(input) as typeof input;
   console.log("\n── record email 键（general，键名不变） ──");
@@ -103,7 +103,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── map ── */
 {
   const S = z.map(z.string(), z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = new Map([
     ["a", 1],
     ["b", 2],
@@ -114,7 +114,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   assert.equal(out, input);
 
   const S2 = z.map(z.string(), z.object({ n: z.number(), tag: z.string().default("t") }));
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const input2 = new Map([["a", { n: 1 }]]);
   const out2 = C2.parse(input2) as Map<string, any>;
   console.log(
@@ -129,7 +129,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 
   // Map 自身 checks
   const S3 = z.map(z.string(), z.number()).min(1);
-  const C3 = compileV2(S3);
+  const C3 = compile(S3);
   assert.equal(C3.parse(input) === input, true);
   assert.equal(C3.safeParse(new Map()).success, false);
   console.log("  .min(1) size check ✓");
@@ -138,7 +138,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── set ── */
 {
   const S = z.set(z.number());
-  const C = compileV2(S);
+  const C = compile(S);
   const input = new Set([1, 2, 3]);
   const out = C.parse(input) as Set<number>;
   console.log("\n── set ──");
@@ -146,7 +146,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   assert.equal(out, input);
 
   const S2 = z.set(z.object({ n: z.number(), tag: z.string().default("s") }));
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const item = { n: 1 };
   const input2 = new Set([item]);
   const out2 = C2.parse(input2) as Set<any>;
@@ -157,7 +157,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   assert.ok(!("tag" in item));
 
   const S3 = z.set(z.string()).max(2);
-  const C3 = compileV2(S3);
+  const C3 = compile(S3);
   const s3in = new Set(["a"]);
   assert.equal(C3.parse(s3in), s3in);
   assert.equal(C3.safeParse(new Set(["a", "b", "c"])).success, false);
@@ -171,7 +171,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
     lookup: z.map(z.string(), z.boolean()).nullable(),
     tags: z.set(z.string()),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   const input = {
     dict: { a: 1 },
     lookup: new Map([["k", true]]),

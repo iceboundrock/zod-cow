@@ -1,5 +1,5 @@
 /**
- * Differential fuzz test (zc-v2: official codegen + CoW skeletons vs stock zod4).
+ * Differential fuzz test (zc-z4: official codegen + CoW skeletons vs stock zod4).
  * Compares against stock zod4 on:
  *   1. success/failure parity  2. deepStrictEqual output  3. zero input distortion
  * Also reports top-level reference-sharing rate (CoW hit rate) and stock degradation rate.
@@ -7,7 +7,7 @@
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod4";
-import { compileV2 } from "../src/index-z4-v2.js";
+import { compile } from "../src/index-z4.js";
 
 interface RNG {
   next(): number;
@@ -486,7 +486,7 @@ function bAny(rng: RNG, depth: number): Built {
   return bWrap(rng, bLeaf(rng));
 }
 
-/* ─────────────────────────── 差分主循环（v2） ─────────────────────────── */
+/* ─────────────────────────── 差分主循环（z4） ─────────────────────────── */
 
 const SEEDS = Number(process.env.SEEDS ?? 200);
 const CASES_PER_SEED = Number(process.env.CASES ?? 100);
@@ -508,7 +508,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
     total++;
 
-    const compiled = compileV2(built.schema);
+    const compiled = compile(built.schema);
     if (compiled.stock) stockDowngraded++;
     const useAsync = compiled.async; // async 骨架 → 双侧走 safeParseAsync
 
@@ -633,11 +633,11 @@ function defRepr(schema: any, depth = 0): string {
 
 /* ─────────────────────────── 报告 ─────────────────────────── */
 
-console.log(`zc-v2 差分测试: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
+console.log(`zc-z4 差分测试: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
 console.log(
   `  成功一致: ${bothOk}   失败一致: ${bothFail}   顶层引用共享率: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}%（成功 case 中 ${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}%）`,
 );
-console.log(`  stock 降级（compileV2 放弃编译）: ${stockDowngraded} 次`);
+console.log(`  stock 降级（compile 放弃编译）: ${stockDowngraded} 次`);
 if (failures.length > 0) {
   console.log(`\n✗ ${failures.length} 个差异（前 10 个）:`);
   for (const f of failures.slice(0, 10)) console.log(`\n${f}`);

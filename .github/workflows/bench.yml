@@ -51,9 +51,9 @@ jobs:
       # pipefail, so a failing bench still fails the step through `tee`.
       # The package.json scripts already pass --expose-gc; BENCH_N comes from
       # the job env.
-      - name: Bench zod 4 v2
+      - name: Bench zod 4
         shell: bash
-        run: pnpm run bench:v2 2>&1 | tee bench-v2.txt
+        run: pnpm run bench:z4 2>&1 | tee bench-z4.txt
 
       - name: Bench zod 3
         if: ${{ !cancelled() }}
@@ -85,6 +85,6 @@ jobs:
             echo "> Smoke results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
             echo "> Runner noise makes these numbers non-comparable across runs; reference numbers live in the README and come from local runs."
             echo
-            section "zod 4 v2 (bench:v2)" bench-v2.txt
+            section "zod 4 (bench:z4)" bench-z4.txt
             section "zod 3 (bench)" bench-z3.txt
           } >> "$GITHUB_STEP_SUMMARY"

@@ -44,7 +44,7 @@ Two compiler front-ends live in `src/`; they share no code (`internal.ts` is the
 | Line | Entry | Engine | Status |
 |---|---|---|---|
 | zod3 v1 | `src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
-| zod4 | `src/index-z4.ts` → `src/cow4.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line** — new work goes here |
+| zod4 | `src/index-z4.ts` → `src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line** — new work goes here |
 
 zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1, `import { z } from "zod4"` is the npm alias for zod@4.5.4.
 
@@ -56,17 +56,32 @@ Every compiled node is `(input) => output | FAILED-sentinel`. Dirtiness needs no
 - Output may alias input, so refines must not mutate, and `readonly` freezing is applied to shared structure.
 - Failure paths carry no issue data of their own: they return the sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 
-### zod4 engine (`src/cow4.ts`) — how the pieces fit
+### zod4 engine (`src/cow4/`) — how the pieces fit
 
-1. **Official products as leaves/subtrees.** Imports `compileFn`, `INVALID`, `ZodCompileUnsupportedError`, `ZodCompileAsyncError`, `$ZodAsyncError` from the *internal* namespace `zod4/v4/core`. `compileFn(schema)` gives a stock-semantics parser; `compileFn(schema, {assertOnly:true})` gives a validator that skips output construction.
-2. **Purity analysis** (`isPure`, `leafChecksArePure`, `checksAreCowSafe`, ~lines 219–340): a conservative whitelist deciding "validation passes ⇒ output === input". Pure subtrees get the official *validator*; impure subtrees get the official *parser* plus a reference comparison. Three documented traps, each caught by the differential fuzzer: `overwrite` checks (`.trim()` etc.) rewrite values and are impure; length/size checks carry a default `when` (`WHEN_DEFAULTED_CHECKS`, copied from zod) and must not be rejected as custom-`when`; `optional/nullable` wrappers must be unwrapped before deciding whether a container gets a skeleton.
-3. **Container skeletons** (`emitCoWObject/Array/Tuple/Record/Map/Set`): string-templated codegen that mirrors zod's own `generate*` functions line by line, then rewrites the unconditional `const out = {...}` into "compare refs, copy on first dirt, `return input` when clean". Container-level checks (`min/max/refine`) run via `containerChecksFn` on the final output in both clean and copied paths. Wiring goes through `childProduct` / `cowSafeContainerForChild` / `emitBoxedContainer`; extend those when adding a container or wrapper combination.
+The engine is a directory of small modules (guideline: about 500 lines per file for this line and new code; the frozen zod3 compiler and the fuzzers are exempt):
+
+| Module | Holds |
+|---|---|
+| `index.ts` | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator` |
+| `product.ts` | The `Fn` product contract, the `ZC_ASYNC` marker (`markAsync`/`isAsyncProduct`), `isAsyncFn`, `throwAsync` |
+| `codectx.ts` | `CodeCtx` (lines, hoisted constants, var names, async flag), `escKey`, `buildFn` (Function-constructor build) |
+| `predicates.ts` | Predicates copied verbatim from zod: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
+| `purity.ts` | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
+| `official.ts` | Official-product wrappers: `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync` |
+| `emit.ts` | Codegen core: `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
+| `emit-object.ts`, `emit-array.ts`, `emit-tuple.ts`, `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | One container skeleton each (`emitCoWObject` … `emitCoWSet`) |
+
+`emit.ts` and the six `emit-*.ts` files form an import cycle on purpose: `emitBoxedContainer` dispatches to the skeletons and the skeletons recurse through `containerChildFn`/`childProduct`. It is safe because every binding in the cycle is a hoisted function declaration and nothing in those modules runs at load time; keep it that way (no top-level code that calls across the cycle).
+
+1. **Official products as leaves/subtrees** (`official.ts`). Imports `compileFn`, `INVALID`, `ZodCompileUnsupportedError`, `ZodCompileAsyncError`, `$ZodAsyncError` from the *internal* namespace `zod4/v4/core`. `compileFn(schema)` gives a stock-semantics parser; `compileFn(schema, {assertOnly:true})` gives a validator that skips output construction.
+2. **Purity analysis** (`isPure`, `leafChecksArePure`, `checksAreCowSafe` in `purity.ts`): a conservative whitelist deciding "validation passes ⇒ output === input". Pure subtrees get the official *validator*; impure subtrees get the official *parser* plus a reference comparison. Three documented traps, each caught by the differential fuzzer: `overwrite` checks (`.trim()` etc.) rewrite values and are impure; length/size checks carry a default `when` (`WHEN_DEFAULTED_CHECKS`, copied from zod) and must not be rejected as custom-`when`; `optional/nullable` wrappers must be unwrapped before deciding whether a container gets a skeleton.
+3. **Container skeletons** (`emitCoWObject/Array/Tuple/Record/Map/Set`, one `emit-*.ts` each): string-templated codegen that mirrors zod's own `generate*` functions line by line, then rewrites the unconditional `const out = {...}` into "compare refs, copy on first dirt, `return input` when clean". Container-level checks (`min/max/refine`) run via `containerChecksFn` on the final output in both clean and copied paths. Wiring goes through `childProduct` / `cowSafeContainerForChild` / `emitBoxedContainer` (`emit.ts` and `purity.ts`); extend those when adding a container or wrapper combination.
 4. **Async**: official `ZodCompileAsyncError` is used as the detector. Async subtrees become async islands (marked with the `ZC_ASYNC` symbol), every product call site emits `await`, and the skeleton becomes an async function. `subtreeHasAsync` statically covers `lazy(async…)` which the official compiler misses. Sync API on an async product throws `$ZodAsyncError`, same as stock.
 5. **Degradation chain**, per subtree, never trading correctness: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`). `compiled.code` exposes the generated skeleton source for debugging.
 
 ### Version anchoring
 
-The zod4 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEFAULTED_CHECKS`, `getTupleOptStart`, `mayOutputUndefined`, `acceptsAbsence`). Anchored to **zod 4.5.4**. `src/probe-z4-flags.ts` encodes the stock behaviors the compilers assume (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, etc.), and `tests/canary-z4.test.ts` (first step of `test:z4`) asserts them so an upgrade turns tests red instead of drifting silently. After bumping zod: rerun probes, then the full differential suites.
+The zod4 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEFAULTED_CHECKS` in `src/cow4/purity.ts`; `getTupleOptStart`, `mayOutputUndefined`, `acceptsAbsence` in `src/cow4/predicates.ts`, which is the one file to diff against upstream on a bump). Anchored to **zod 4.5.4**. `src/probe-z4-flags.ts` encodes the stock behaviors the compilers assume (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, etc.), and `tests/canary-z4.test.ts` (first step of `test:z4`) asserts them so an upgrade turns tests red instead of drifting silently. After bumping zod: rerun probes, then the full differential suites.
 
 ### Known unsupported (throws at compile time or degrades to stock)
 

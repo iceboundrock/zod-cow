@@ -1,7 +1,8 @@
 /**
  * zod4 behavior probe flags — the "version canary" for the semantics the compiler hard-codes.
  *
- * cow4.ts assumes the stock behaviors below (all measured on zod 4.5.4 via probe-z4.ts).
+ * The zod4 engine (src/cow4/) assumes the stock behaviors below (all measured on zod 4.5.4
+ * via probe-z4.ts).
  * The canary-z4 test asserts these flags still match the compiler's assumptions: when a zod
  * upgrade changes the implicit contract the test goes red instead of drifting silently.
  */

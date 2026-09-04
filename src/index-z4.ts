@@ -15,7 +15,13 @@
  *                       $ZodAsyncError (same semantics as stock)
  */
 import type { z } from "zod4";
-import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4.js";
+import {
+  INVALID,
+  compileCowDebug,
+  officialValidator,
+  isAsyncProduct,
+  type Fn,
+} from "./cow4/index.js";
 import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod4/v4/core";
 
 export interface Compiled<T extends z.ZodType> {

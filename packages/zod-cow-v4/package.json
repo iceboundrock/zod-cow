@@ -1,0 +1,50 @@
+{
+  "name": "zod-cow-v4",
+  "version": "0.5.0",
+  "description": "Copy-on-Write compilation layer for zod 4 schemas: parse output === input when nothing changed, otherwise only the dirty path is copied",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iceboundrock/zod-cow.git",
+    "directory": "packages/zod-cow-v4"
+  },
+  "homepage": "https://github.com/iceboundrock/zod-cow/tree/main/packages/zod-cow-v4#readme",
+  "bugs": "https://github.com/iceboundrock/zod-cow/issues",
+  "keywords": [
+    "zod",
+    "copy-on-write",
+    "parser",
+    "validation",
+    "structural-sharing"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx tests/canary-z4.test.ts && tsx tests/smoke-z4.test.ts && tsx tests/smoke-z4-containers.test.ts && tsx tests/smoke-z4-tuple-async.test.ts && tsx tests/differential-z4.test.ts",
+    "probe": "tsx src/probe-z4.ts",
+    "smoke:pack": "pnpm run build && tsx scripts/pack-smoke.ts"
+  },
+  "peerDependencies": {
+    "zod": ">=4.5.4 <4.6.0"
+  },
+  "devDependencies": {
+    "zod": "4.5.4"
+  }
+}

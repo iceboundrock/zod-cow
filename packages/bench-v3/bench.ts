@@ -14,7 +14,7 @@
 import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { compile } from "../src/index.js";
+import { compile } from "zod-cow-v3";
 
 const N = Number(process.env.BENCH_N ?? 500_000);
 const PASSES = 3;

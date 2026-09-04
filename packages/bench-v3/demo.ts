@@ -1,5 +1,5 @@
 /**
- * 60-second demo. Run: pnpm exec tsx examples/demo.ts
+ * 60-second demo of the zod3 line. Run: pnpm run demo:v3
  *
  * Shows the three core promises of the CoW compilation layer:
  *   1. Pure validation is zero-copy (returns the input reference itself)
@@ -7,7 +7,7 @@
  *   3. The input is never mutated (contrast: the Numeric fork strips keys in place)
  */
 import { z } from "zod";
-import { compile } from "../src/index.js";
+import { compile } from "zod-cow-v3";
 
 /* 1) Pure schema: zero-copy ─────────────────────────────────────────── */
 

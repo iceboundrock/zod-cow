@@ -7,13 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      zod:
-        specifier: 3.24.1
-        version: 3.24.1
-      zod4:
-        specifier: npm:zod@^4.5.4
-        version: zod@4.5.4
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.11
@@ -21,15 +14,48 @@ importers:
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.43
-      arktype:
-        specifier: ^2.2.3
-        version: 2.2.3
       tsx:
         specifier: ^4.19.0
         version: 4.23.13
       typescript:
         specifier: ^5.4.0
         version: 5.9.3
+
+  packages/bench-v3:
+    dependencies:
+      arktype:
+        specifier: ^2.2.3
+        version: 2.2.3
+      zod:
+        specifier: 3.24.1
+        version: 3.24.1
+      zod-cow-v3:
+        specifier: workspace:*
+        version: link:../zod-cow-v3
+
+  packages/bench-v4:
+    dependencies:
+      arktype:
+        specifier: ^2.2.3
+        version: 2.2.3
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
+      zod-cow-v4:
+        specifier: workspace:*
+        version: link:../zod-cow-v4
+
+  packages/zod-cow-v3:
+    devDependencies:
+      zod:
+        specifier: 3.24.1
+        version: 3.24.1
+
+  packages/zod-cow-v4:
+    devDependencies:
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
 
 packages:
 

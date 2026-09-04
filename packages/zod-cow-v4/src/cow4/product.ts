@@ -2,7 +2,7 @@
  * Product contract shared by every zod4-line module: the Fn type, the async-product marker
  * and the async-function probes.
  */
-import { ZodCompileAsyncError } from "zod4/v4/core";
+import { ZodCompileAsyncError } from "zod/v4/core";
 
 /* zod4 core types (kept loose; the prototype semantic layer is authoritative) */
 export type Node = any;

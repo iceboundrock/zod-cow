@@ -6,7 +6,7 @@
  * The canary-z4 test asserts these flags still match the compiler's assumptions: when a zod
  * upgrade changes the implicit contract the test goes red instead of drifting silently.
  */
-import { z } from "zod4";
+import { z } from "zod";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -99,7 +99,7 @@ function computeFlags(): Probe4Flags {
 
   let zodVersion = "unknown";
   try {
-    zodVersion = require("zod4/package.json").version as string;
+    zodVersion = require("zod/package.json").version as string;
   } catch {
     /* keep */
   }

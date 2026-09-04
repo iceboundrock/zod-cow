@@ -1,0 +1,18 @@
+{
+  "name": "zod-cow-v3",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Frozen zod 3 line of the CoW compilation layer (reference implementation, not published)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsx tests/harness.test.ts && tsx tests/unit.test.ts && tsx tests/differential.test.ts",
+    "probe": "tsx src/probe.ts"
+  },
+  "devDependencies": {
+    "zod": "3.24.1"
+  }
+}

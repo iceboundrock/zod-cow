@@ -1,10 +1,10 @@
 # zc-z4 architecture: self-written codegen vs reusing zod4's official codegen
 
 > Version anchor: zod 4.5.4 · every piece of generated code in this document is a real product dump (`compileFn(schema, {debug:true})` and `compileCowDebug(schema)`).
-> Companion code: `src/cow4/` (the current zod4 line, reusing the official compiler; module layout in §11).
+> Companion code: `packages/zod-cow-v4/src/cow4/` (the current zod4 line, reusing the official compiler; module layout in §11).
 >
 > v1 is no longer in the repository: the self-written zod4 front-end (at the time `src/compile-z4.ts` + `src/index-z4.ts`) was deleted
-> after zc-z4 landed (issue #4). The path `src/index-z4.ts` today refers to the zc-z4 entry.
+> after zc-z4 landed (issue #4). The zc-z4 entry is `packages/zod-cow-v4/src/index.ts` today (it was `src/index-z4.ts` until the package split, #9).
 > Every description of v1 in this document, together with its code references and benchmark numbers, is a historical
 > comparison, recording the decision path of "why we went from self-written codegen to reusing the official codegen";
 > the corresponding source has to be traced back to commits from before the deletion. The only zod4 compile line in the
@@ -16,7 +16,7 @@ The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v
 
 | | v1 (self-written codegen) | zc-z4 (official codegen + CoW decoration) |
 |---|---|---|
-| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `src/cow4/` is 1667 lines across 13 modules |
+| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `packages/zod-cow-v4/src/cow4/` (then `src/cow4/`) is 1667 lines across 13 modules |
 | Source of semantic correctness | reimplementing zod semantics ourselves (issue/format/check, the whole set) | official compiler + official runtime fallback |
 | S1 pure validation (500 000 accounts) | 521ms | **283ms** (~1.0x vs the official parser) |
 | S2 dirty load (10% default) | 504ms | **247ms** (1.47x vs the official parser) |
@@ -25,7 +25,7 @@ The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v
 | S7 async schema | not supported | **105ms** (2.50x vs stock safeParseAsync) |
 | retained after GC | 0MB | **0MB** (the official parser is 108~217MB) |
 | following upstream upgrades | a manual semantic sync every time | automatic benefit (official compiler optimizations) |
-| risk | semantic drift (regexes / issue format) | dependence on internal APIs (the `zod4/v4/core` export surface) |
+| risk | semantic drift (regexes / issue format) | dependence on unsupported APIs (the compiler exports of `zod/v4/core`) |
 
 The conclusion: zod4's JIT compiler (`src/v4/core/compile.ts`) is a ready-made semantic backend.
 Rather than writing another compiler, the layer uses official products as the leaves and subtrees,
@@ -46,7 +46,7 @@ route comes from: do not write a semantic codegen of our own, use the official c
 
 ## 2. The reusable surface of the official codegen (evidence from the source)
 
-The `zod4/v4/core` namespace re-exports everything `compile.js` exports:
+The `zod/v4/core` namespace (a public permalink subpath) re-exports everything `compile.js` exports:
 
 ```ts
 import {
@@ -56,7 +56,7 @@ import {
   ZodCompileAsyncError,         // async refine/transform (not expressible in the sync fast path)
   regexes,                      // the official regex family (number/uuid/email sources...)
   util,                         // official util (isPlainObject/shallowClone...)
-} from "zod4/v4/core";
+} from "zod/v4/core";
 ```
 
 Three key product contracts:
@@ -494,10 +494,10 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 
 ## 8. Correctness evidence
 
-- `tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `tests/smoke-z4-containers.test.ts`
-  (the three record paths / map / set / size checks / container combinations) + `tests/smoke-z4-tuple-async.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+  (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
-- `tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
+- `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine / async transform wrappers), fully consistent with stock zod4:
   - success/failure parity identical (20813 successes / 29187 failures)
@@ -508,12 +508,12 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
   a sparse array and loses the null (deterministic repro: `z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length", slot 1 becomes a hole).
   The skeleton outputs a dense array (which is more correct), and the differential generator avoids that combination; see upstream-issue-draft.md §Bonus.
-- Failure diagnostic hook: `REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
+- Failure diagnostic hook: `REPRO=seed:case pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`
   prints the schema description, the input, and the CoW skeleton source.
 
 ## 9. Version anchor and risks
 
-The official internal surface we depend on (all publicly exported through `zod4/v4/core`, but positioned as internal by the official comments):
+The unsupported surface we depend on (all reachable through the public `zod/v4/core` permalink subpath, but positioned as internal by the official comments; only the two `ZodCompile*` errors are public API):
 
 | API | Purpose | Drift risk |
 |---|---|---|
@@ -546,7 +546,7 @@ which would remove the largest single internal dependency.
 
 ## 11. Source layout (issue #5)
 
-The engine lives in `src/cow4/` as a set of modules cut along the seams described above; every function kept its body and comments when it moved, so the sections of this document still map one-to-one onto the code.
+The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut along the seams described above; every function kept its body and comments when it moved, so the sections of this document still map one-to-one onto the code.
 
 | Module | Section of this doc | Holds |
 |---|---|---|

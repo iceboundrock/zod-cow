@@ -15,8 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 22 = engines floor, 24 = README benchmark environment, 26 = current
-        node: [22, 24, 26]
+        # 22.13.0 = the exact engines floor zod-cow-v4 advertises (the require(esm) promise is
+        # made for it), 22 = newest 22.x, 24 = README benchmark environment, 26 = current
+        node: ["22.13.0", 22, 24, 26]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -33,14 +34,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
+      # Builds zod-cow-v4 first: bench-v4 typechecks against the built declarations.
+      - name: Typecheck (build zod-cow-v4, then every package)
         run: pnpm run typecheck
 
-      - name: Test zod 3
-        run: pnpm test
+      - name: Test zod 3 (zod-cow-v3)
+        run: pnpm run test:v3
 
-      - name: Test zod 4
-        run: pnpm run test:z4
+      - name: Test zod 4 (zod-cow-v4)
+        run: pnpm run test:v4
+
+      # npm pack, listing both ways, shipped engines.node and exports, install into a temporary
+      # project, import + require, ./package.json export, consumer typecheck. tsc --noEmit says
+      # nothing about declaration emission, exports or files, so this runs on every push/PR.
+      - name: Packed tarball smoke (zod-cow-v4)
+        run: pnpm run smoke:pack
 
   lint:
     name: lint
@@ -60,6 +68,10 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # The test harness exists once per line package and the copies must stay identical.
+      - name: Compare the two harness copies byte for byte
+        run: pnpm run check:harness
 
       - name: Lint and format check
         run: pnpm run lint

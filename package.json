@@ -1,33 +1,33 @@
 {
   "name": "cow-zod-prototype",
-  "version": "0.5.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.24.0",
   "engines": {
     "node": ">=22.13.0"
   },
-  "description": "Zod-compatible CoW compilation layer — the zod4 line reuses the official zod4 codegen (compileFn/assertOnly) as the semantic backend, adds CoW container skeletons (object/array/tuple/record/map/set) + async support",
+  "description": "Zod-compatible CoW compilation layer: pnpm workspace root (packages/zod-cow-v4 is the published package)",
   "scripts": {
-    "probe": "tsx src/probe.ts",
-    "probe:z4": "tsx src/probe-z4.ts",
-    "test": "tsx tests/harness.test.ts && tsx tests/unit.test.ts && tsx tests/differential.test.ts",
-    "typecheck": "tsc --noEmit",
+    "build": "pnpm --filter zod-cow-v4 run build",
+    "typecheck": "pnpm run build && pnpm -r run typecheck",
     "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "bench": "node --expose-gc --import tsx bench/bench.ts",
-    "test:z4": "tsx tests/canary-z4.test.ts && tsx tests/smoke-z4.test.ts && tsx tests/smoke-z4-containers.test.ts && tsx tests/smoke-z4-tuple-async.test.ts && tsx tests/differential-z4.test.ts",
-    "bench:z4": "node --expose-gc --import tsx bench/bench-z4.ts"
-  },
-  "dependencies": {
-    "zod": "3.24.1",
-    "zod4": "npm:zod@^4.5.4"
+    "check:harness": "cmp packages/zod-cow-v3/tests/harness.ts packages/zod-cow-v4/tests/harness.ts",
+    "test": "pnpm run test:v3 && pnpm run test:v4",
+    "test:v3": "pnpm --filter zod-cow-v3 run test",
+    "test:v4": "pnpm --filter zod-cow-v4 run test",
+    "smoke:pack": "pnpm --filter zod-cow-v4 run smoke:pack",
+    "probe:v3": "pnpm --filter zod-cow-v3 run probe",
+    "probe:v4": "pnpm --filter zod-cow-v4 run probe",
+    "bench:v3": "pnpm --filter bench-v3 run bench",
+    "bench:v4": "pnpm run build && pnpm --filter bench-v4 run bench",
+    "demo": "pnpm run build && pnpm --filter bench-v4 run demo",
+    "demo:v3": "pnpm --filter bench-v3 run demo"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.11",
     "@types/node": "^20.11.0",
-    "arktype": "^2.2.3",
     "tsx": "^4.19.0",
     "typescript": "^5.4.0"
   }

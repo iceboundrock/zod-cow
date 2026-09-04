@@ -3,8 +3,8 @@
  * Item-by-item assertions on alignment with stock zod4 semantics + CoW reference-sharing behavior.
  */
 import assert from "node:assert/strict";
-import { z } from "zod4";
-import { compile } from "../src/index-z4.js";
+import { z } from "zod";
+import { compile } from "../src/index.js";
 
 let group = "";
 function head(s: string): void {

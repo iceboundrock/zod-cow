@@ -21,10 +21,10 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 | 线 | 入口 | 引擎 | 状态 |
 |---|---|---|---|
-| **zod4** | `src/index-z4.ts` → `src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **活跃线**，所有新工作都在这里 |
-| zod3 | `src/index.ts` → `src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **冻结参考实现**：CoW 思路的起点和对比基线，保持测试通过但不再扩展 |
+| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **活跃线**，所有新工作都在这里 |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **冻结参考实现**：CoW 思路的起点和对比基线，保持测试通过但不再扩展 |
 
-zod 3 与 zod 4 并排安装：`import { z } from "zod"` 是 3.24.1，`import { z } from "zod4"` 是 zod@4.5.4 的 npm 别名。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
+两条线各自是一个 workspace 包，各装各的 zod：`packages/zod-cow-v4`（以 [`zod-cow-v4`](packages/zod-cow-v4/README.md) 发布）对 zod 4.5.4，`packages/zod-cow-v3`（私有的冻结线）对 zod 3.24.1；两者都用真实的 `zod` 说明符引入。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
 
 ## 快速开始
 
@@ -32,63 +32,31 @@ zod 3 与 zod 4 并排安装：`import { z } from "zod"` 是 3.24.1，`import { 
 
 ```bash
 pnpm install
-pnpm run test:z4     # zod4 线：版本金丝 + 冒烟测试 + 20000 case 差分模糊（对比 stock zod4）
-pnpm test            # zod3 线：27 个单元测试 + 20000 case 差分模糊（对比 stock zod3）
-pnpm run bench:z4    # zod4 基准，50 万条记录（需 node --expose-gc，脚本已配置）
-pnpm run bench       # zod3 基准
-pnpm run probe:z4    # 勘察 stock zod4 的 def 结构与行为
-pnpm run probe       # 实测 stock zod3 的边界语义（zod3 线）
-pnpm exec tsx examples/demo.ts   # 60 秒 demo：CoW 的三个承诺（zod3 线）
+pnpm run build       # 构建 zod-cow-v4（ESM + 类型声明，输出到 packages/zod-cow-v4/dist）
+pnpm run test:v4     # zod4 线：版本金丝 + 冒烟测试 + 20000 case 差分模糊（对比 stock zod4）
+pnpm run test:v3     # zod3 线：27 个单元测试 + 20000 case 差分模糊（对比 stock zod3）
+pnpm run smoke:pack  # 打包 zod-cow-v4，并在临时消费者项目中验证 tarball
+pnpm run bench:v4    # zod4 基准，对构建产物测量，50 万条记录（需 node --expose-gc，脚本已配置）
+pnpm run bench:v3    # zod3 基准
+pnpm run probe:v4    # 勘察 stock zod4 的 def 结构与行为
+pnpm run probe:v3    # 实测 stock zod3 的边界语义（zod3 线）
+pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的承诺
 ```
 
-环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码；`BENCH_N` 设定基准记录数。
+环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数。
 
 > 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
 > 的 [run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)：GitHub 托管的 `ubuntu-latest` runner，node v24，`BENCH_N=50 000`，3 轮取中位。
-> 该 workflow 在手动触发（或每周）时跑 `bench:z4` 和 `bench`，把表格打印到 job summary。
+> 该 workflow 在手动触发（或每周）时先构建 `zod-cow-v4`，再跑 `bench-v4` 和 `bench-v3`，把表格打印到 job summary。
 > 在这个记录数下 runner 噪声有几毫秒，接近 1.0x 的比值（S1、S2 对官方 parser）应视为持平。
-> 本地 `pnpm run bench:z4` 使用脚本默认的 50 万条记录。
+> 本地 `pnpm run bench:v4` 使用脚本默认的 50 万条记录。
 
-## 使用
+## 安装与使用
 
-### zod4 线
+`zod-cow-v4` 是发布的包。它的 README，[packages/zod-cow-v4/README.md](packages/zod-cow-v4/README.md)（英文），是面向使用者的文档，也是安装、用法、API 和 zod peer 策略文字的唯一出处：安装方式（`pnpm add zod-cow-v4 zod`）和 API 表都在那里。
 
-```ts
-import { z } from "zod4";                       // 通过 npm 别名引入 zod@4.5.4
-import { compile } from "./src/index-z4.js";
-
-const User = z.object({
-  id: z.number().int(),
-  name: z.string(),
-  role: z.enum(["admin", "member", "viewer"]).default("viewer"),
-});
-
-const fast = compile(User);
-
-fast.parse(data);           // CoW：干净时 === 输入原引用，否则只拷贝脏路径
-fast.safeParse(data);       // 不抛错版本；失败路径走 stock safeParse，issues/ZodError 全部官方
-fast.validate(data);        // 纯校验（官方整树 assertOnly 产物）：成功返回输入引用，失败返回 null
-await fast.parseAsync(data);     // async 变体；schema 含 async refine/transform 时唯一可用的入口
-await fast.safeParseAsync(data);
-fast.async;                 // true = 骨架含 async 子树，此时同步 API 抛 $ZodAsyncError（与 stock 一致）
-fast.stock;                 // true = 本层对整树放弃，全部直通 stock（语义无损）
-fast.code;                  // 生成的 CoW 骨架源码，用于调试（降级到 stock 时为 null）
-```
-
-### zod3 线
-
-```ts
-import { z } from "zod";                        // zod@3.24.1
-import { compile } from "./src/index.js";
-
-const fast = compile(User);
-
-fast.parse(data);     // 同上的 CoW 语义；失败抛带 issues 的 ZcError
-fast.validate(data);  // 同 parse 的运行时，返回类型为 DeepReadonly<User>
-fast.safeParse(data); // 不抛错版本
-fast.pure;            // 静态纯度：true 表示成功时恒等返回输入引用
-```
+zod3 线不发布。它是 `packages/zod-cow-v3` 里的冻结参考实现，由自己的测试和 `bench-v3` 通过 workspace 导出使用；其 API 与 zod4 线不同（`ZcError` 而非 `ZodError`、`validate()` 返回 `DeepReadonly` 视图、静态 `.pure` 标志），见 `packages/zod-cow-v3/src/index.ts` 和 `pnpm run demo:v3`。
 
 ## CoW 不变量
 
@@ -132,15 +100,15 @@ zod4 线不重新实现 zod 的语义。zod4（>= 4.1）自带 JIT 编译器（`
 4. Async：async 子树变成 async 岛，所有产物调用位发射 `await`，骨架变成 async 函数。async 产物上的同步 API 抛 `$ZodAsyncError`，与 stock 一致。
 5. 降级链，按子树独立，永不牺牲正确性：CoW 骨架 → 官方 validator（纯净叶子）→ 官方 parser（非纯子树）→ runtime island（`_zod.run` 黑盒）→ 整树 stock `safeParse`（`compiled.stock === true`）。
 
-本层依赖 zod4 内部 API（`zod4/v4/core` 的 `compileFn`、`INVALID`、编译错误类）和几处手工照抄的谓词，锚定 zod 4.5.4：`tests/canary-z4.test.ts` 断言编译器所假设的 stock 行为，升级时测试先红而不是静默漂移。[docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) 是请求 zod 上游把这一面公开的 issue 草稿。
+本层依赖 `zod/v4/core`——一个公开的 permalink 子路径，但其中的编译器导出（`compileFn`、`assertOnly`、`INVALID`、产物协议）不受支持——和几处手工照抄的谓词，锚定 zod 4.5.4，即包的 peer 范围下界：`packages/zod-cow-v4/tests/canary-z4.test.ts` 断言编译器所假设的 stock 行为，升级时测试先红而不是静默漂移。[docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) 是请求 zod 上游把这一面公开的 issue 草稿。
 
-zod3 线则靠探针对齐（`src/probe.ts` 在运行时实测 stock zod3 的边界语义）：缺席 optional 键不物化、present-undefined 键保留、默认值要过内层校验、失败后继续收集兄弟字段的 issue、`readonly` 浅冻结。
+zod3 线则靠探针对齐（`packages/zod-cow-v3/src/probe.ts` 在运行时实测 stock zod3 的边界语义）：缺席 optional 键不物化、present-undefined 键保留、默认值要过内层校验、失败后继续收集兄弟字段的 issue、`readonly` 浅冻结。
 
 完整设计（生成代码与官方产物并排 dump）见 [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)。
 
 ## 基准
 
-zod4 线，[Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，3 轮取中位（`pnpm run bench:z4`，`BENCH_N=50000`）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物；S4 的基线是同一 array schema 的官方 `assertOnly` validator，因为 parser 没有纯校验模式。
+zod4 线，[Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，3 轮取中位（`pnpm run bench:v4`，`BENCH_N=50000`；该次 run 早于包拆分，测的是 TypeScript 源码而非构建产物）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物；S4 的基线是同一 array schema 的官方 `assertOnly` validator，因为 parser 没有纯校验模式。
 
 | 场景 | stock zod4 | 官方 parser | **zc-z4（CoW）** | arktype |
 |---|---|---|---|---|
@@ -169,10 +137,10 @@ zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4
 
 ## 正确性证据
 
-- 差分模糊（`tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union，套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。
-- 冒烟测试（`tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
-- 版本金丝（`tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
-- zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`tests/differential.test.ts`），顶层引用共享率约 92%。
+- 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union，套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。
+- 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
+- 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
+- zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`），顶层引用共享率约 92%。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
 
 ## 已知限制（原型范围）
@@ -190,34 +158,41 @@ zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4
 
 ## 目录
 
+一个 pnpm workspace：每个 zod 大版本一个包，每条线再配一个基准包（[ADR 0001](docs/adr/0001-package-layout.md)）：
+
 ```
-src/index-z4.ts             zod4 compile() API（活跃线）
-src/cow4/                   zod4 引擎：官方 codegen + CoW 容器骨架 + async 通道
+packages/zod-cow-v4/        以 zod-cow-v4 发布（活跃线）；peer zod >=4.5.4 <4.6.0，ESM + 类型声明输出到 dist/
+  README.md                 面向使用者的文档：安装、用法、API、peer 策略
+  src/index.ts              compile() API
+  src/cow4/                 引擎：官方 codegen + CoW 容器骨架 + async 通道
                             （index、product、codectx、predicates、purity、official、emit、emit-{object,array,tuple,record,map,set}）
-src/probe-z4.ts             zod4 def 结构与行为勘察（一次性诊断）
-src/probe-z4-flags.ts       zod4 语义金丝 flag（版本升级自动报警）
-src/index.ts                zod3 compile() API（冻结参考）
-src/compile.ts              zod3 闭包树编译器
-src/internal.ts             zod3 协议：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
-src/regexes.ts              zod 3.24.1 内部格式正则的逐字拷贝（zod3 线）
-src/probe.ts                stock zod3 行为探针
-tests/harness.ts            零依赖测试框架（test / summary / deepEqual）
-tests/canary-z4.test.ts     zod 版本金丝（stock zod4 行为 ↔ 编译器假设）
-tests/smoke-z4*.test.ts     zod4 行为断言（容器 / tuple / async）
-tests/differential-z4.test.ts   zod4 差分模糊（20000 case，REPRO 钩子）
-tests/unit.test.ts          zod3 单元测试（27 项）
-tests/differential.test.ts  zod3 差分模糊（20000 case）
-bench/bench-z4.ts           zod4 基准（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5 容器 / S6 tuple / S7 async）
-bench/bench.ts              zod3 基准（50 万账户）
-examples/demo.ts            60 秒上手
+  src/probe-z4.ts           zod4 def 结构与行为勘察（一次性诊断，不参与构建）
+  src/probe-z4-flags.ts     zod4 语义金丝 flag（版本升级自动报警，不参与构建）
+  tests/harness.ts          零依赖测试框架（test / summary / deepEqual），与 zod3 包的副本逐字节相同
+  tests/canary-z4.test.ts   zod 版本金丝（stock zod4 行为 ↔ 编译器假设）
+  tests/smoke-z4*.test.ts   zod4 行为断言（容器 / tuple / async）
+  tests/differential-z4.test.ts   zod4 差分模糊（20000 case，REPRO 钩子）
+  scripts/pack-smoke.ts     tarball 冒烟（文件清单、manifest、import、require、消费者 typecheck）
+packages/zod-cow-v3/        私有的 zod-cow-v3（冻结参考）；导出 TypeScript 源码，不构建
+  src/index.ts              compile() API
+  src/compile.ts            闭包树编译器
+  src/internal.ts           协议：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
+  src/regexes.ts            zod 3.24.1 内部格式正则的逐字拷贝
+  src/probe.ts              stock zod3 行为探针
+  tests/harness.ts          测试框架的另一份副本（另有 harness.test.ts 自测）
+  tests/unit.test.ts        zod3 单元测试（27 项）
+  tests/differential.test.ts   zod3 差分模糊（20000 case）
+packages/bench-v4/          bench.ts（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5 容器 / S6 tuple / S7 async）与 demo.ts，对构建后的 zod-cow-v4 运行
+packages/bench-v3/          bench.ts（50 万账户）与 zod3 的 demo.ts
 docs/ARCHITECTURE-z4.md     zod4 引擎架构深度走读（英文，权威版本；docs/ARCHITECTURE-z4.zh-CN.md 是冻结的中文快照）
 docs/upstream-issue-draft.md   给 zod 上游的 issue 草稿：请求公开 compileFn / assertOnly / INVALID
 docs/adr/0001-package-layout.md   ADR：每个 zod 大版本一个包的 pnpm workspace 布局、发布名 `zod-cow-v4`、benchmark 按线拆分、peer 依赖策略、zod3 线不发布
-CHANGELOG.md                v0.1～v0.5 历史与各版本的历史基准表
+CHANGELOG.md                v0.1～v0.5 历史与各版本的历史基准表（覆盖整个 workspace）
 ```
 
 ## 延伸阅读
 
+- [packages/zod-cow-v4/README.md](packages/zod-cow-v4/README.md)：发布包的使用者文档（安装、用法、API、peer 策略）。
 - [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)：生成代码与官方产物并排对照、纯度白名单与三大陷阱、record / map / set / tuple 骨架、async 通道、降级链状态机、版本锚点与风险。
 - [CHANGELOG.md](CHANGELOG.md)：项目如何从自研 zod3 编译器（v0.1）经自研 zod4 移植（v0.2，已移除）走到复用官方 codegen（v0.3～v0.5），附每一步的基准表。
 - [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md)：请求公开 `compileFn` API 的理由，以及模糊测试中发现的 zod4 runtime quirk。

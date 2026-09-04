@@ -2,7 +2,7 @@
  * Official-product wrappers: assertOnly validator, parser, runtime island and async island
  * (the per-subtree degradation chain).
  */
-import { $ZodAsyncError, INVALID, compileFn, ZodCompileAsyncError } from "zod4/v4/core";
+import { $ZodAsyncError, INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
 import { type Fn, isAsyncFn, markAsync, type Node } from "./product.js";
 
 /* ═══════════════════ Obtaining the official product (degradation chain) ═══════════════════ */

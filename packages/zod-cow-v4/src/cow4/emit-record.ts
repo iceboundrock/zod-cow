@@ -1,5 +1,5 @@
 /** Record skeleton: key-name/value double reference comparison + conditional {...input} copy. */
-import { regexes, util, ZodCompileUnsupportedError } from "zod4/v4/core";
+import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, escKey } from "./codectx.js";
 import { childProduct, containerChecksFn } from "./emit.js";
 import { officialFn } from "./official.js";

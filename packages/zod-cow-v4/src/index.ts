@@ -14,7 +14,7 @@
  *     .async            true = the skeleton holds an async subtree, so the sync API throws
  *                       $ZodAsyncError (same semantics as stock)
  */
-import type { z } from "zod4";
+import type { z } from "zod";
 import {
   INVALID,
   compileCowDebug,
@@ -22,7 +22,7 @@ import {
   isAsyncProduct,
   type Fn,
 } from "./cow4/index.js";
-import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod4/v4/core";
+import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod/v4/core";
 
 export interface Compiled<T extends z.ZodType> {
   readonly schema: T;

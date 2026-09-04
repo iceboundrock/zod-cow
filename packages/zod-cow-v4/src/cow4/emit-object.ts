@@ -1,5 +1,5 @@
 /** Object skeleton: reference comparison + conditional {...input} copy. */
-import { ZodCompileUnsupportedError } from "zod4/v4/core";
+import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, escKey } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";

@@ -3,8 +3,8 @@
 > Maintainer notes (not part of the issue). The body below can be pasted as is into a new issue on colinhacks/zod.
 > Suggested title: `[v4] Promote the internal JIT compiler (compileFn / assertOnly) to a public, supported API`
 >
-> Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `bench/bench-z4.ts` (reproducible benchmarks),
-> `tests/differential-z4.test.ts` (50 000-case differential suite).
+> Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `packages/bench-v4/bench.ts` (reproducible benchmarks),
+> `packages/zod-cow-v4/tests/differential-z4.test.ts` (50 000-case differential suite).
 > Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)).
 > If upstream would rather fix the bug first, the runtime quirk in the "Bonus" section can be filed as a separate issue.
 
@@ -14,7 +14,7 @@
 
 ### Summary
 
-Zod 4 ships a JIT compiler for schemas in `src/v4/core/compile.ts` (about 2.2k lines). It already powers the `zod/compile` side-effect entry, but it is only reachable through the `zod/v4/core` internal re-export path and carries no stability guarantee. We built a Copy-on-Write (CoW) compilation layer on top of it ([zc-z4](#what-we-built--measured)), and the surface it exposes turned out to be what such a layer needs. We are asking for `compileFn`, plus a small, closed set of companions, to become a documented, semver-supported public API.
+Zod 4 ships a JIT compiler for schemas in `src/v4/core/compile.ts` (about 2.2k lines). It already powers the `zod/compile` side-effect entry, and it is reachable through `zod/v4/core`, a public permalink subpath, but the compiler exports it takes (`compileFn`, `assertOnly`, `INVALID`, the artifact protocol) are unsupported and carry no stability guarantee. We built a Copy-on-Write (CoW) compilation layer on top of it ([zc-z4](#what-we-built--measured)), and the surface it exposes turned out to be what such a layer needs. We are asking for `compileFn`, plus a small, closed set of companions, to become a documented, semver-supported public API.
 
 ### Motivation
 
@@ -41,7 +41,7 @@ import {
   ZodCompileUnsupportedError,  // compile refusal: recursion, __proto__, exotic checks…
   ZodCompileAsyncError,        // async refine/transform on the synchronous fast path
   regexes, util,               // number-key retry regex, isPlainObject guard, etc.
-} from "zod4/v4/core";         // internal path, no stability guarantee
+} from "zod/v4/core";          // public permalink subpath; these compiler exports are unsupported
 ```
 
 Three artifact contracts we rely on:
@@ -77,7 +77,7 @@ The deeper and heavier the containers, the more of stock's time goes into output
 |---|---|---|
 | `compileFn(schema, { assertOnly, debug })` | leaf/subtree artifacts | low (signature), behavior guarded by differential tests |
 | `INVALID` sentinel | failure protocol | very low (`Symbol.for`) |
-| `ZodCompileUnsupportedError` / `ZodCompileAsyncError` | degradation decisions; the latter doubles as our async-subtree detector | low |
+| `ZodCompileUnsupportedError` / `ZodCompileAsyncError` (already public top-level exports) | degradation decisions; the latter doubles as our async-subtree detector | low |
 | `$ZodAsyncError` | official semantics for "Promise reached a synchronous fast path"; our sync API throws it for async skeletons | low |
 | `regexes.number`, `util.isPlainObject` | record skeleton (100% official semantics for numeric-key retry / plain-object guard) | low |
 | semantic predicates copied from source: `fastPathAcceptsAbsence`, `dropsWhenAbsent`, `getTupleOptStart`, `WHEN_DEFAULTED_CHECKS` | purity analysis & tuple tail semantics | medium: must be re-synced if zod changes `when`/optin-optout semantics |
@@ -86,7 +86,7 @@ We mitigate this with a strict degradation chain, where any drift degrades to st
 
 ### Proposal
 
-1. Export from `zod` (or a documented `zod/compile` entry):
+1. Export from `zod` (or a documented `zod/compile` entry); the two error classes are already exported at the top level and only need the same documented, semver-covered status:
 
 ```ts
 export declare function compileFn(
@@ -119,7 +119,7 @@ console.log(Object.getOwnPropertyNames(r.data).join(",")); // "0,2,length": slot
 
 `$ZodTuple`'s rest loop pushes `result.then((r) => handleTupleResult(r, payload, i))` for async rest elements, so the element writes land on the output array in microtask resolution order rather than index order. Slot 2 resolves first and materializes `value[2] = null`, giving the array length 3. By the time `handleTupleResults` fills the fixed slots, slot 1 never receives its own-key write, and the `null` from the input becomes a hole. This is deterministic across runs (V8/node 24). A sync rest element parses correctly.
 
-Reproduction, differential suite, and benchmarks: `cow-zod-prototype` (local project), zod 4.5.4, node v24.19.0.
+Reproduction, differential suite, and benchmarks: [zod-cow](https://github.com/iceboundrock/zod-cow) (`packages/zod-cow-v4`), zod 4.5.4, node v24.19.0.
 
 ### Compatibility & risk
 
@@ -131,7 +131,7 @@ Reproduction, differential suite, and benchmarks: `cow-zod-prototype` (local pro
 
 ### Appendix: draft self-check (for the maintainer, not submitted with the issue)
 
-- [x] Every benchmark number is reproducible from `bench/bench-z4.ts` (all scenarios S1 to S7)
+- [x] Every benchmark number is reproducible from `packages/bench-v4/bench.ts` (all scenarios S1 to S7)
 - [x] The dependency table matches `docs/ARCHITECTURE-z4.md` §9, including `getTupleOptStart` / `dropsWhenAbsent` introduced by the tuple skeleton (v0.5)
 - [x] The minimal reproduction of the quirk in the "Bonus" section was verified in a `node` REPL of this project (ownKeys is stably "0,2,length", sync rest parses correctly)
 - [x] Tone: a request to promote an existing surface plus an attached bug report, not a wish list; the proposed API shape is deliberately minimal

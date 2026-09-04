@@ -5,7 +5,7 @@
  * Same methodology as probe.ts (zod3): the compiler reads the probe flags, so when a zod version upgrade
  * changes the "implicit contract" it follows automatically instead of diverging silently.
  */
-import { z } from "zod4";
+import { z } from "zod";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -72,7 +72,7 @@ function dump(name: string, schema: any, probeVal: unknown): void {
 /* ──────────────────── Structure sampling ──────────────────── */
 
 console.log("╔══════════ zod4 structure sampling ══════════╗");
-console.log("zod version:", require("zod4/package.json").version);
+console.log("zod version:", require("zod/package.json").version);
 console.log("z.email:", typeof (z as any).email, "| z.iso:", typeof (z as any).iso);
 console.log("z.int:", typeof (z as any).int, "| z.set:", typeof z.set, "| z.map:", typeof z.map);
 console.log(

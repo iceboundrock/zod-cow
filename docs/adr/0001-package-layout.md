@@ -31,10 +31,11 @@ packages/zod-cow-v4/    published as `zod-cow-v4`: the zod4 line (entry, engine,
                         smoke and differential tests, its own copy of the test harness)
 packages/zod-cow-v3/    private `zod-cow-v3`: the frozen zod3 line, its unit and differential tests,
                         its own copy of the test harness
-packages/bench-v4/      private `bench-v4`: the zod4 benchmark and `examples/demo.ts`; depends on
-                        `zod-cow-v4` (`workspace:*`), `zod@4.5.4` and the reference-line libraries (`arktype`)
-packages/bench-v3/      private `bench-v3`: the zod3 benchmark; depends on `zod-cow-v3` (`workspace:*`),
-                        `zod@3.24.1` and `arktype`
+packages/bench-v4/      private `bench-v4`: the zod4 benchmark and a demo written against the published
+                        API; depends on `zod-cow-v4` (`workspace:*`), `zod@4.5.4` and the reference-line
+                        libraries (`arktype`)
+packages/bench-v3/      private `bench-v3`: the zod3 benchmark and today's `examples/demo.ts`, which targets
+                        the zod3 API; depends on `zod-cow-v3` (`workspace:*`), `zod@3.24.1` and `arktype`
 ```
 
 The repository root is a private workspace package holding `pnpm-workspace.yaml`, `biome.json`, the base `tsconfig.json`, the GitHub workflows, `docs/`, both READMEs and `CHANGELOG.md`. Root scripts fan out with `pnpm -r` (or `pnpm --filter`); no task runner (turbo, nx) is added for four packages.
@@ -54,7 +55,9 @@ The benchmarks are packages of their own for two reasons. The reference-line lib
 
 ### 3. Peer-dependency policy for zod
 
-`zod-cow-v4` declares `zod` as a **peerDependency whose range covers only the minors the test suites have verified**. The initial range is `>=4.5.4 <4.6.0`. The package's own devDependency pins the exact version used in CI (`zod@4.5.4`).
+`zod-cow-v4` declares `zod` as a **peerDependency whose range is limited to the minors the test suites have verified**. The initial range is `>=4.5.4 <4.6.0`. The package's own devDependency pins the exact version used in CI (`zod@4.5.4`).
+
+The range admits patch releases inside a verified minor that the suites have not run against (a future `4.5.5` installs without a warning). That is trusted, not verified, and the record says so rather than pretending otherwise. The trust rests on three things. Semver reserves patches for bug fixes, and zod has kept to that inside 4.5: all five releases published so far (4.5.0 to 4.5.4) pass the canary, the smoke tests and the differential fuzzer with no change to the engine (checked on 2026-09-04 while writing this record). An exact peer pin would not buy verification: every zod patch would need a `zod-cow-v4` release before consumers could update, and consumers would answer with a peer override, after which the pin verifies nothing. And the trust is monitored: a scheduled workflow ([#30](https://github.com/iceboundrock/zod-cow/issues/30)) runs the canary, smoke and differential suites against the newest zod inside the peer range, so a breaking patch turns this repository red before a consumer reports it. If a patch does break the engine, the fix is a `zod-cow-v4` release whose range excludes it (`>=4.5.4 <4.5.x`) or a fix that keeps the range, with the canary flags updated first so the failure is pinned. Consumers who want the exact verified version pin `zod` themselves.
 
 Widening the range is a release, not a config edit. The steps, in order:
 
@@ -80,14 +83,16 @@ If it is ever published, it becomes a release of its own package under this layo
 ### 5. Build and artifact shape
 
 - ESM only, plus `.d.ts` declarations, emitted by `tsc`. No CJS build: the engine floor is Node.js >= 22.13.0, which supports `require(esm)`, so CommonJS consumers on the supported Node range can still `require("zod-cow-v4")`.
-- `exports` lists `.` and `./package.json` only. `files` restricts the tarball to the build output. npm adds `package.json`, `README` and `LICENSE` to every tarball regardless of `files`, but it takes them from the package directory, so `packages/zod-cow-v4/` carries its own README and a copy of the root `LICENSE`; the root copies are not in the tarball.
-- Probes (`probe-z4.ts`), canary flags (`probe-z4-flags.ts`) and tests live in the package directory but stay outside the build's `include` and outside `files`. They are diagnostics, not API. The benchmark and the examples are not in the package at all; they live in `bench-v4`.
+- `exports` lists `.` and `./package.json` only. `files` restricts the tarball to the build output. npm adds `package.json`, `README` and `LICENSE` to every tarball regardless of `files`, but it takes them from the package directory, so `packages/zod-cow-v4/` carries its own README and a copy of the root `LICENSE`; the root copies are not in the tarball. The package README is a consumer document (install, usage, the CoW invariant, the peer policy), not a copy of the repository README, which documents both lines and the workspace; #9 writes it and decides how the two stay in step.
+- Probes (`probe-z4.ts`), canary flags (`probe-z4-flags.ts`) and tests live in the package directory but stay outside the build's `include` and outside `files`. They are diagnostics, not API. The benchmarks and the demos are not in the line packages at all; they live in the bench packages.
 
 ## Consequences
 
-- #9 moves the sources into the four packages, adds the build, `exports`, `files` and the workspace wiring, moves `arktype` from the root `devDependencies` into the two bench packages, and reworks CI so typecheck, lint, both test lines and both benches run against the new layout. The command table and module map in `AGENTS.md`, the repository layout in both READMEs, and the `zod4/v4/core` references in the docs change in that PR.
+- #9 moves the sources into the four packages, adds the build, `exports`, `files` and the workspace wiring, moves `arktype` from the root `devDependencies` into the two bench packages, and reworks the workflows: the CI workflow runs typecheck, lint and both test lines against the new layout, and the Benchmarks workflow runs both benches. Benchmarks stay out of push/PR CI, as today. The command table and module map in `AGENTS.md`, the repository layout in both READMEs, and the `zod4` / `zod4/v4/core` import references in the maintained English docs (`AGENTS.md`, `README.md`, `docs/ARCHITECTURE-z4.md`, with the matching lines in `README.zh-CN.md`) change in that PR; `docs/ARCHITECTURE-z4.zh-CN.md` is a frozen snapshot and stays as it is.
+- The published tarball is smoke-tested from a temporary project through both `import("zod-cow-v4")` and `require("zod-cow-v4")`, since section 5 promises both, and the tarball listing is checked for the README and `LICENSE`.
 - The Benchmarks workflow builds `zod-cow-v4` before running `bench-v4`, and the zod4 numbers in the README come from the built artifact from then on. `bench-v3` keeps measuring the zod3 source. The asymmetry is accepted: that line is frozen and its table is historical.
-- The test harness exists twice. A fix to one copy is applied to the other in the same PR, the rule the two READMEs already follow.
+- `examples/demo.ts` is a zod3 demo: it imports the zod3 line, reads the zod3-only `.pure` flag and shows the `DeepReadonly` view that only the zod3 `validate()` returns. It moves into `bench-v3` unchanged. `bench-v4` gets a demo written against the published API (`compile` from `zod-cow-v4`; no `.pure`; `validate()` returns the input reference or `null`), and the 60-second demo command in `AGENTS.md` and the READMEs points at that one, since it demonstrates the package a consumer installs.
+- The test harness exists twice, and the two copies are identical: CI compares them byte for byte, so a fix to one copy must land in the other in the same PR, the rule the two READMEs already follow, now enforced instead of remembered.
 - Every zod 4 minor requires a `zod-cow-v4` release before consumers on that minor can install without a peer warning. This cost is accepted; it is the cost of building on internal API.
 - The differential suites run per package, so they keep their `SEEDS` / `CASES` / `REPRO` knobs unchanged.
 - Nothing in the published artifact references the zod3 line, and nothing in the zod3 line references `zod-cow-v4`; the two packages can evolve on independent cadences if that ever matters.
@@ -97,8 +102,8 @@ If it is ever published, it becomes a release of its own package under this layo
 - **Single package with subpath exports** (`zod-cow` and `zod-cow/v3`). Rejected because a package resolves one `zod`: the zod3 line could not be typechecked and tested against zod 3 in the same package without the npm alias, and the alias cannot ship. It would also have needed a peer range of `3.24.x || 4.5.x` in which the default entry fails at import time on zod 3. Mirroring zod's own `zod` / `zod/v3` / `zod/v4` shape only works because zod ships all of them from one codebase against one dependency tree; this project does not.
 - **`zod-cow` as the published name.** Rejected because the bare name would claim the neutral name for a package that supports one zod major; the peer range says so, and the name should say the same. It would also make a later zod3 or zod5 release either a subpath of that package, which section 1 rules out, or a rename.
 - **Three-package monorepo** (shared / zod3 / zod4). Rejected because the shared package would hold no runtime code: `internal.ts` is used only by the zod3 line, and the zod4 line never imported it. A development-only shared package (test harness, bench fixtures, measurement helpers) was considered as a fifth package and rejected as well; see section 1.
-- **Benchmarks inside the line packages.** Rejected because the reference-line libraries would become devDependencies of the published package, and because the zod4 benchmark would keep measuring the TypeScript source instead of the shipped build.
-- **One benchmark package for both lines.** Rejected because it would need both zod majors in one directory, which is the alias problem section 1 removes.
+- **Benchmarks inside the line packages.** Possible: a benchmark inside `packages/zod-cow-v4/` can import the build through Node's package self-reference (`import "zod-cow-v4"` from inside the package resolves through its own `exports`). Rejected as the worse trade: the reference-line libraries would become devDependencies of the published package, and the package's own test tree would depend on a prior build. Separate bench packages keep both boundaries visible.
+- **One benchmark package for both lines.** Possible: a private package can keep the `zod4` alias the repository root uses today, since the alias only fails for shipped code. Rejected as the worse trade: it would keep the alias and the `zod3`-vs-`zod4` import naming alive in one corner of the workspace after section 1 removes them everywhere else, and its single `zod` dependency could not satisfy the peer range of the other line's package (pnpm links a workspace package against that package's own devDependencies, so it would work, with a permanent unmet-peer warning). Two small packages are simpler than one with an exception.
 - **Publishing the zod3 line against zod 4's `zod/v3` compatibility entry.** Rejected as untested: the zod3 line reads the `_def` tree and copies regexes from 3.24.1, and `zod/v3` inside zod 4 tracks a later 3.x.
-- **A task runner** (turbo, nx). Rejected for three packages; `pnpm -r` and `--filter` are enough.
+- **A task runner** (turbo, nx). Rejected for four packages; `pnpm -r` and `--filter` are enough.
 - **Caret peer range** (`^4.5.4`). Rejected; see section 3.

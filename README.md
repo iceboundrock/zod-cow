@@ -12,7 +12,7 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 - No fork of zod and no change to the Zod API: schemas are consumed as they are (the `.def` tree is read), type inference stays `z.infer`.
 - Shape, keys and checks are resolved once at compile time into specialized validation code.
-- The input is never altered: nothing is mutated in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here.
+- The zod4 line never alters the input: nothing is mutated in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The frozen zod3 line has one known exception, `readonly`, which freezes the input in place (see [When a copy is forced](#when-a-copy-is-forced) and #27).
 - Failure paths carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 
 ## Two compiler lines
@@ -119,8 +119,8 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 
 Consequences that constrain every change:
 
-- Never mutate the input. Strip must never `delete` on the input object.
-- Output may alias input, so refines must not mutate. Where a line freezes in place (the zod3 line's `readonly`), the freeze lands on the shared input.
+- Never mutate the input. Strip must never `delete` on the input object. The zod3 line's `readonly`, which freezes the input in place and returns it, is the one known exception (#27); the zod4 line copies before freezing.
+- Output may alias input, so refines must not mutate.
 - Failure paths return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`.
 
 ## How the zod4 line stays aligned with stock

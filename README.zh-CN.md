@@ -14,7 +14,7 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 - 不 fork zod、不改 Zod API：zod schema 原样消费（读取 `.def` 树），类型推断继续用 `z.infer`
 - 编译期一次性解析 shape / keys / checks，生成特化校验代码
-- 输入永不失真：绝不原地修改。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun
+- zod4 线绝不改动输入：不做任何原地修改。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。冻结的 zod3 线有一个已知例外：`readonly` 会原地冻结输入（见[何时被迫拷贝](#何时被迫拷贝)与 #27）
 - 失败路径不自带 issue 数据：编译产物返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`
 
 ## 两条编译线
@@ -118,8 +118,8 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 
 由此约束每一处改动：
 
-- 绝不修改输入。strip 绝不能在输入对象上 `delete`。
-- 输出可能与输入别名，所以 refine 不得修改值。凡是原地冻结的线（zod3 线的 `readonly`），冻结会落在共享的输入上。
+- 绝不修改输入。strip 绝不能在输入对象上 `delete`。zod3 线的 `readonly` 原地冻结输入并返回原引用，是唯一已知例外（#27）；zod4 线先拷贝再冻结。
+- 输出可能与输入别名，所以 refine 不得修改值。
 - 失败路径只返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。
 
 ## zod4 线如何与 stock 保持一致

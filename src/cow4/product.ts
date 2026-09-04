@@ -4,12 +4,12 @@
  */
 import { ZodCompileAsyncError } from "zod4/v4/core";
 
-/* zod4 core 类型（宽松处理，prototype 语义层为准） */
+/* zod4 core types (kept loose; the prototype semantic layer is authoritative) */
 export type Node = any;
-/** 产物契约：输出值 | INVALID | true(assertOnly)；async 产物返回 Promise<输出值 | INVALID> */
+/** Product contract: output value | INVALID | true(assertOnly); an async product returns Promise<output value | INVALID> */
 export type Fn = (input: any) => unknown;
 
-/** 产物返回 Promise（async 骨架）的标记 —— buildFn/officialFn/island 挂载，调用点据此发射 await */
+/** Marks a product that returns a Promise (async skeleton) -- attached by buildFn/officialFn/island; call sites emit await based on it */
 export const ZC_ASYNC = Symbol.for("zc-z4.async");
 
 export function markAsync(fn: Fn): Fn {

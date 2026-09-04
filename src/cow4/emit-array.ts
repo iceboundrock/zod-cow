@@ -5,7 +5,7 @@ import { officialFn } from "./official.js";
 import { type Fn, isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
-/* ── array 骨架：元素级引用比较 + slice 条件拷贝 ── */
+/* ── array skeleton: element-level reference comparison + conditional slice copy ── */
 
 export function emitCoWArray(
   ctx: CodeCtx,
@@ -21,7 +21,7 @@ export function emitCoWArray(
   const elemPure = isPure(element);
   const elemIsContainer = cowSafeContainerForChild(element);
 
-  // 元素处理函数：容器（含包装链）→ CoW 子骨架（strip 语义完整）；纯净叶子 → 官方 validator；其余 → 官方 parser；async → async 岛
+  // Element handler: container (including a wrapper chain) → CoW sub-skeleton (strip semantics intact); pure leaf → official validator; everything else → official parser; async → async island
   let elemFn: Fn;
   if (elemIsContainer) {
     elemFn = containerChildFn(element, childSeen);
@@ -46,8 +46,8 @@ export function emitCoWArray(
     ctx.write(`const ${t} = ${awaitKw}${f}(${e});`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
     if (elemPure && !elemIsContainer) {
-      // 纯叶子元素：值 === 输入，无拷贝（validator 产物返回 true，不可引用比较）
-      // 容器元素走子骨架：产物返回原引用或新容器，引用比较安全
+      // Pure leaf element: value === input, no copy (the validator product returns true and cannot be reference-compared)
+      // Container elements go through the sub-skeleton: the product returns the original reference or a new container, so a reference comparison is safe
     } else {
       ctx.write(`if (${t} !== ${e}) {`);
       ctx.indented(() => {
@@ -59,7 +59,7 @@ export function emitCoWArray(
   });
   ctx.write(`}`);
 
-  // 容器自身 checks（array .min/.max/.length/.refine）：双路径同 object 骨架
+  // The container's own checks (array .min/.max/.length/.refine): both paths, same as the object skeleton
   const checksFn = containerChecksFn(schema);
   if (checksFn) {
     const cName = ctx.addConst(checksFn);

@@ -7,7 +7,7 @@ import { requiresPresence } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
-/* ── object 骨架：引用比较 + {...input} 条件拷贝 ── */
+/* ── object skeleton: reference comparison + conditional {...input} copy ── */
 
 export function emitCoWObject(
   ctx: CodeCtx,
@@ -19,7 +19,7 @@ export function emitCoWObject(
   if (seen.has(schema)) throw new ZodCompileUnsupportedError("recursive object");
   seen.add(schema);
 
-  // 容器守卫（官方模板原文）
+  // Container guard (verbatim from the official template)
   ctx.write(
     `if (typeof ${accessor} !== "object" || ${accessor} === null || Array.isArray(${accessor})) return INVALID;`,
   );
@@ -29,11 +29,11 @@ export function emitCoWObject(
   const symbolKeys = Object.getOwnPropertySymbols(shape);
   const allKeys: (string | symbol)[] = [...stringKeys, ...symbolKeys];
 
-  // __proto__ 形状键：官方同样拒绝（字面量赋值会改原型）
+  // __proto__ shape key: the official codegen rejects it too (literal assignment would change the prototype)
   if (stringKeys.includes("__proto__"))
     throw new ZodCompileUnsupportedError('object shape key "__proto__"');
 
-  // catchall 模式分类（官方 unknownKeysMode 同款判定）
+  // catchall mode classification (same decision as the official unknownKeysMode)
   let mode: "strip" | "strict" | "loose" = "strip";
   if (def.catchall) {
     const t = def.catchall._zod.def.type;
@@ -47,17 +47,17 @@ export function emitCoWObject(
   const extra = ctx.var();
   ctx.write(`let ${dirty} = false, ${extra} = false;`);
 
-  /** 拷贝分支需要覆写的非纯键 */
+  /** Impure keys the copy branch has to overwrite */
   const writeback: { keyExpr: string; outVar: string; inVar: string }[] = [];
 
   for (const key of allKeys) {
     const child: Node = shape[key];
     const keyExpr = typeof key === "symbol" ? ctx.addConst(key) : escKey(key);
     const inVar = ctx.var();
-    // getter 只读一次（官方注释：checks 与输出组装不得二次触发 getter）
+    // Read the getter only once (official comment: checks and output assembly must not trigger the getter a second time)
     ctx.write(`const ${inVar} = ${accessor}[${keyExpr}];`);
 
-    // 官方 presence guard：值级快路径无法区分缺席与 undefined 的 required 键
+    // Official presence guard: the value-level fast path cannot tell an absent required key from a present-undefined one
     if (requiresPresence(child)) {
       ctx.write(
         `if (!(${typeof key === "symbol" ? keyExpr : keyExpr} in ${accessor})) return INVALID;`,
@@ -65,12 +65,12 @@ export function emitCoWObject(
     }
 
     if (isPure(child) && !cowSafeContainerForChild(child)) {
-      // 纯净叶子键：官方 assertOnly 产物。输出 === 输入，{...input} 已保真，无写回。
-      // （容器键不走此分支：strip 剥离语义需要 CoW 子骨架，见 cowSafeContainerForChild）
+      // Pure leaf key: the official assertOnly product. Output === input, {...input} already preserves it, no write-back.
+      // (container keys do not take this branch: the strip semantics need a CoW sub-skeleton, see cowSafeContainerForChild)
       const vFn = officialFn(child, true);
       const v = ctx.addConst(vFn);
       if (isAsyncProduct(vFn)) {
-        // 纯键理论上无 async；防御性兼得（async validator await 后输出=输入）
+        // A pure key has no async in theory; handled defensively anyway (after awaiting an async validator, output = input)
         ctx.async = true;
         ctx.write(`if ((await ${v}(${inVar})) === INVALID) return INVALID;`);
       } else {
@@ -80,7 +80,7 @@ export function emitCoWObject(
     }
 
     if (cowSafeContainerForChild(child)) {
-      // 容器键（含 optional/nullable 包装）：CoW 子骨架（嵌套 CoW + strip 语义完整）
+      // Container key (including optional/nullable wrapping): CoW sub-skeleton (nested CoW + strip semantics intact)
       const vFn = containerChildFn(child, seen);
       const v = ctx.addConst(vFn);
       const isA = isAsyncProduct(vFn);
@@ -88,13 +88,13 @@ export function emitCoWObject(
       const outVar = ctx.var();
       ctx.write(`const ${outVar} = ${isA ? "await " : ""}${v}(${inVar});`);
       ctx.write(`if (${outVar} === INVALID) return INVALID;`);
-      // 子骨架干净时返回原引用 → 相等不判脏；脏时新引用 → 判脏 + 写回
+      // A clean sub-skeleton returns the original reference → equal, not dirty; a dirty one returns a new reference → mark dirty + write back
       ctx.write(`if (${outVar} !== ${inVar}) ${dirty} = true;`);
       writeback.push({ keyExpr, outVar, inVar });
       continue;
     }
 
-    // 非纯键：官方 parser 产物 + 引用比较判脏
+    // Impure key: official parser product + reference comparison for dirtiness
     const vFn = officialFn(child, false);
     const v = ctx.addConst(vFn);
     const isA = isAsyncProduct(vFn);
@@ -103,7 +103,7 @@ export function emitCoWObject(
     const outVar = ctx.var();
     const optoutOptional = child._zod.optin !== undefined && child._zod.optout === "optional";
     if (optoutOptional) {
-      // 官方 optin 分支模板：缺席键不判失败，输出 undefined
+      // Official optin branch template: an absent key is not a failure, the output is undefined
       ctx.write(`let ${outVar} = ${awaitKw}${v}(${inVar});`);
       ctx.write(`if (${outVar} === INVALID) {`);
       ctx.indented(() => {
@@ -116,14 +116,14 @@ export function emitCoWObject(
       ctx.write(`if (${outVar} === INVALID) return INVALID;`);
     }
 
-    // 脏判定：引用比较。输出 undefined 且键缺席 → 视为未变（stock 亦不物化该键）
+    // Dirtiness: reference comparison. Output undefined with the key absent → treated as unchanged (stock does not materialize the key either)
     ctx.write(
       `if (${outVar} !== ${inVar} && !(${outVar} === undefined && !(${keyExpr} in ${accessor}))) ${dirty} = true;`,
     );
     writeback.push({ keyExpr, outVar, inVar });
   }
 
-  // 多余键探测（官方 for...in 模板：继承键参与，与 runtime 一致）
+  // Extra-key detection (official for...in template: inherited keys participate, matching the runtime)
   if (mode !== "loose" && (mode === "strict" || stringKeys.length > 0 || allKeys.length === 0)) {
     const known = ctx.addConst(new Set(allKeys));
     if (mode === "strict") {
@@ -133,13 +133,13 @@ export function emitCoWObject(
       });
       ctx.write(`}`);
     } else {
-      // strip：零分配早退探测
+      // strip: zero-allocation early-exit probe
       ctx.write(`for (const k in ${accessor}) {`);
       ctx.indented(() => {
         ctx.write(`if (!${known}.has(k)) { ${extra} = true; break; }`);
       });
       ctx.write(`}`);
-      // 官方 strip 会丢弃 enumerable own symbol 多余键；{...input} 会保留 → 探测之
+      // Official strip discards extra enumerable own symbol keys while {...input} keeps them → probe for them
       ctx.write(`for (const s of Object.getOwnPropertySymbols(${accessor})) {`);
       ctx.indented(() => {
         ctx.write(`if (!${known}.has(s)) { ${extra} = true; break; }`);
@@ -148,12 +148,12 @@ export function emitCoWObject(
     }
   }
 
-  // 容器自身 checks（.refine/.min 等）：独立校验子程序，
-  // 双路径调用对齐 stock 语义（checks 作用于最终输出：干净时=输入，脏时=重建后的 out）
+  // The container's own checks (.refine/.min and friends): a standalone validation subroutine,
+  // called on both paths to match stock semantics (checks apply to the final output: the input when clean, the rebuilt out when dirty)
   const checksFn = containerChecksFn(schema);
   const cName = checksFn ? ctx.addConst(checksFn) : null;
 
-  // ═══ CoW 核心：官方模板没有的分支 ═══
+  // ═══ CoW core: the branch the official template does not have ═══
   ctx.write(`if (!${dirty} && !${extra}) {`);
   ctx.indented(() => {
     if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
@@ -163,8 +163,8 @@ export function emitCoWObject(
   ctx.write(`const out = { ...${accessor} };`);
 
   for (const { keyExpr, outVar, inVar } of writeback) {
-    // 对齐官方 mayOutputUndefined 组装规则：
-    //   值变 → 写；输出 undefined 且键缺席 → 不物化；输出 undefined 且键在 → 写 undefined
+    // Aligned with the official mayOutputUndefined assembly rule:
+    //   value changed → write; output undefined and key absent → do not materialize; output undefined and key present → write undefined
     ctx.write(`if (${outVar} !== ${inVar}) {`);
     ctx.indented(() => {
       ctx.write(`if (${outVar} !== undefined) out[${keyExpr}] = ${outVar};`);

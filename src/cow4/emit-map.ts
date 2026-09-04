@@ -3,7 +3,7 @@ import type { CodeCtx } from "./codectx.js";
 import { childProduct, containerChecksFn } from "./emit.js";
 import type { Node } from "./product.js";
 
-/* ── map 骨架：键/值双引用比较 + new Map(input) 条件拷贝 ── */
+/* ── map skeleton: key/value double reference comparison + conditional new Map(input) copy ── */
 
 export function emitCoWMap(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
   const def = schema._zod.def as { keyType: Node; valueType: Node };
@@ -16,7 +16,7 @@ export function emitCoWMap(ctx: CodeCtx, schema: Node, accessor: string, seen: S
   ctx.write(`let ${out} = ${accessor}, ${dirty} = false;`);
   ctx.write(`for (const [kIn, vIn] of ${accessor}) {`);
   ctx.indented(() => {
-    // 键：值位置 —— 纯键用 validator 校验 + 键名恒不变；非纯键用 parser 产物（返回转换后键名）；async → await
+    // Key: a value position -- a pure key is validated by the validator and its name never changes; an impure key uses the parser product (returning the converted key name); async → await
     const keyProduct = childProduct(def.keyType, childSeen);
     const kf = ctx.addConst(keyProduct.fn);
     const keyAsync = keyProduct.kind === "async";
@@ -39,7 +39,7 @@ export function emitCoWMap(ctx: CodeCtx, schema: Node, accessor: string, seen: S
     if (product.kind === "validator") {
       ctx.write(`if (${vf}(vIn) === INVALID) return INVALID;`);
       if (keyExpr !== "kIn") {
-        // 键被转换但值没变：官方输出 set(新键, 原值) → 键名变化即脏
+        // The key was converted but the value did not change: the official output is set(new key, original value) → a changed key name alone means dirty
         ctx.write(`if (${keyExpr} !== kIn) {`);
         ctx.indented(() => {
           ctx.write(`if (!${dirty}) { ${dirty} = true; ${out} = new Map(${accessor}); }`);

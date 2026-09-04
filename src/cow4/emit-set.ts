@@ -3,7 +3,7 @@ import type { CodeCtx } from "./codectx.js";
 import { childProduct, containerChecksFn } from "./emit.js";
 import type { Node } from "./product.js";
 
-/* ── set 骨架：成员引用比较 + new Set(input) 条件拷贝 ── */
+/* ── set skeleton: member reference comparison + conditional new Set(input) copy ── */
 
 export function emitCoWSet(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
   const def = schema._zod.def as { valueType: Node };
@@ -29,7 +29,7 @@ export function emitCoWSet(ctx: CodeCtx, schema: Node, accessor: string, seen: S
         ctx.write(`const ${vo} = ${f}(vIn);`);
       }
       ctx.write(`if (${vo} === INVALID) return INVALID;`);
-      // NaN 误报：vo!==vIn 对 NaN 恒真 → 过度拷贝但结果正确（SameValueZero 下 delete/add 等价）
+      // NaN false positive: vo!==vIn is always true for NaN → over-copies but the result is correct (under SameValueZero, delete/add is equivalent)
       ctx.write(`if (${vo} !== vIn) {`);
       ctx.indented(() => {
         ctx.write(`if (!${dirty}) { ${dirty} = true; ${out} = new Set(${accessor}); }`);

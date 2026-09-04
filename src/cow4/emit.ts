@@ -15,11 +15,11 @@ import { makeAsyncIsland, officialFn } from "./official.js";
 import { type Fn, isAsyncFn, isAsyncProduct, type Node, throwAsync } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
-/* ═══════════════════ 骨架 codegen ═══════════════════ */
+/* ═══════════════════ Skeleton codegen ═══════════════════ */
 
 /**
- * 子树编译成独立产物函数（容器子骨架递归入口），失败 → 官方产物/island。
- * seen 向下传递：编译期循环引用防护。
+ * Compile a subtree into a standalone product function (the recursion entry for container sub-skeletons); on failure → official product/island.
+ * seen is passed down: compile-time cyclic-reference guard.
  */
 function subFn(schema: Node, seen: Set<Node>): Fn {
   const ctx = new CodeCtx();
@@ -28,30 +28,30 @@ function subFn(schema: Node, seen: Set<Node>): Fn {
   return buildFn(ctx);
 }
 
-/** 子节点产物的四种形态 */
+/** The four shapes a child product can take */
 export type ChildProduct =
-  | { kind: "validator"; fn: Fn } // 官方 assertOnly：只答成败，输出=输入（不可当值用）
-  | { kind: "parser"; fn: Fn } // 官方 parser：返回输出值（stock 语义），配合引用比较判脏
-  | { kind: "cow"; fn: Fn } // 本层容器子骨架：干净返回原引用，脏返回新容器
-  | { kind: "async"; fn: Fn }; // async 岛/async 子骨架：返回 Promise<输出 | INVALID>，调用位发射 await
+  | { kind: "validator"; fn: Fn } // official assertOnly: answers pass/fail only, output = input (unusable as a value)
+  | { kind: "parser"; fn: Fn } // official parser: returns the output value (stock semantics), paired with a reference comparison to detect dirtiness
+  | { kind: "cow"; fn: Fn } // this layer's container sub-skeleton: the original reference when clean, a new container when dirty
+  | { kind: "async"; fn: Fn }; // async island / async sub-skeleton: returns Promise<output | INVALID>, the call site emits await
 
 function productOf(fn: Fn, syncKind: "parser" | "cow"): ChildProduct {
   return isAsyncProduct(fn) ? { kind: "async", fn } : { kind: syncKind, fn };
 }
 
 /**
- * 键位/元素位/值位通用的子节点产物选择（object 键循环、array 元素循环、
- * record 值循环、map 键值、set 成员、tuple 槽位全部走这里）：
- *   容器（含 optional/nullable 包装链）→ CoW 子骨架（strip 语义完整）；
- *   纯净叶子 → 官方 validator；其余 → 官方 parser；async 子树 → async 岛。
+ * Child-product selection shared by key/element/value positions (the object key loop, the array element loop,
+ * the record value loop, map keys and values, set members and tuple slots all come through here):
+ *   container (including an optional/nullable wrapper chain) → CoW sub-skeleton (strip semantics intact);
+ *   pure leaf → official validator; everything else → official parser; async subtree → async island.
  */
 export function childProduct(child: Node, seen: Set<Node>): ChildProduct {
   if (cowSafeContainerForChild(child)) {
     try {
       return productOf(subFn(child, seen), "cow");
     } catch (e) {
-      if (e instanceof ZodCompileUnsupportedError) throw e; // 递归/冷僻特性：向上由上层降级
-      // ZodCompileAsyncError 及其它产物生成失败 → 官方产物（async 自动转 async 岛）
+      if (e instanceof ZodCompileUnsupportedError) throw e; // recursion/exotic features: propagate upwards, an outer layer degrades
+      // ZodCompileAsyncError and other product generation failures → official product (async is turned into an async island automatically)
       return productOf(officialFn(child, false), "parser");
     }
   }
@@ -62,10 +62,10 @@ export function childProduct(child: Node, seen: Set<Node>): ChildProduct {
 }
 
 /**
- * 容器自身 checks 的校验子程序（独立产物函数，只答成败）。
- * 支持：custom(def.fn 谓词，官方 generateCustomRefineCheck 同款模板) /
- * min_length / max_length / length_equals（array .length）。
- * 返回 null 表示存在骨架处理不了的 check（调用方应已通过 checksAreCowSafe 拦截）。
+ * Validation subroutine for a container's own checks (a standalone product function, answering pass/fail only).
+ * Supported: custom (a def.fn predicate, same template as the official generateCustomRefineCheck) /
+ * min_length / max_length / length_equals (array .length).
+ * Returning null means a check the skeleton cannot handle is present (the caller should already have blocked it via checksAreCowSafe).
  */
 export function containerChecksFn(schema: Node): Fn | null {
   const checks: Node[] = schema._zod.def.checks ?? [];
@@ -74,8 +74,8 @@ export function containerChecksFn(schema: Node): Fn | null {
   for (const check of checks) {
     const d = check._zod?.def ?? check;
     if (d.check === "custom" && d.fn) {
-      // 官方 generateCustomRefineCheck 的 def.fn 分支同款；
-      // async 谓词在 async 骨架（ctx.async）中发射 await，同步骨架中抛错（官方语义）
+      // Same as the def.fn branch of the official generateCustomRefineCheck;
+      // an async predicate emits await inside an async skeleton (ctx.async) and throws inside a sync skeleton (official semantics)
       const asyncFn = isAsyncFn(d.fn);
       const fnC = ctx.addConst(d.fn);
       const res = ctx.var();
@@ -114,30 +114,30 @@ export function containerChecksFn(schema: Node): Fn | null {
       ctx.write(`if (input.size !== ${Number(d.size)}) return INVALID;`);
       continue;
     }
-    return null; // 不可表达的 check —— 调用方负责已用 checksAreCowSafe 拦截
+    return null; // inexpressible check -- the caller is responsible for having blocked it with checksAreCowSafe
   }
   ctx.write("return true;");
   return buildFn(ctx);
 }
 
 /**
- * 容器（object/array）在键位/元素位的处理：必须走 CoW 子骨架，
- * 绝不能用官方 assertOnly 产物 —— 官方 validator 会跳过多余键剥离
- * （strip 是输出构造行为，不影响校验成败），导致 strip 语义丢失。
- * 子骨架内完整处理 strip/strict/loose，干净时返回原引用。
+ * Handling of a container (object/array) at a key or element position: it must go through a CoW sub-skeleton,
+ * never the official assertOnly product -- the official validator skips stripping extra keys
+ * (strip is output-construction behavior and does not affect pass/fail), which loses the strip semantics.
+ * The sub-skeleton handles strip/strict/loose in full and returns the original reference when clean.
  */
 export function containerChildFn(child: Node, seen: Set<Node>): Fn {
   try {
     return subFn(child, seen);
   } catch (e) {
-    if (e instanceof ZodCompileUnsupportedError) throw e; // 递归等：向上由外层决定降级层级
-    return officialFn(child, false); // 官方 parser 产物（async 自动转 async 岛），stock 语义正确性无损
+    if (e instanceof ZodCompileUnsupportedError) throw e; // recursion and the like: propagate upwards, the outer layer picks the degradation level
+    return officialFn(child, false); // official parser product (async is turned into an async island automatically), stock semantics, no loss of correctness
   }
 }
 
 /**
- * optional/nullable 包装链包着的容器骨架：沿链发射壳检查（null→null，
- * undefined→undefined，值透传），到容器后走普通 CoW 骨架。
+ * Skeleton for a container wrapped in an optional/nullable chain: emit the shell checks along the chain (null→null,
+ * undefined→undefined, value passed through), then the ordinary CoW skeleton once the container is reached.
  */
 function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
   let cur: Node = schema;
@@ -165,8 +165,8 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
 }
 
 /**
- * 向 ctx 发射 schema 的校验/CoW 代码，返回输出 accessor（needsValue=false 时可能为 null）。
- * seen：编译期循环引用防护 —— 递归子树不再展开，交官方产物/岛。
+ * Emit the validation/CoW code for schema into ctx and return the output accessor (may be null when needsValue=false).
+ * seen: compile-time cyclic-reference guard -- a recursive subtree is not expanded again and is handed to the official product/island.
  */
 export function emitNode(
   ctx: CodeCtx,
@@ -178,7 +178,7 @@ export function emitNode(
   const def = schema._zod.def;
   const t: string = def.type;
   if (needsValue) {
-    // 容器（含 optional/nullable 包装链）→ CoW 骨架
+    // container (including an optional/nullable wrapper chain) → CoW skeleton
     if (
       (t === "object" ||
         t === "array" ||
@@ -193,12 +193,12 @@ export function emitNode(
       return emitBoxedContainer(ctx, schema, accessor, seen);
     }
   }
-  // 其余一切类型：官方产物黑盒调用
+  // every other type: black-box call into the official product
   const pure = isPure(schema);
   if (pure) {
-    // 纯子树：官方 assertOnly 产物只答成败，输出 = 输入引用（纯度定义）。
-    // validator 产物不可得时落官方 parser（值可能≠输入，走非纯路径）；
-    // 纯子树理论上无 async（白名单已拦），防御性兼得转 async 岛。
+    // Pure subtree: the official assertOnly product answers pass/fail only, output = input reference (the definition of purity).
+    // When no validator product is available, fall to the official parser (the value may be ≠ input, taking the impure path);
+    // a pure subtree has no async in theory (the whitelist blocks it), and defensively it becomes an async island.
     let v: Fn | null = null;
     try {
       v = compileFn(schema, { assertOnly: true }) as Fn;
@@ -207,7 +207,7 @@ export function emitNode(
         const f = ctx.addConst(makeAsyncIsland(schema));
         ctx.async = true;
         ctx.write(`if ((await ${f}(${accessor})) === INVALID) return INVALID;`);
-        // 纯子树校验通过 ⇒ 输出 = 输入引用，accessor 即输出
+        // a pure subtree that validates ⇒ output = input reference, so accessor is the output
         return needsValue ? accessor : null;
       }
       v = null;

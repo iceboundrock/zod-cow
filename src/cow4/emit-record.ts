@@ -5,17 +5,17 @@ import { childProduct, containerChecksFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
-/* ── record 骨架：键名/键值双引用比较 + {...input} 条件拷贝 ── */
+/* ── record skeleton: key-name/value double reference comparison + conditional {...input} copy ── */
 
 /**
- * 三条编译期路径（与官方 generateRecordCheck 一一对应，激进全覆盖）：
- *   A. enum 声明驱动键（keyType._zod.values 存在且非 partial）：
- *      官方输出 = 按声明序无条件物化全部声明键 + 未知键 strict 拒绝；
- *      骨架：缺失声明键（stock 会物化）→ 判脏；重建分支逐声明键无条件写回。
- *   B. 一般键（string format / number 数值重试 / partialRecord）：
- *      keyFast 产物 + 数值键重试；键名引用比较（outKey !== k → 删旧键写新键）；
- *      loose 保留键 schema 拒绝的键（{...input} 天然保留，值不校验——官方同款）。
- *   C. bare-string 键（z.record(z.string(), v)）：键名恒不变，纯值比较。
+ * Three compile-time paths (one for one with the official generateRecordCheck, aggressively covering all of them):
+ *   A. Declaration-driven enum keys (keyType._zod.values exists and it is not partial):
+ *      official output = unconditionally materialize every declared key in declaration order + strictly reject unknown keys;
+ *      skeleton: a missing declared key (stock materializes it) → dirty; the rebuild branch writes back every declared key unconditionally.
+ *   B. General keys (string format / number numeric retry / partialRecord):
+ *      keyFast product + numeric key retry; key names compared by reference (outKey !== k → delete the old key and write the new one);
+ *      loose keeps the keys the key schema rejects ({...input} keeps them naturally and the value is not validated -- same as the official code).
+ *   C. bare-string keys (z.record(z.string(), v)): the key name never changes, only values are compared.
  */
 export function emitCoWRecord(
   ctx: CodeCtx,
@@ -32,7 +32,7 @@ export function emitCoWRecord(
   const childSeen = new Set(seen);
   childSeen.add(schema);
 
-  // 官方守卫同款：util.isPlainObject（拒绝 Date/Map/class 实例等）
+  // Same guard as the official one: util.isPlainObject (rejects Date/Map/class instances and the like)
   const isPlain = ctx.addConst(util.isPlainObject);
   ctx.write(`if (!${isPlain}(${accessor})) return INVALID;`);
 
@@ -46,8 +46,8 @@ export function emitCoWRecord(
   const loose = def.mode === "loose";
 
   if (keyValues) {
-    /* ── 路径 A：声明驱动 ── */
-    /** 拷贝分支的写回计划：先收集，循环后统一发射（out = {...input} 赋值之后） */
+    /* ── Path A: declaration-driven ── */
+    /** Write-back plan for the copy branch: collected first, emitted together after the loop (after the out = {...input} assignment) */
     const writebacks: { keyExpr: string; inVar: string; outVar: string | null }[] = [];
 
     for (const kv of keyValues) {
@@ -58,14 +58,14 @@ export function emitCoWRecord(
       if (inputKey === "__proto__") throw new ZodCompileUnsupportedError('record key "__proto__"');
       const keyExpr = typeof inputKey === "symbol" ? ctx.addConst(inputKey) : escKey(inputKey);
       const inVar = ctx.var();
-      // 官方对常量键跑 keyType 校验（enum has，编译期已知恒真）→ 省略
+      // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
       ctx.write(`const ${inVar} = ${accessor}[${keyExpr}];`);
       const product = childProduct(def.valueType, childSeen);
       const f = ctx.addConst(product.fn);
       const pAsync = product.kind === "async";
       if (pAsync) ctx.async = true;
       const awaitKw = pAsync ? "await " : "";
-      // 缺失声明键：官方无条件物化（值=undefined）→ 输入缺失即脏
+      // Missing declared key: the official code materializes it unconditionally (value = undefined) → absence in the input means dirty
       const missing = ctx.var();
       ctx.write(`const ${missing} = !(${keyExpr} in ${accessor});`);
       if (product.kind === "validator") {
@@ -80,7 +80,7 @@ export function emitCoWRecord(
         writebacks.push({ keyExpr, inVar, outVar });
       }
     }
-    // 未知键：官方 enum record 是 strict（for...in → INVALID）
+    // Unknown keys: the official enum record is strict (for...in → INVALID)
     const knownConst = ctx.addConst(new Set(keyValues as Iterable<string | symbol>));
     ctx.write(`for (const k in ${accessor}) {`);
     ctx.indented(() => {
@@ -92,17 +92,17 @@ export function emitCoWRecord(
     ctx.write(`${out} = { ...${accessor} };`);
     for (const w of writebacks) {
       if (w.outVar === null) {
-        // validator 产物：值=输入（present 时 inVar 即原值；缺失时 inVar===undefined）
+        // validator product: value = input (when present inVar is the original value; when missing inVar === undefined)
         ctx.write(`${out}[${w.keyExpr}] = ${w.inVar};`);
       } else {
-        // 官方无条件写声明键（含 undefined 值）
+        // The official code writes declared keys unconditionally (including undefined values)
         ctx.write(`${out}[${w.keyExpr}] = ${w.outVar};`);
       }
     }
     return out;
   }
 
-  /* ── 路径 B/C：遍历输入键 ── */
+  /* ── Paths B/C: iterate the input keys ── */
   const keyDef = def.keyType._zod.def as {
     type: string;
     format?: string;
@@ -118,7 +118,7 @@ export function emitCoWRecord(
   const propIsEnumerable = ctx.addConst(Object.prototype.propertyIsEnumerable);
 
   if (keyIsBareString) {
-    /* ── 路径 C：键名恒不变 ── */
+    /* ── Path C: the key name never changes ── */
     ctx.write(`for (const k of Reflect.ownKeys(${accessor})) {`);
     ctx.indented(() => {
       ctx.write(`if (k === "__proto__") continue;`);
@@ -129,8 +129,8 @@ export function emitCoWRecord(
     });
     ctx.write(`}`);
   } else {
-    /* ── 路径 B：keyFast + 数值重试 + 键名比较 ── */
-    // 官方 keyFast = compileFn(keyType)（parser 产物：返回校验/转换后的键名）；async 键 schema → async 岛
+    /* ── Path B: keyFast + numeric retry + key-name comparison ── */
+    // The official keyFast = compileFn(keyType) (parser product: returns the validated/converted key name); an async key schema → async island
     const keyFastFn = officialFn(def.keyType, false);
     const keyFast = ctx.addConst(keyFastFn);
     const keyAsync = isAsyncProduct(keyFastFn);
@@ -147,7 +147,7 @@ export function emitCoWRecord(
       );
       ctx.write(`if (outKey === INVALID) {`);
       ctx.indented(() => {
-        // loose：键 schema 拒绝的键原样保留（值不校验）；{...input} 已带原值，无需写回——官方同款
+        // loose: keys the key schema rejects are kept as they are (the value is not validated); {...input} already carries the original value, so no write-back is needed -- same as the official code
         if (loose) ctx.write(`continue;`);
         else ctx.write(`return INVALID;`);
       });
@@ -159,7 +159,7 @@ export function emitCoWRecord(
     ctx.write(`}`);
   }
 
-  // 容器自身 checks（refine 等；record 无 size check）
+  // The container's own checks (refine and friends; record has no size check)
   const checksFn = containerChecksFn(schema);
   if (checksFn) {
     const cName = ctx.addConst(checksFn);
@@ -175,10 +175,10 @@ export function emitCoWRecord(
 }
 
 /**
- * record 值处理的两种发射形态（变量全部参数化，杜绝写死变量名）：
- *   validator 产物：只答成败，值=输入，无拷贝；
- *   parser/cow 产物：返回值，引用比较判脏 + 首脏 {...accessor} 浅拷贝 + 写回。
- * 路径 B 额外做键名比较（outKey !== k → delete 旧键、写新键）。
+ * The two emission shapes for record value handling (every variable parameterized, no hard-coded variable names):
+ *   validator product: answers pass/fail only, value = input, no copy;
+ *   parser/cow product: returns a value, reference comparison for dirtiness + {...accessor} shallow copy at the first dirt + write-back.
+ * Path B additionally compares key names (outKey !== k → delete the old key, write the new one).
  */
 function emitRecordValueProduct(
   ctx: CodeCtx,

@@ -1,16 +1,16 @@
 /**
- * zod4 行为与结构探针 — 实测 stock zod 4.5.4 的 def 树结构与边界语义，
- * 供 CoW 编译器 (src/cow4/) 做差分对齐。
+ * zod4 behavior and structure probe -- measures the def-tree structure and edge semantics of stock zod 4.5.4,
+ * so the CoW compiler (src/cow4/) can align against them differentially.
  *
- * 与 probe.ts（zod3）同一方法论：编译器读取探针 flag，zod 版本升级改变
- * "隐式契约"时自动跟随，而不是静默分歧。
+ * Same methodology as probe.ts (zod3): the compiler reads the probe flags, so when a zod version upgrade
+ * changes the "implicit contract" it follows automatically instead of diverging silently.
  */
 import { z } from "zod4";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 
-/* ──────────────────── def 树结构序列化 ──────────────────── */
+/* ──────────────────── def tree structure serialization ──────────────────── */
 
 function ser(v: any, depth = 0): any {
   if (v === null) return null;
@@ -69,9 +69,9 @@ function dump(name: string, schema: any, probeVal: unknown): void {
   }
 }
 
-/* ──────────────────── 结构采样 ──────────────────── */
+/* ──────────────────── Structure sampling ──────────────────── */
 
-console.log("╔══════════ zod4 结构采样 ══════════╗");
+console.log("╔══════════ zod4 structure sampling ══════════╗");
 console.log("zod version:", require("zod4/package.json").version);
 console.log("z.email:", typeof (z as any).email, "| z.iso:", typeof (z as any).iso);
 console.log("z.int:", typeof (z as any).int, "| z.set:", typeof z.set, "| z.map:", typeof z.map);
@@ -165,9 +165,9 @@ if (typeof (z as any).custom === "function")
   );
 }
 
-/* ──────────────────── 行为探针 ──────────────────── */
+/* ──────────────────── Behavior probes ──────────────────── */
 
-console.log("\n╔══════════ zod4 行为探针 ══════════╗");
+console.log("\n╔══════════ zod4 behavior probes ══════════╗");
 const S = z.object({ a: z.string().optional(), b: z.string() });
 console.log("P1 absentOptionalKept(strip):", "a" in (S.parse({ b: "x" }) as object));
 console.log("P2 presentUndefKept(strip):", "a" in (S.parse({ b: "x", a: undefined }) as object));
@@ -220,7 +220,7 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
     .safeParse(undefined);
   console.log(
     "P9 default(1.5) on z.number().int():",
-    r.success ? "short-circuit（默认值不校验）" : "validated（默认值过内层）",
+    r.success ? "short-circuit (default not validated)" : "validated (default goes through inner)",
     r.success ? "" : r.error.issues[0]!.code,
   );
 }
@@ -293,7 +293,7 @@ console.log("P4 presentUndefKept(loose):", "a" in (SP.parse({ b: "x", a: undefin
     const rt = thrower.safeParse("x");
     console.log("P12c catch swallows throw:", rt.success ? (rt as any).data : "fail");
   } catch (e: any) {
-    console.log("P12c catch swallows throw: NO — 异常向上传播:", e.message);
+    console.log("P12c catch swallows throw: NO -- throw propagates upwards:", e.message);
   }
 }
 console.log(
@@ -354,12 +354,12 @@ console.log(
   console.log("P21 stock clean parse new object:", cleanOut !== cleanIn);
 }
 {
-  // multi-invalid object：issue 收集语义（全部收集 vs 首错即停）
+  // multi-invalid object: issue collection semantics (collect all vs stop at the first error)
   const r = z.object({ a: z.string(), b: z.number() }).safeParse({ a: 1, b: "x" });
   console.log("P22 multi-invalid issue count:", r.success ? 0 : r.error.issues.length);
 }
 {
-  // run() 返回契约
+  // run() return contract
   const zs: any = z.string();
   const p = { value: "hi", issues: [] as any[] };
   const ret = zs._zod.run(p, undefined);
@@ -372,8 +372,8 @@ console.log(
     ret.issues?.length,
   );
 }
-/* ──────────────────── 第二轮补充探针 ──────────────────── */
-console.log("\n╔══════════ 补充探针 ══════════╗");
+/* ──────────────────── Second round of supplementary probes ──────────────────── */
+console.log("\n╔══════════ Supplementary probes ══════════╗");
 {
   let ctxKeys: string[] = [];
   const s: any = z.string().check((c: any) => {
@@ -436,7 +436,7 @@ console.log(
   const arr: any = z.array(z.string()).parse(["a"]);
   console.log(
     "S7b stock clean array parse new array:",
-    arr !== (cleanIn && ["a"] ? arr : null) ? "(新数组)" : "",
+    arr !== (cleanIn && ["a"] ? arr : null) ? "(new array)" : "",
   );
 }
 {
@@ -474,14 +474,14 @@ console.log(
   );
 }
 {
-  // optional 包 default 的顺序语义 & undefined 输入
+  // Ordering semantics of optional wrapping default & undefined input
   const o1 = z.string().default("d").optional();
   const o2 = z.string().optional().default("d");
   console.log("S12 default.optional(undefined):", JSON.stringify((o1 as any).parse(undefined)));
   console.log("S12b optional.default(undefined):", JSON.stringify((o2 as any).parse(undefined)));
 }
 {
-  // number_format safeint 边界
+  // number_format safeint boundary
   const r1 = z
     .number()
     .int()
@@ -489,7 +489,7 @@ console.log(
   console.log("S13 .int() rejects 2^53:", !r1.success, r1.success ? "" : r1.error.issues[0]!.code);
 }
 {
-  // datetime check 结构（iso.datetime 参数）
+  // datetime check structure (iso.datetime parameters)
   const dt2: any = (z as any).iso.datetime({ offset: true, precision: 3 });
   console.log(
     "S14 datetime(offset,precision) check:",
@@ -497,7 +497,7 @@ console.log(
   );
 }
 {
-  // union 成功分支的 issue 截断（信息性）
+  // Issue truncation on a successful union branch (informational)
   const u = z.union([z.string().min(5), z.string().min(1)]);
   const r = u.safeParse("ab");
   console.log("S15 union second branch ok:", r.success);

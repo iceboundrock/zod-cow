@@ -1,17 +1,17 @@
 /** Purity analysis (conservative whitelist) and the CoW-safe container decision. */
 import { isAsyncFn, type Node } from "./product.js";
 
-/* ═══════════════════ 纯度分析（保守白名单） ═══════════════════ */
+/* ═══════════════════ Purity analysis (conservative whitelist) ═══════════════════ */
 /**
- * 纯 = （在本层组合下）校验通过 ⇒ 输出必然 === 输入引用，且无副作用。
- * 纯净子树走官方 assertOnly 产物（校验完整、零构造）；
- * 拿不准的一律非纯（走官方 parser 产物 + 引用比较，正确性无损）。
+ * Pure = (under this layer's composition) validation passes ⇒ the output is necessarily === the input reference, with no side effects.
+ * A pure subtree uses the official assertOnly product (validation intact, zero construction);
+ * anything uncertain counts as impure (official parser product + reference comparison, no loss of correctness).
  */
 export function isPure(schema: Node): boolean {
   const def = schema._zod.def;
   switch (def.type) {
-    // 叶子透传型：官方产物 return accessor ⇒ 输出 === 输入。
-    // 前提：叶子自身 checks 无值改写（overwrite/trim/toLowerCase…是值变换！见差分 seed=51）。
+    // Pass-through leaves: the official product is a plain "return accessor" ⇒ output === input.
+    // Precondition: the leaf's own checks rewrite no value (overwrite/trim/toLowerCase… are value transforms! see differential seed=51).
     case "string":
     case "number":
     case "boolean":
@@ -27,19 +27,19 @@ export function isPure(schema: Node): boolean {
     case "literal":
     case "enum":
       return leafChecksArePure(schema);
-    // 包装型：递归 inner
+    // Wrappers: recurse into inner
     case "optional":
     case "nullable":
       return isPure(def.innerType);
-    // 容器型：本层骨架接管（strip/strict/loose 均可原引用返回）。
-    // 前提：schema 自身 checks 可被骨架安全处理（见 checksAreCowSafe）。
+    // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
+    // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
     case "object": {
       if (!checksAreCowSafe(schema)) return false;
       if (def.catchall) {
         const t = def.catchall._zod.def.type;
-        if (t === "never") return true; // strict：多余键 → INVALID，干净时原引用
+        if (t === "never") return true; // strict: extra key → INVALID; the original reference when clean
         if ((t === "unknown" || t === "any") && !def.catchall._zod.def.checks?.length) return true; // loose
-        return false; // schema 型 catchall：官方 parser island
+        return false; // schema-typed catchall: official parser island
       }
       for (const k of Object.keys(def.shape)) if (!isPure(def.shape[k])) return false;
       for (const s of Object.getOwnPropertySymbols(def.shape))
@@ -56,16 +56,16 @@ export function isPure(schema: Node): boolean {
     }
     case "union":
       return def.options.every(isPure);
-    // freeze 副作用 / 值产生器 / 黑盒：一律非纯
-    // readonly（Object.freeze）、default/prefault/catch/coerce、transform/pipe、
-    // tuple/record/map/set（官方产物无条件新容器）、intersection（mergeValues）、
-    // lazy/custom/nonoptional/success（保守）
+    // freeze side effects / value producers / black boxes: always impure
+    // readonly (Object.freeze), default/prefault/catch/coerce, transform/pipe,
+    // tuple/record/map/set (the official product unconditionally builds a new container), intersection (mergeValues),
+    // lazy/custom/nonoptional/success (conservative)
     default:
       return false;
   }
 }
 
-/** 官方 WHEN_DEFAULTED_CHECKS 同款：length/size 系 check 自带默认 when（_whenHasLength），不算自定义 when */
+/** Same as the official WHEN_DEFAULTED_CHECKS: length/size checks carry a default when (_whenHasLength), which does not count as a custom when */
 const WHEN_DEFAULTED_CHECKS = new Set([
   "max_size",
   "min_size",
@@ -75,17 +75,17 @@ const WHEN_DEFAULTED_CHECKS = new Set([
   "length_equals",
 ]);
 
-/** 官方 generateChecks 同款判定：自定义 when（非默认）在快路径无法表达 → 不可编译 */
+/** Same decision as the official generateChecks: a custom when (non-default) cannot be expressed on the fast path → not compilable */
 function hasCustomWhen(d: { check?: string; when?: unknown }): boolean {
   return !!d.when && !WHEN_DEFAULTED_CHECKS.has(d.check as string);
 }
 
 /**
- * 叶子（string/number/…）自身 checks 的纯度：
- *   - overwrite（.trim/.toLowerCase/.normalize 等值改写）→ 非纯
- *   - custom 无 fn（superRefine 可能改写 ctx.value）→ 非纯
- *   - 自定义 when 条件（非默认）→ 保守非纯
- *   - 其余（string_format/length/number_format/greater_than/refine 谓词…）→ 纯谓词
+ * Purity of a leaf's own checks (string/number/…):
+ *   - overwrite (.trim/.toLowerCase/.normalize and other value rewrites) → impure
+ *   - custom without fn (superRefine may rewrite ctx.value) → impure
+ *   - a custom when condition (non-default) → conservatively impure
+ *   - everything else (string_format/length/number_format/greater_than/refine predicates…) → pure predicates
  */
 function leafChecksArePure(schema: Node): boolean {
   const checks = schema._zod.def.checks;
@@ -94,18 +94,18 @@ function leafChecksArePure(schema: Node): boolean {
     const d = c._zod?.def ?? c;
     if (hasCustomWhen(d)) return false;
     if (d.check === "overwrite") return false;
-    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // async refine 是值产生器时序（非纯）+ 同步产物不可达
+    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // an async refine is value-producer timing (impure) + unreachable from a sync product
     return true;
   });
 }
 
 /**
- * 容器（object/array）自身的 def.checks 是否可被 CoW 骨架安全处理：
- *   - 无 checks ✓
- *   - custom 且 def.fn 存在（.refine() 纯谓词，只回答 yes/no，不改值）✓
- *   - min_length / max_length / length_equals（array .min/.max/.length，只读 .length）✓
- * 其余（superRefine 可能改写 ctx.value、overwrite 变换值、自定义 when…）→ 非纯，
- * 该节点整体降级官方 parser 产物（stock 语义，正确性无损）。
+ * Whether a container's own def.checks (object/array) can be handled safely by the CoW skeleton:
+ *   - no checks ✓
+ *   - custom with def.fn present (a .refine() pure predicate: answers only yes/no, never changes the value) ✓
+ *   - min_length / max_length / length_equals (array .min/.max/.length, reads only .length) ✓
+ * Everything else (superRefine may rewrite ctx.value, overwrite transforms the value, a custom when…) → impure,
+ * and the node as a whole degrades to the official parser product (stock semantics, no loss of correctness).
  */
 function checksAreCowSafe(schema: Node): boolean {
   const checks = schema._zod.def.checks;
@@ -117,11 +117,11 @@ function checksAreCowSafe(schema: Node): boolean {
     def.type === "map" ||
     def.type === "set" ||
     def.type === "tuple";
-  if (!isContainer) return false; // record 自身无 size checks；非容器保守拒绝
+  if (!isContainer) return false; // record itself has no size checks; non-containers are conservatively rejected
   return checks.every((c: Node) => {
     const d = c._zod?.def ?? c;
     if (hasCustomWhen(d)) return false;
-    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // superRefine（无 fn）可能改写值 → 拒；async refine 非纯
+    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // superRefine (no fn) may rewrite the value → reject; an async refine is impure
     if (
       def.type === "array" &&
       (d.check === "min_length" || d.check === "max_length" || d.check === "length_equals")
@@ -139,16 +139,16 @@ function checksAreCowSafe(schema: Node): boolean {
 }
 
 /**
- * 穿透 optional/nullable 包装链，判断是否最终落到一个 CoW 可接管的容器
- * （object/array/record/map/set），且整链与容器自身 checks 均安全。
- * 这是键位/元素位/顶层判定「走 CoW 子骨架」的唯一入口 ——
- * 裸判 def.type 会把 optional(object) 误送官方 assertOnly，丢失 strip 剥离语义
- * （差分 seed=104/133/137 实证）。
+ * Pierce the optional/nullable wrapper chain to decide whether it finally lands on a container CoW can take over
+ * (object/array/record/map/set), with the whole chain and the container's own checks all safe.
+ * This is the only entry point for the key-position/element-position/top-level decision to "use a CoW sub-skeleton" --
+ * testing def.type bare would misroute optional(object) to the official assertOnly and lose the strip semantics
+ * (demonstrated by differential seed=104/133/137).
  */
 export function cowSafeContainerForChild(child: Node): boolean {
   let cur: Node = child;
   for (;;) {
-    if (!leafChecksArePure(cur)) return false; // 包装层上的 refine/overwrite 等
+    if (!leafChecksArePure(cur)) return false; // refine/overwrite and friends on a wrapper layer
     const t: string = cur._zod.def.type;
     if (t === "object" || t === "array") return checksAreCowSafe(cur);
     if (t === "record") return recordKeyShapeOk(cur) && checksAreCowSafe(cur);
@@ -162,13 +162,13 @@ export function cowSafeContainerForChild(child: Node): boolean {
 }
 
 /**
- * record 键形态是否可骨架化（激进全覆盖）：
- *   - bare-string 键 → 键名恒不变，纯值比较
- *   - 一般键（string format / number 数值重试 / enum 声明驱动 / partialRecord）→
- *     键名引用比较（outKey !== k → 判脏 + 删旧键写新键），声明驱动额外做缺失键物化判定
- *   - 键 schema 带 async/coerce → keyFast 产物生成失败时由 containerChildFn 降级兜底
+ * Whether a record's key shape can be skeletonized (aggressively, all shapes covered):
+ *   - bare-string key → the key name never changes, so only values are compared
+ *   - general key (string format / number numeric retry / enum declaration-driven / partialRecord) →
+ *     compare key names by reference (outKey !== k → mark dirty + delete the old key and write the new one); declaration-driven keys additionally decide whether missing keys are materialized
+ *   - key schema with async/coerce → when keyFast product generation fails, containerChildFn falls back and degrades
  */
 function recordKeyShapeOk(record: Node): boolean {
-  void record; // 全部键形态均已覆盖；保留谓词便于后续收窄
+  void record; // every key shape is already covered; the predicate is kept so it can be narrowed later
   return true;
 }

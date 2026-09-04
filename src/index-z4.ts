@@ -26,11 +26,11 @@ import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from
 
 export interface Compiled<T extends z.ZodType> {
   readonly schema: T;
-  /** true = CoW 编译未成功，parse/safeParse 全部直通 stock（语义无损） */
+  /** true = CoW compilation did not succeed, so parse/safeParse pass straight through to stock (no loss of semantics) */
   readonly stock: boolean;
-  /** true = 骨架含 async 子树：sync parse/safeParse/validate 抛 $ZodAsyncError，*Async 可用 */
+  /** true = the skeleton holds an async subtree: sync parse/safeParse/validate throw $ZodAsyncError, the *Async variants work */
   readonly async: boolean;
-  /** CoW 骨架源码（stock 降级时为 null） */
+  /** CoW skeleton source (null when degraded to stock) */
   readonly code: string | null;
   parse(data: unknown): z.output<T>;
   safeParse(
@@ -40,7 +40,7 @@ export interface Compiled<T extends z.ZodType> {
   safeParseAsync(
     data: unknown,
   ): Promise<{ success: true; data: z.output<T> } | { success: false; error: z.ZodError }>;
-  /** 纯校验：通过返回输入原引用（DeepReadonly 提示共享），失败返回 null */
+  /** Pure validation: on success returns the original input reference (DeepReadonly hints at the sharing), null on failure */
   validate(data: unknown): unknown;
 }
 
@@ -54,8 +54,8 @@ export function compile<T extends z.ZodType>(schema: T): Compiled<T> {
     cowFn = compiled.fn;
     code = compiled.code;
   } catch (e) {
-    // 递归 / schema catchall / __proto__ / 冷僻特性 → 整树 stock（语义无损降级）
-    // （async 不再进入此分支：Task 6 起 async 子树走 async 岛 + await 骨架）
+    // recursion / schema catchall / __proto__ / exotic features → whole-tree stock (degradation with no loss of semantics)
+    // (async no longer reaches this branch: since Task 6 an async subtree uses an async island + an awaiting skeleton)
     if (!(e instanceof ZodCompileAsyncError) && !(e instanceof ZodCompileUnsupportedError)) {
       throw e;
     }
@@ -71,7 +71,7 @@ export function compile<T extends z.ZodType>(schema: T): Compiled<T> {
   ).safeParseAsync.bind(schema);
 
   const throwSyncOnAsync = (): never => {
-    // 官方 sync API 对 async schema 的同款语义（$ZodAsyncError）
+    // Same semantics as the official sync API on an async schema ($ZodAsyncError)
     throw new $ZodAsyncError();
   };
 

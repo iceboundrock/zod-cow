@@ -4,10 +4,10 @@
  */
 import type { Node } from "./product.js";
 
-/* ═══════════════════ 语义谓词（照抄官方 compile.ts，版本锚点 4.5.4） ═══════════════════ */
+/* ═══════════════════ Semantic predicates (copied verbatim from the official compile.ts, version anchor 4.5.4) ═══════════════════ */
 
-// 官方 fastPathAcceptsAbsence：值级快路径把缺席键读成 undefined，
-// 这些 schema 会把"缺席"误当合法值 —— 官方对此发射 presence guard。
+// Official fastPathAcceptsAbsence: the value-level fast path reads an absent key as undefined,
+// so these schemas mistake "absence" for a legal value -- the official codegen emits a presence guard for them.
 function acceptsAbsence(schema: Node): boolean {
   const def = schema._zod.def;
   switch (def.type) {
@@ -63,13 +63,13 @@ function acceptsAbsence(schema: Node): boolean {
   }
 }
 
-// 官方 requiresPresenceCheck：非 optin 键但快路径接受缺席 → 需要 in 探测
+// Official requiresPresenceCheck: a non-optin key whose fast path accepts absence → needs an in probe
 export function requiresPresence(schema: Node): boolean {
   return schema._zod.optin === undefined && acceptsAbsence(schema);
 }
 
-// 官方 mayOutputUndefined：输出组装时该键是否可能产出 undefined
-// （决定拷贝分支对 absent/present-undefined 键的写入规则）
+// Official mayOutputUndefined: whether this key may produce undefined when the output is assembled
+// (decides the copy branch's write rule for absent/present-undefined keys)
 // biome-ignore lint/correctness/noUnusedVariables: reference copy of zod's predicate, kept for version anchoring (see AGENTS.md)
 function mayOutputUndefined(schema: Node): boolean {
   const def = schema._zod.def;
@@ -117,10 +117,10 @@ function mayOutputUndefined(schema: Node): boolean {
 }
 
 /**
- * 官方 getTupleOptStart 逐字照抄（compile.js 与 runtime 双份同款）：
- * 从尾向头找第一个不可省槽位，返回 i+1。
- *   optin：三档梯子（optin !== undefined 即可省，含 optional/defaulted）；
- *   optout：两档（optout === "optional" 才可省）。
+ * Verbatim copy of the official getTupleOptStart (identical in compile.js and in the runtime):
+ * scan from the tail towards the head for the first non-omittable slot and return i+1.
+ *   optin: a three-rung ladder (optin !== undefined is omittable, covering optional/defaulted);
+ *   optout: two rungs (only optout === "optional" is omittable).
  */
 export function getTupleOptStart(items: Node[], key: "optin" | "optout"): number {
   for (let i = items.length - 1; i >= 0; i--) {
@@ -131,7 +131,7 @@ export function getTupleOptStart(items: Node[], key: "optin" | "optout"): number
   return 0;
 }
 
-/** 官方 dropsWhenAbsent 逐字照抄：缺席槽位输出侧是否直接截断 */
+/** Verbatim copy of the official dropsWhenAbsent: whether an absent slot is simply truncated on the output side */
 export function dropsWhenAbsent(schema: Node): boolean {
   return schema._zod.optin === "optional" && schema._zod.optout === "optional";
 }

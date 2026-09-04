@@ -8,22 +8,22 @@ import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
-/* ── tuple 骨架：镜像官方 generateTupleCheck + fillLen 截断跟踪 + CoW 修饰 ── */
+/* ── tuple skeleton: mirrors the official generateTupleCheck + fillLen truncation tracking + CoW decoration ── */
 
 /**
- * tuple CoW 骨架 —— 与官方 generateTupleCheck 逐行对应，唯一区别是把
- * "无条件新容器"（const out = []）改写为引用比较判脏 + slice 条件拷贝：
+ * The tuple CoW skeleton -- line for line with the official generateTupleCheck; the only difference is rewriting
+ * the "unconditional new container" (const out = []) into reference comparison for dirtiness + conditional slice copy:
  *
- *   长度守卫（官方同款，optinStart/optoutStart 编译期算好）
- *   段 1 [0, optoutStart)：官方无条件分支 out[i] = child(input[i])
- *         → validator 校验 / 值引用比较写回；缺席槽位保留官方"物化"语义
- *   段 2 [optoutStart, N)：官方尾槽门（out.length === i）+ 缺席截断/IIFE 填充
- *         → fillLen 变量镜像官方 out.length（CoW 时输出可能还是输入引用，
- *           不能读 .length，必须显式跟踪）
- *   段 3 rest [N, L)：官方无门控逐槽写 → 引用比较写回
+ *   Length guard (same as the official one, optinStart/optoutStart computed at compile time)
+ *   Segment 1 [0, optoutStart): the official unconditional branch out[i] = child(input[i])
+ *         → validator check / write back on value reference comparison; absent slots keep the official "materialize" semantics
+ *   Segment 2 [optoutStart, N): the official tail-slot gate (out.length === i) + absent truncation / IIFE fill
+ *         → the fillLen variable mirrors the official out.length (under CoW the output may still be the input reference,
+ *           so .length cannot be read and has to be tracked explicitly)
+ *   Segment 3 rest [N, L): the official ungated per-slot write → write back on reference comparison
  *
- * 干净判定：out === input（拷贝从未发生）⇔ 全部槽引用未变且无截断/填充。
- * 不变量：out === input ⟹ fillLen === input.length（截断/填充路径必先拷贝）。
+ * Cleanliness: out === input (a copy never happened) ⇔ every slot reference is unchanged and there was no truncation/fill.
+ * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -42,7 +42,7 @@ export function emitCoWTuple(
   ctx.write(`if (!Array.isArray(${accessor})) return INVALID;`);
   const optinStart = getTupleOptStart(items, "optin");
   const optoutStart = getTupleOptStart(items, "optout");
-  // 长度守卫（官方同款）：无 rest 时 [optinStart, N]，有 rest 时 >= optinStart
+  // Length guard (same as the official one): [optinStart, N] without rest, >= optinStart with rest
   if (rest) {
     ctx.write(`if (${accessor}.length < ${optinStart}) return INVALID;`);
   } else {
@@ -51,15 +51,15 @@ export function emitCoWTuple(
     );
   }
 
-  // 每个固定槽位的产物（编译期生成一次；键位/元素位/值位统一走 childProduct）
+  // The product for each fixed slot (generated once at compile time; key/element/value positions all go through childProduct)
   const itemProducts = items.map((it) => childProduct(it, childSeen));
 
   const out = ctx.var();
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
 
-  /** 值形态槽（parser/cow/async 产物）：判 INVALID + 引用比较 + 首脏 slice 写回。
-   *  eVar=null 表示缺席槽（官方无条件 out[i] = 产出，含 undefined 物化/结构扩展）→ 无条件写。 */
+  /** Value-shaped slot (parser/cow/async product): test for INVALID + reference comparison + slice write-back at the first dirt.
+   *  eVar=null marks an absent slot (the official code unconditionally does out[i] = result, including materializing undefined / extending the shape) → write unconditionally. */
   const emitValueSlot = (
     p: ChildProduct,
     argExpr: string,
@@ -73,7 +73,7 @@ export function emitCoWTuple(
     ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(${argExpr});`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
     if (eVar === null) {
-      // 缺席槽：官方无条件写 out[i]（t === undefined 时也物化，保持输出长度/内容一致）
+      // Absent slot: the official code writes out[i] unconditionally (materializing even when t === undefined, keeping output length/content identical)
       ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
       ctx.write(`${out}[${idxExpr}] = ${t};`);
     } else {
@@ -85,7 +85,7 @@ export function emitCoWTuple(
       ctx.write(`}`);
     }
   };
-  /** 校验形态槽（validator 产物）：只答成败；缺席时官方照样物化 out[i] = undefined（纯子树输出=输入=undefined） */
+  /** Check-shaped slot (validator product): answers pass/fail only; when absent the official code still materializes out[i] = undefined (a pure subtree's output = input = undefined) */
   const emitValidatorSlot = (
     p: ChildProduct,
     argExpr: string,
@@ -97,12 +97,12 @@ export function emitCoWTuple(
     if (isA) ctx.async = true;
     ctx.write(`if ((${isA ? "await " : ""}${f}(${argExpr})) === INVALID) return INVALID;`);
     if (!present) {
-      // absent + validator（纯 optional 等）：stock 物化 undefined 槽（输出长度 i+1 > 输入）→ 必写
+      // absent + validator (pure optional and friends): stock materializes an undefined slot (output length i+1 > input) → must write
       ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
       ctx.write(`${out}[${idxExpr}] = undefined;`);
     }
   };
-  /** 官方截断三态（out.length = i 的 CoW 版）：已拷贝 → 实截；原引用且目标≠输入长 → 拷后截；原引用且目标=输入长 → 输出=输入，无操作 */
+  /** The official truncation in three states (the CoW version of out.length = i): already copied → truncate for real; original reference with target ≠ the input length → copy then truncate; original reference with target = the input length → output = input, no operation */
   const emitTruncate = (i: number): void => {
     ctx.write(`if (${out} !== ${accessor}) {`);
     ctx.indented(() => {
@@ -116,14 +116,14 @@ export function emitCoWTuple(
     ctx.write(`}`);
   };
 
-  /* 段 1：无条件槽 [0, optoutStart) —— 官方 `out[i] = compileChild(...)` */
+  /* Segment 1: unconditional slots [0, optoutStart) -- the official `out[i] = compileChild(...)` */
   for (let i = 0; i < optoutStart; i++) {
     const p = itemProducts[i]!;
     ctx.write(`{`);
     ctx.indented(() => {
       const e = ctx.var();
       ctx.write(`const ${e} = ${accessor}[${i}];`);
-      // 缺席判定编译期不可知（input.length 运行时值）→ present 分支运行时守卫
+      // Absence is not knowable at compile time (input.length is a runtime value) → the present branch is guarded at runtime
       ctx.write(`if (${i} < ${accessor}.length) {`);
       ctx.indented(() => {
         if (p.kind === "validator") emitValidatorSlot(p, e, String(i), true);
@@ -131,7 +131,7 @@ export function emitCoWTuple(
       });
       ctx.write(`} else {`);
       ctx.indented(() => {
-        // 缺席（i >= input.length）：官方照样跑 child(undefined)（IIFE 等价语义）
+        // Absent (i >= input.length): the official code still runs child(undefined) (semantics equivalent to the IIFE)
         if (p.kind === "validator") emitValidatorSlot(p, "undefined", String(i), false);
         else emitValueSlot(p, "undefined", String(i), null);
       });
@@ -139,13 +139,13 @@ export function emitCoWTuple(
     });
     ctx.write(`}`);
   }
-  // 段 1 结束：官方 out.length = optoutStart（顺序填充），fillLen 镜像之
+  // End of segment 1: officially out.length = optoutStart (filled in order), mirrored by fillLen
   ctx.write(`let ${fillLen} = ${optoutStart};`);
 
-  /* 段 2：尾槽 [optoutStart, N) —— 官方门控 + 缺席截断/IIFE 填充 */
+  /* Segment 2: tail slots [optoutStart, N) -- the official gate + absent truncation / IIFE fill */
   for (let i = optoutStart; i < N; i++) {
     const p = itemProducts[i]!;
-    const drop = dropsWhenAbsent(items[i]!); // 编译期已知 → 只发射实际分支
+    const drop = dropsWhenAbsent(items[i]!); // known at compile time → emit only the branch that applies
     ctx.write(`{`);
     ctx.indented(() => {
       ctx.write(`if (${fillLen} === ${i}) {`);
@@ -161,19 +161,19 @@ export function emitCoWTuple(
         ctx.write(`} else {`);
         ctx.indented(() => {
           if (drop) {
-            // 官方 dropsWhenAbsent 分支：out.length = i（截断）
+            // The official dropsWhenAbsent branch: out.length = i (truncation)
             ctx.write(`${fillLen} = ${i};`);
             emitTruncate(i);
           } else if (p.kind === "validator") {
-            // 纯子树槽缺席：child(undefined) 校验（纯 optional 系恒过，防御 INVALID）→ 输出=undefined → 官方截断
+            // Pure-subtree slot absent: check child(undefined) (the pure optional family always passes; INVALID guarded defensively) → output = undefined → the official truncation
             const f = ctx.addConst(p.fn);
-            const isA = (p as ChildProduct).kind === "async"; // 防御（validator 产物恒同步）
+            const isA = (p as ChildProduct).kind === "async"; // defensive (a validator product is always sync)
             if (isA) ctx.async = true;
             ctx.write(`if ((${isA ? "await " : ""}${f}(undefined)) === INVALID) return INVALID;`);
             ctx.write(`${fillLen} = ${i};`);
             emitTruncate(i);
           } else {
-            // 官方 IIFE 分支：branch = child(undefined)；INVALID/undefined → 截断，有值 → out[i] = branch（结构扩展）
+            // The official IIFE branch: branch = child(undefined); INVALID/undefined → truncate, a value → out[i] = branch (extends the shape)
             const f = ctx.addConst(p.fn);
             const isA = p.kind === "async";
             if (isA) ctx.async = true;
@@ -200,7 +200,7 @@ export function emitCoWTuple(
     ctx.write(`}`);
   }
 
-  /* 段 3：rest [N, L) —— 官方无门控逐槽写 */
+  /* Segment 3: rest [N, L) -- the official ungated per-slot write */
   if (rest) {
     const restProduct = childProduct(rest, childSeen);
     const f = ctx.addConst(restProduct.fn);
@@ -227,7 +227,7 @@ export function emitCoWTuple(
     ctx.write(`}`);
   }
 
-  // 容器自身 checks（tuple .refine 纯谓词）：双路径同 object/array 骨架
+  // The container's own checks (tuple .refine pure predicates): both paths, same as the object/array skeletons
   const checksFn = containerChecksFn(schema);
   if (checksFn) {
     const cName = ctx.addConst(checksFn);

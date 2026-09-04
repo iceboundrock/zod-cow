@@ -2,18 +2,18 @@
 import { INVALID } from "zod4/v4/core";
 import { type Fn, markAsync } from "./product.js";
 
-/* ═══════════════════ 代码生成上下文（官方 CodeCtx/Doc 的最小等价物） ═══════════════════ */
+/* ═══════════════════ Codegen context (minimal equivalent of the official CodeCtx/Doc) ═══════════════════ */
 
 export class CodeCtx {
   lines: string[] = [];
   indent = 0;
   constNames: string[] = [];
   constValues: unknown[] = [];
-  /** 树中含 async 子树 → 产物为 async 函数（await 发射点已就位） */
+  /** The tree contains an async subtree → the product is an async function (await emit points already in place) */
   async = false;
   private varN = 0;
 
-  /** 官方 addConstant 等价：运行时引用提升为函数参数（c0,c1,…），按 === 去重 */
+  /** Equivalent of the official addConstant: runtime references are hoisted into function parameters (c0,c1,…), deduped by === */
   addConst(value: unknown): string {
     for (let i = 0; i < this.constValues.length; i++) {
       if (this.constValues[i] === value) return this.constNames[i]!;
@@ -25,7 +25,7 @@ export class CodeCtx {
   }
 
   var(): string {
-    // 前缀 x 区别于官方 v，便于肉眼比对官方 dump
+    // The x prefix distinguishes them from the official v, so the official dump is easy to compare by eye
     return `x${this.varN++}`;
   }
 
@@ -40,7 +40,7 @@ export class CodeCtx {
   }
 }
 
-/** 编译期已知字符串键的源码转义（官方 util.esc 语义的最小覆盖） */
+/** Source escaping for string keys known at compile time (minimal coverage of the official util.esc semantics) */
 export function escKey(k: string): string {
   return JSON.stringify(k);
 }

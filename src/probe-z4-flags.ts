@@ -12,22 +12,22 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 
 export interface Probe4Flags {
-  /** strip 模式：缺席 optional 键不物化（编译器据此跳过该键） */
+  /** strip mode: an absent optional key is not materialized (the compiler skips that key on this basis) */
   absentOptionalNotMaterialized: boolean;
-  /** strip 模式：present-undefined 键保留（CoW 透传天然对齐） */
+  /** strip mode: a present-undefined key is kept (CoW pass-through aligns with it naturally) */
   presentUndefKept: boolean;
-  /** 输出键序按 shape 声明序 */
+  /** Output key order follows the shape declaration order */
   outputFollowsShapeOrder: boolean;
   /** strict = catchall never / loose = catchall unknown */
   strictViaCatchallNever: boolean;
   looseViaCatchallUnknown: boolean;
-  /** record：stock 恒重建（CoW 干净路径返回原引用是合法超集） */
+  /** record: stock always rebuilds (the CoW clean path returning the original reference is a legal superset) */
   recordRebuilds: boolean;
-  /** default 短路：默认值不过内层校验（z4 与 z3 相反） */
+  /** default short-circuits: the default value does not go through the inner validation (z4 is the opposite of z3) */
   defaultShortCircuits: boolean;
-  /** catch 不吞异常（z4 与 z3 相反） */
+  /** catch does not swallow throws (z4 is the opposite of z3) */
   catchThrowsPropagate: boolean;
-  /** clean parse 恒产生新对象（内存对比的基线事实） */
+  /** a clean parse always produces a new object (the baseline fact for the memory comparison) */
   cleanParseClones: boolean;
   zodVersion: string;
 }
@@ -71,10 +71,10 @@ function computeFlags(): Probe4Flags {
       })
       .catch("fb");
     const r = thrower.safeParse("x");
-    catchThrowsPropagate = false; // 被吞了
+    catchThrowsPropagate = false; // swallowed
     void r;
   } catch {
-    catchThrowsPropagate = true; // 异常向上传播（z4 语义）
+    catchThrowsPropagate = true; // the throw propagates upwards (z4 semantics)
   }
 
   const cleanIn = { a: "x", b: 1 };

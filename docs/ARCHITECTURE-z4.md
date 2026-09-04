@@ -16,7 +16,7 @@ The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v
 
 | | v1 (self-written codegen) | zc-z4 (official codegen + CoW decoration) |
 |---|---|---|
-| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `src/cow4/` is 1667 lines across 13 modules |
+| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `packages/zod-cow-v4/src/cow4/` (then `src/cow4/`) is 1667 lines across 13 modules |
 | Source of semantic correctness | reimplementing zod semantics ourselves (issue/format/check, the whole set) | official compiler + official runtime fallback |
 | S1 pure validation (500 000 accounts) | 521ms | **283ms** (~1.0x vs the official parser) |
 | S2 dirty load (10% default) | 504ms | **247ms** (1.47x vs the official parser) |
@@ -494,8 +494,8 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 
 ## 8. Correctness evidence
 
-- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `tests/smoke-z4-containers.test.ts`
-  (the three record paths / map / set / size checks / container combinations) + `tests/smoke-z4-tuple-async.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+  (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform

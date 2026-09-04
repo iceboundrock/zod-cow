@@ -21,8 +21,8 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 | 线 | 入口 | 引擎 | 状态 |
 |---|---|---|---|
-| **zod4** | `packages/zod-cow-v4/src/index.ts` → `src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **活跃线**，所有新工作都在这里 |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **冻结参考实现**：CoW 思路的起点和对比基线，保持测试通过但不再扩展 |
+| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **活跃线**，所有新工作都在这里 |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **冻结参考实现**：CoW 思路的起点和对比基线，保持测试通过但不再扩展 |
 
 两条线各自是一个 workspace 包，各装各的 zod：`packages/zod-cow-v4`（以 [`zod-cow-v4`](packages/zod-cow-v4/README.md) 发布）对 zod 4.5.4，`packages/zod-cow-v3`（私有的冻结线）对 zod 3.24.1；两者都用真实的 `zod` 说明符引入。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
 

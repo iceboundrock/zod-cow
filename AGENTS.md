@@ -77,8 +77,8 @@ Two compiler front-ends live in two packages; they share no code (`internal.ts` 
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
-| zod3 v1 | `packages/zod-cow-v3/src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
-| zod4 | `packages/zod-cow-v4/src/index.ts` → `src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line**, new work goes here |
+| zod3 v1 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
+| zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line**, new work goes here |
 
 Each package installs its own zod: `packages/zod-cow-v4` against zod 4.5.4, `packages/zod-cow-v3` against zod 3.24.1; both import `zod` by its real specifier.
 

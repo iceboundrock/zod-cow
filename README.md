@@ -19,8 +19,8 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
-| **zod4** | `packages/zod-cow-v4/src/index.ts` → `src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Active line**, all new work goes here |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Frozen reference implementation**: the origin of the CoW idea and a comparison baseline, kept passing but not extended |
+| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Active line**, all new work goes here |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Frozen reference implementation**: the origin of the CoW idea and a comparison baseline, kept passing but not extended |
 
 The lines live in two workspace packages, each installing its own zod: `packages/zod-cow-v4` (published as [`zod-cow-v4`](packages/zod-cow-v4/README.md)) against zod 4.5.4, `packages/zod-cow-v3` (private, the frozen line) against zod 3.24.1; both import `zod` by its real specifier. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
 

@@ -4,11 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-z4.md` is the deep dive on the current engine.
+A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-z4.md` is the deep dive on the current engine; `CHANGELOG.md` holds the v0.1 to v0.5 history and the superseded benchmark tables.
 
-Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + both test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:z4` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with a reduced `BENCH_N` and writes the output to the job summary; treat those as smoke results, not reference numbers. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
+Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + both test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:z4` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with `BENCH_N=50 000` by default and writes the output to the job summary; the benchmark tables in the READMEs and docs quote one of those runs by run id. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
 
-**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Code comments and test/bench output were translated in #6; the README, architecture doc and CHANGELOG are still largely in Chinese, and that migration is tracked in #7. When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change. Purely mechanical edits inside an existing Chinese line (swapping a command or identifier, fixing a path) do not by themselves require translating that line.
+**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Code comments and test/bench output were translated in #6, the docs in #7. The only Chinese files are the two deliberate ones listed under Documentation layout below.
+
+**Documentation layout:**
+
+| File | Role |
+|---|---|
+| `README.md` | English source of truth: what the layer is, quick start, usage of both entry points, the CoW invariant, the current benchmark table, correctness evidence, known limitations, repository layout |
+| `README.zh-CN.md` | Chinese counterpart with the same headings. A change to `README.md` must be applied to `README.zh-CN.md` in the same PR |
+| `CHANGELOG.md` | Keep a Changelog style; `Unreleased` plus v0.1 to v0.5. Historical benchmark tables live here, never in the README |
+| `docs/ARCHITECTURE-z4.md` | English architecture deep dive on the zod4 engine (§1 to §11 plus Appendix A). Architecture changes go here |
+| `docs/ARCHITECTURE-z4.zh-CN.md` | Frozen Chinese snapshot of the v0.5 architecture text. Not maintained; do not edit it when the English doc changes |
+| `docs/upstream-issue-draft.md` | Draft issue for zod upstream asking to make `compileFn` / `assertOnly` / `INVALID` public |
 
 ## Commands
 
@@ -33,18 +44,18 @@ There is no test runner. Test files are plain `tsx` scripts: unit/smoke tests us
 
 Environment knobs:
 
-- `SEEDS` / `CASES` — differential fuzz size; code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 pnpm exec tsx tests/differential-z4.test.ts` for a quick pass.
-- `REPRO=seed:case` — re-run exactly one failing differential case and dump the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 pnpm exec tsx tests/differential-z4.test.ts`).
-- `BENCH_N` — benchmark record count (default 500 000; the CI bench workflow uses 50 000).
+- `SEEDS` / `CASES` set the differential fuzz size. Code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 pnpm exec tsx tests/differential-z4.test.ts` for a quick pass.
+- `REPRO=seed:case` re-runs exactly one failing differential case and dumps the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 pnpm exec tsx tests/differential-z4.test.ts`).
+- `BENCH_N` sets the benchmark record count (default 500 000; the CI bench workflow uses 50 000).
 
 ## Architecture
 
-Two compiler front-ends live in `src/`; they share no code (`internal.ts` is the zod3 line's protocol module — the zod4 engine never imported it). Know which line you are editing:
+Two compiler front-ends live in `src/`; they share no code (`internal.ts` is the zod3 line's protocol module; the zod4 engine never imported it). Know which line you are editing:
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
 | zod3 v1 | `src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
-| zod4 | `src/index-z4.ts` → `src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line** — new work goes here |
+| zod4 | `src/index-z4.ts` → `src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line**, new work goes here |
 
 zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1, `import { z } from "zod4"` is the npm alias for zod@4.5.4.
 
@@ -52,11 +63,11 @@ zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1,
 
 Every compiled node is `(input) => output | FAILED-sentinel`. Dirtiness needs no protocol: a child returning the same reference means "unchanged"; a parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)`) only at the first changed child, then writes further dirty children into that copy. Primitives compare by value (`'x'.trim() === 'x'` is clean). Consequences that constrain every change:
 
-- Never mutate input. Strip must never `delete` on the input object.
-- Output may alias input, so refines must not mutate, and `readonly` freezing is applied to shared structure.
+- Never mutate input. Strip must never `delete` on the input object. The only in-place write is the `Object.freeze` of `readonly`. In the zod4 line `readonly` is impure and goes to the official parser, so it freezes exactly what stock freezes: a copy for containers, the input itself for a pass-through leaf such as `any` / `unknown` (#28). The zod3 line freezes the input in place on every `readonly` node (#27); do not carry that pattern into the zod4 line.
+- Output may alias input, so refines must not mutate.
 - Failure paths carry no issue data of their own: they return the sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 
-### zod4 engine (`src/cow4/`) — how the pieces fit
+### zod4 engine (`src/cow4/`): how the pieces fit
 
 The engine is a directory of small modules (guideline: about 500 lines per file for this line and new code; the frozen zod3 compiler and the fuzzers are exempt):
 
@@ -77,7 +88,7 @@ The engine is a directory of small modules (guideline: about 500 lines per file 
 2. **Purity analysis** (`isPure`, `leafChecksArePure`, `checksAreCowSafe` in `purity.ts`): a conservative whitelist deciding "validation passes ⇒ output === input". Pure subtrees get the official *validator*; impure subtrees get the official *parser* plus a reference comparison. Three documented traps, each caught by the differential fuzzer: `overwrite` checks (`.trim()` etc.) rewrite values and are impure; length/size checks carry a default `when` (`WHEN_DEFAULTED_CHECKS`, copied from zod) and must not be rejected as custom-`when`; `optional/nullable` wrappers must be unwrapped before deciding whether a container gets a skeleton.
 3. **Container skeletons** (`emitCoWObject/Array/Tuple/Record/Map/Set`, one `emit-*.ts` each): string-templated codegen that mirrors zod's own `generate*` functions line by line, then rewrites the unconditional `const out = {...}` into "compare refs, copy on first dirt, `return input` when clean". Container-level checks (`min/max/refine`) run via `containerChecksFn` on the final output in both clean and copied paths. Wiring goes through `childProduct` / `cowSafeContainerForChild` / `emitBoxedContainer` (`emit.ts` and `purity.ts`); extend those when adding a container or wrapper combination.
 4. **Async**: official `ZodCompileAsyncError` is used as the detector. Async subtrees become async islands (marked with the `ZC_ASYNC` symbol), every product call site emits `await`, and the skeleton becomes an async function. `subtreeHasAsync` statically covers `lazy(async…)` which the official compiler misses. Sync API on an async product throws `$ZodAsyncError`, same as stock.
-5. **Degradation chain**, per subtree, never trading correctness: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`). `compiled.code` exposes the generated skeleton source for debugging.
+5. **Degradation chain**, per subtree, never giving up correctness: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`). `compiled.code` exposes the generated skeleton source for debugging.
 
 ### Version anchoring
 
@@ -90,8 +101,8 @@ The zod4 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEF
 ## Working conventions
 
 - Any change to purity rules or a container skeleton must be validated with the differential fuzzer for that line (`tests/differential-z4.test.ts` for the zod4 line), not only the smoke tests. Report the reference-sharing rate it prints; a drop indicates a lost CoW path.
-- Benchmarks in the README/docs were measured on node v24 with 3-run medians; update the tables when re-measuring rather than adding new ones.
-- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md`; `docs/upstream-issue-draft.md` is a draft issue for zod upstream asking to make `compileFn`/`assertOnly`/`INVALID` public.
+- Benchmarks in the README/docs come from a Benchmarks workflow run (node v24, `BENCH_N=50 000`, 3-run medians), cited by run id next to each table. When re-measuring, replace the tables and the run id rather than adding new tables, and move the superseded table to the CHANGELOG.
+- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md` (English; the `.zh-CN.md` snapshot stays untouched). User-facing changes (API, supported features, benchmark tables) go into both READMEs and the `Unreleased` section of `CHANGELOG.md`.
 
 ## Non-code artifacts
 

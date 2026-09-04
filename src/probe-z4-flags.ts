@@ -29,6 +29,13 @@ export interface Probe4Flags {
   catchThrowsPropagate: boolean;
   /** a clean parse always produces a new object (the baseline fact for the memory comparison) */
   cleanParseClones: boolean;
+  /**
+   * readonly over a pass-through leaf (any/unknown/custom) returns the caller's input and freezes it in
+   * place: stock readonly freezes whatever the inner parser hands back. The zod4 line reproduces this (#28)
+   */
+  readonlyFreezesPassThroughInput: boolean;
+  /** readonly over a container freezes a fresh copy and leaves the input unfrozen */
+  readonlyContainerFreezesCopy: boolean;
   zodVersion: string;
 }
 
@@ -81,6 +88,15 @@ function computeFlags(): Probe4Flags {
   const cleanOut: any = z.object({ a: z.string(), b: z.number() }).parse(cleanIn);
   const cleanParseClones = cleanOut !== cleanIn;
 
+  const roLeafIn = { a: "x" };
+  const roLeafOut: any = z.any().readonly().parse(roLeafIn);
+  const readonlyFreezesPassThroughInput = roLeafOut === roLeafIn && Object.isFrozen(roLeafIn);
+
+  const roObjIn = { a: "x" };
+  const roObjOut: any = z.object({ a: z.string() }).readonly().parse(roObjIn);
+  const readonlyContainerFreezesCopy =
+    roObjOut !== roObjIn && !Object.isFrozen(roObjIn) && Object.isFrozen(roObjOut);
+
   let zodVersion = "unknown";
   try {
     zodVersion = require("zod4/package.json").version as string;
@@ -98,6 +114,8 @@ function computeFlags(): Probe4Flags {
     defaultShortCircuits,
     catchThrowsPropagate,
     cleanParseClones,
+    readonlyFreezesPassThroughInput,
+    readonlyContainerFreezesCopy,
     zodVersion,
   };
 }

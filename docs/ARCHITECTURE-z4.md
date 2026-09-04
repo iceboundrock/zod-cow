@@ -1,86 +1,90 @@
-# zc-z4 架构对比：自研 codegen vs 复用 zod4 官方 codegen
+# zc-z4 architecture: self-written codegen vs reusing zod4's official codegen
 
-> 版本锚点：zod 4.5.4 · 本文所有生成代码均为真实产物 dump（`compileFn(schema, {debug:true})` 与 `compileCowDebug(schema)`）。
-> 配套代码：`src/cow4/`（当前 zod4 线，复用官方；模块布局见 §11）。
+> Version anchor: zod 4.5.4 · every piece of generated code in this document is a real product dump (`compileFn(schema, {debug:true})` and `compileCowDebug(schema)`).
+> Companion code: `src/cow4/` (the current zod4 line, reusing the official compiler; module layout in §11).
 >
-> **v1 已不在仓库里**：自研 zod4 前端（当时的 `src/compile-z4.ts` + `src/index-z4.ts`）在
-> zc-z4 落地后被删除（issue #4）——`src/index-z4.ts` 这个路径今天指的是 zc-z4 的入口。
-> 本文对 v1 的全部描述、代码引用与基准数字都是**历史对照**，记录"为什么从自研 codegen
-> 走到复用官方 codegen"这条决策路径；对应源码需回溯到删除前的提交。当前仓库里的 zod4
-> 编译线只有 zc-z4。
+> v1 is no longer in the repository: the self-written zod4 front-end (at the time `src/compile-z4.ts` + `src/index-z4.ts`) was deleted
+> after zc-z4 landed (issue #4). The path `src/index-z4.ts` today refers to the zc-z4 entry.
+> Every description of v1 in this document, together with its code references and benchmark numbers, is a historical
+> comparison, recording the decision path of "why we went from self-written codegen to reusing the official codegen";
+> the corresponding source has to be traced back to commits from before the deletion. The only zod4 compile line in the
+> current repository is zc-z4.
 
 ## TL;DR
 
-| | v1（自研 codegen） | zc-z4（官方 codegen + CoW 修饰） |
-|---|---|---|
-| 自研代码量 | ~1100 行语义 codegen + 官方正则逐字拷贝 | ~760 行（纯度分析 + 6 个容器骨架 + async 通道） |
-| 语义正确性来源 | 自己复刻 zod 语义（issue/format/check 全套） | 官方编译器 + 官方 runtime fallback |
-| S1 纯校验（50 万账户） | 521ms | **283ms**（~1.0x vs 官方 parser） |
-| S2 脏负载（10% default） | 504ms | **247ms**（1.47x vs 官方 parser） |
-| S5 容器（record/map/set） | 不支持 | **353ms**（1.93x vs 官方 parser） |
-| S6 tuple | 不支持 | **111ms**（3.06x vs 官方 parser） |
-| S7 async schema | 不支持 | **105ms**（2.50x vs stock safeParseAsync） |
-| gc 后驻留 | 0MB | **0MB**（官方 parser 为 108~217MB） |
-| 跟随上游升级 | 每次手动同步语义 | 自动受益（官方 compiler 优化） |
-| 风险 | 语义漂移（正则/issue 格式） | 依赖内部 API（`zod4/v4/core` 导出面） |
+The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v24) taken while both front-ends still existed, so the two columns are comparable; the current CI numbers are in §7.
 
-**结论先行**：zod4 的 JIT 编译器（`src/v4/core/compile.ts`）就是现成的语义后端。
-正确的分层不是"再写一个编译器"，而是——**官方产物做叶子和子树，CoW 骨架只接管容器，
-失败一律回退 stock runtime**。
+| | v1 (self-written codegen) | zc-z4 (official codegen + CoW decoration) |
+|---|---|---|
+| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `src/cow4/` is 1667 lines across 13 modules |
+| Source of semantic correctness | reimplementing zod semantics ourselves (issue/format/check, the whole set) | official compiler + official runtime fallback |
+| S1 pure validation (500 000 accounts) | 521ms | **283ms** (~1.0x vs the official parser) |
+| S2 dirty load (10% default) | 504ms | **247ms** (1.47x vs the official parser) |
+| S5 containers (record/map/set) | not supported | **353ms** (1.93x vs the official parser) |
+| S6 tuple | not supported | **111ms** (3.06x vs the official parser) |
+| S7 async schema | not supported | **105ms** (2.50x vs stock safeParseAsync) |
+| retained after GC | 0MB | **0MB** (the official parser is 108~217MB) |
+| following upstream upgrades | a manual semantic sync every time | automatic benefit (official compiler optimizations) |
+| risk | semantic drift (regexes / issue format) | dependence on internal APIs (the `zod4/v4/core` export surface) |
+
+The conclusion: zod4's JIT compiler (`src/v4/core/compile.ts`) is a ready-made semantic backend.
+Rather than writing another compiler, the layer uses official products as the leaves and subtrees,
+takes over only the containers with the CoW skeleton, and falls back to the stock runtime on any failure.
 
 ---
 
-## 1. 背景：为什么曾有两条路线
+## 1. Background: why there were once two routes
 
-Numeric 文章的 fork 思路是"砍特性换性能"（删掉 default/transform/catch 等 7 个特性，
-消除深拷贝）。CoW 层（本仓库）证明这 7 个特性可以保留——引用比较就是天然的脏信号：
-子节点返回原引用 = 没变，返回新值 = 变了，父层此刻才第一次浅拷贝（path-copying）。
+The fork approach in the Numeric article is "cut features to buy performance" (drop 7 features such as default/transform/catch
+so the deep copy disappears). The CoW layer (this repository) proves that those 7 features can be kept: reference comparison is
+a natural dirty signal. A child returning the original reference means unchanged, returning a new value means changed, and only
+at that moment does the parent make its first shallow copy (path-copying).
 
-在 zod3 时代这需要自研整套编译层（v1 路线）。zod 4.1 起，官方自己也上了 JIT
-（`import "zod/compile"` 或 `z.compile()`），并且暴露了可编程的内部 API。zc-z4 路线
-由此而来：**不自研语义 codegen，把官方编译器当"叶子级/表达式级"后端**。
+In the zod3 era this required writing an entire compile layer ourselves (the v1 route). Since zod 4.1 the official project
+also shipped a JIT (`import "zod/compile"` or `z.compile()`) and exposed a programmable internal API. That is where the zc-z4
+route comes from: do not write a semantic codegen of our own, use the official compiler as a "leaf-level / expression-level" backend.
 
-## 2. 官方 codegen 的可复用面（源码取证）
+## 2. The reusable surface of the official codegen (evidence from the source)
 
-`zod4/v4/core` 命名空间 re-export 了 `compile.js` 的全部导出：
+The `zod4/v4/core` namespace re-exports everything `compile.js` exports:
 
 ```ts
 import {
-  compileFn,                    // 生成单体函数 (input) => out | INVALID | true
-  INVALID,                      // Symbol.for("zod.compile.invalid") 失败哨兵
-  ZodCompileUnsupportedError,   // 编译拒绝（coerce/递归/__proto__/冷僻 check…）
-  ZodCompileAsyncError,         // async refine/transform（同步快路径无法表达）
-  regexes,                      // 官方正则全家桶（number/uuid/email 源…）
-  util,                         // 官方 util（isPlainObject/shallowClone…）
+  compileFn,                    // builds a monolithic function (input) => out | INVALID | true
+  INVALID,                      // Symbol.for("zod.compile.invalid"), the failure sentinel
+  ZodCompileUnsupportedError,   // compile rejection (coerce / recursion / __proto__ / obscure checks...)
+  ZodCompileAsyncError,         // async refine/transform (not expressible in the sync fast path)
+  regexes,                      // the official regex family (number/uuid/email sources...)
+  util,                         // official util (isPlainObject/shallowClone...)
 } from "zod4/v4/core";
 ```
 
-三个关键产物契约：
+Three key product contracts:
 
-| 产物 | 签名 | 语义 |
+| Product | Signature | Semantics |
 |---|---|---|
-| parser | `(input) => out \| INVALID` | stock zod 语义（校验 + 变换 + 无条件新容器） |
-| validator（`assertOnly: true`） | `(input) => true \| INVALID` | 校验语义完整、**跳过输出构造** |
-| runtime island | `(input) => out \| INVALID` | 黑盒调 `_zod.run({value, issues:[]}, {})`，同步语境吞 async |
+| parser | `(input) => out \| INVALID` | stock zod semantics (validation + transformation + an unconditional new container) |
+| validator (`assertOnly: true`) | `(input) => true \| INVALID` | validation semantics complete, **output construction skipped** |
+| runtime island | `(input) => out \| INVALID` | a black box calling `_zod.run({value, issues:[]}, {})`, swallows async in a sync context |
 
-另一个官方挂载点是 `globalConfig.postProcessor`（`zod/compile` 的 side-effect
-入口就是往这里装 shim）——本层没用它（它是"每个实例克隆替换 run"的路线，
-与 CoW 的"整树单体产物"不兼容），但注意两者**可以共存**：zc-z4 的失败回退调用
-`schema.safeParse`，若用户同时启用了 `zod/compile`，回退路径自动享受官方 JIT。
+Another official mount point is `globalConfig.postProcessor` (the side-effect entry of `zod/compile` installs its shim
+there). This layer does not use it (that is the "clone every instance and replace run" route, incompatible with CoW's
+"whole-tree product"), but note that the two can coexist: zc-z4's failure fallback calls
+`schema.safeParse`, so if the user also enables `zod/compile`, the fallback path automatically enjoys the official JIT.
 
-### 2.1 官方 object 生成的真实代码（parser 模式）
+### 2.1 The real code the official compiler generates for an object (parser mode)
 
 ```js
 // Constants: INVALID, c0, c1, c2
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
 const v0 = input["a"];
 if (typeof v0 !== "string") return INVALID;
-const v1 = typeof v0 === "string" && v0.length > 4 ? c0(v0) : v0.length;  // code point 惰性扫描
+const v1 = typeof v0 === "string" && v0.length > 4 ? c0(v0) : v0.length;  // lazy code point scan
 if (v1 > 4) return INVALID;
 const v2 = input["b"];
 if (typeof v2 !== "string") return INVALID;
 c1.lastIndex = 0;
-if (!c1.test(v2)) return INVALID;                 // email 格式
+if (!c1.test(v2)) return INVALID;                 // email format
 const v3 = input["c"];
 if (!c2.has(v3)) return INVALID;                  // enum
 const v4 = input["d"];
@@ -92,249 +96,251 @@ for (let v6 = 0; v6 < v4.length; v6++) {
   if (!Number.isSafeInteger(v7)) return INVALID;
   v5[v6] = v7;
 }
-const v8 = { "a": v0, "b": v2, "c": v3, "d": v5 };   // ← 无条件新对象
+const v8 = { "a": v0, "b": v2, "c": v3, "d": v5 };   // <- unconditional new object
 return v8;
 ```
 
-注意三点：① getter 只读一次（`const v0 = input["a"]`，checks 与输出组装不二次触发）；
-② 叶子优化极精细（`.max(4)` 对长字符串才数 code point）；③ **输出构造是无条件的**——
-即使所有子值原样通过，也会 `new Array` + 新对象字面量。这就是 stock 分配压力的来源
-（50 万账户 +112MB），也是 CoW 唯一需要"修饰"的位置。
+Three things to note: (1) the getter is read exactly once (`const v0 = input["a"]`; the checks and the output assembly do not
+trigger it a second time); (2) leaf optimization is fine-grained (`.max(4)` only counts code points for long strings);
+(3) output construction is unconditional: even when every child value passes through unchanged, there is still a `new Array`
+plus a new object literal. That is the source of stock's allocation pressure (500 000 accounts, +112MB), and it is the only
+place CoW needs to "decorate".
 
-### 2.2 同一 schema 的 assertOnly 产物
+### 2.2 The assertOnly product for the same schema
 
 ```js
-// 同一棵树，assertOnly: true —— 官方内置的"纯校验器"
+// the same tree, assertOnly: true, the official built-in "pure validator"
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
 const v0 = input["a"];
 if (typeof v0 !== "string") return INVALID;
-/* …全部校验代码原样保留… */
-for (let v5 = 0; v5 < v4.length; v5++) { /* 元素校验 */ }
-return true;                                      // ← 不构造任何输出
+/* ...all validation code kept as is... */
+for (let v5 = 0; v5 < v4.length; v5++) { /* element validation */ }
+return true;                                      // <- constructs no output at all
 ```
 
-`assertOnly` 把输出构造整体裁掉、校验语义原样保留——这正是 CoW 里"纯净子树"
-需要的产物。实测（50 万账户 assertOnly 逐账户循环）：**265ms / +13MB**，对照
-parser 产物 332ms / +112MB——**输出构造的净成本 = 67ms + 99MB 分配**。
+`assertOnly` cuts output construction away entirely and keeps the validation semantics untouched, which is exactly the product
+that a "pure subtree" needs in CoW. Measured (500 000 accounts, assertOnly in a per-account loop): **265ms / +13MB**, against
+the parser product's 332ms / +112MB. The net cost of output construction is 67ms plus 99MB of allocation.
 
-### 2.3 transform/default/optional 的产物形态
+### 2.3 The product shape of transform/default/optional
 
 ```js
 // z.object({ keep: string, role: enum.default("a"), len: string.transform(s=>s.length), opt: number.optional() })
 const v1 = input["role"];
 let v2 = (() => {
   let v3;
-  if (v1 === undefined) { v3 = c1(c0()); }        // shallowClone(defaultValue()) —— #5855
+  if (v1 === undefined) { v3 = c1(c0()); }        // shallowClone(defaultValue()), #5855
   else {
     if (!c2.has(v1)) return INVALID;
-    v3 = v1 === undefined ? c1(c0()) : v1;        // inner 输出 undefined 也替换为 default
+    v3 = v1 === undefined ? c1(c0()) : v1;        // an inner output of undefined is also replaced by the default
   }
   return v3;
 })();
 if (v2 === INVALID) return INVALID;
 const v4 = input["len"];
 if (typeof v4 !== "string") return INVALID;
-const v5 = c3(v4);                                 // transform helper（payload 伪造 + issue 通道）
+const v5 = c3(v4);                                 // transform helper (forged payload + issue channel)
 if (v5 === INVALID) return INVALID;
 const v6 = input["opt"];
 let v7 = (() => { /* optional IIFE */ })();
 if (v7 === INVALID) {
-  if ("opt" in input) return INVALID;              // optout=optional：缺席键不判失败
+  if ("opt" in input) return INVALID;              // optout=optional: an absent key is not a failure
   v7 = undefined;
 }
 const v9 = {};
 v9["keep"] = v0;
-if (v2 !== undefined || "role" in input) v9["role"] = v2;   // mayOutputUndefined 组装规则
+if (v2 !== undefined || "role" in input) v9["role"] = v2;   // the mayOutputUndefined assembly rule
 ```
 
-这些正是 v1 在差分测试里反复踩坑的语义（default 短路、缺席不物化、exactOptional、
-catch 常量值、record 数值键重试、for...in 继承键……）。**zc-z4 让官方消化全部这些细节，
-自研层只做纯度分派**——这是代码量 1100→600 行且正确性反超的原因。
+These are exactly the semantics v1 kept tripping over in the differential tests (default short-circuit, absent keys not
+materialized, exactOptional, catch constant values, record numeric-key retry, for...in inherited keys, and so on).
+zc-z4 lets the official compiler digest all of these details, and the self-written layer only does purity dispatch.
+That is why correctness moved ahead while the self-written layer shrank in scope, not in size: measured as physical lines at commit c0453dd the two front-ends were comparable (v1 1271 lines, zc-z4 1521 lines, see §1), but v1's lines reimplement zod semantics and zc-z4's are purity dispatch, skeletons and predicates copied from zod.
 
-（未完，下一节：zc-z4 骨架 dump 并排对照）
+## 3. zc-z4's generated code: how the official product gets decorated by CoW
 
-## 3. zc-z4 的生成代码：官方产物如何被 CoW 修饰
-
-zc-z4 的编译期分派（`emitNode`）：
+zc-z4's compile-time dispatch (`emitNode`):
 
 ```
 needsValue && cowSafeContainerForChild(schema)?
-  ├─ 是 → emitBoxedContainer（optional/nullable 剥壳）→ 五个容器骨架之一
-  └─ 否 → isPure(schema)?
-        ├─ 是 → 官方 assertOnly 产物 + return accessor（输出===输入）
-        └─ 否 → 官方 parser 产物（引用比较判脏，由宿主骨架执行）
+  ├─ yes → emitBoxedContainer (unwrap optional/nullable) → one of the six container skeletons
+  └─ no  → isPure(schema)?
+        ├─ yes → official assertOnly product + return accessor (output === input)
+        └─ no  → official parser product (dirty check by reference comparison, performed by the host skeleton)
 ```
 
-### 3.1 官方 object 骨架 vs zc-z4 CoW 骨架（同一 schema 并排）
+### 3.1 Official object skeleton vs zc-z4 CoW skeleton (the same schema, side by side)
 
-schema：`z.object({ id: number.int(), firstName: string.max(64), email: z.email(), tags: array(string).max(8), address: object({...}) })`
+schema: `z.object({ id: number.int(), firstName: string.max(64), email: z.email(), tags: array(string).max(8), address: object({...}) })`
 
 ```js
-// ═══ zc-z4 CoW 骨架（真实 dump）═══
+// ═══ zc-z4 CoW skeleton (real dump) ═══
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
 let x0 = false, x1 = false;                                // dirty / extra
 const x2 = input["id"];
-if (c0(x2) === INVALID) return INVALID;                    // 纯叶子键：官方 assertOnly 产物
+if (c0(x2) === INVALID) return INVALID;                    // pure leaf key: official assertOnly product
 const x3 = input["email"];
-if (c1(x3) === INVALID) return INVALID;                    // （email 校验在产物内部）
+if (c1(x3) === INVALID) return INVALID;                    // (email validation lives inside the product)
 const x4 = input["tags"];
-const x5 = c2(x4);                                         // 容器键：CoW 子骨架产物
+const x5 = c2(x4);                                         // container key: CoW sub-skeleton product
 if (x5 === INVALID) return INVALID;
-if (x5 !== x4) x0 = true;                                  // ← 引用比较即脏信号
+if (x5 !== x4) x0 = true;                                  // <- reference comparison is the dirty signal
 const x6 = input["address"];
-const x7 = c3(x6);                                         // 同上（嵌套 CoW）
+const x7 = c3(x6);                                         // same as above (nested CoW)
 if (x7 === INVALID) return INVALID;
 if (x7 !== x6) x0 = true;
-for (const k in input) { if (!c4.has(k)) { x1 = true; break; } }   // 官方 for...in 同款
+for (const k in input) { if (!c4.has(k)) { x1 = true; break; } }   // the same for...in as the official code
 for (const s of Object.getOwnPropertySymbols(input)) {
-  if (!c4.has(s)) { x1 = true; break; }                    // strip 会丢 symbol 多余键 → 探测
+  if (!c4.has(s)) { x1 = true; break; }                    // strip drops extra symbol keys → probe for them
 }
 if (!x0 && !x1) {
-  return input;                                            // ═══ 官方模板没有的一行 ═══
+  return input;                                            // ═══ the one line the official template does not have ═══
 }
-const out = { ...input };                                  // 被迫才拷贝：键存在性/键序天然保真
+const out = { ...input };                                  // copy only when forced: key presence and key order stay faithful
 if (x1) {
-  for (const k in input) if (!c5.has(k)) delete out[k];    // strip 剥离（官方语义）
+  for (const k in input) if (!c5.has(k)) delete out[k];    // strip (official semantics)
   for (const s of Object.getOwnPropertySymbols(input)) if (!c5.has(s)) delete out[s];
 }
 return out;
 ```
 
-与官方 dump 的逐点对应关系：
+Point-by-point correspondence with the official dump:
 
-| 官方 parser | zc-z4 骨架 | 说明 |
+| Official parser | zc-z4 skeleton | Note |
 |---|---|---|
-| `const v8 = {...}` 无条件 | `if (!dirty && !extra) return input;` | CoW 核心：干净输入零分配 |
-| `const v5 = new Array(len)` | （元素循环内）`out = input.slice()` | 数组同理，首脏才 slice |
-| `if (!c1.test(v2)) return INVALID` | 同左（assertOnly 产物内部） | 叶子校验 100% 官方 |
-| （输出组装隐式处理键存在性） | `{ ...input }` | 扩展天然保真 presence/键序 |
-| `for (const k in …)` unknown 探测 | 同左逐行照抄 | strict/strip/loose 语义对齐 |
+| `const v8 = {...}` unconditionally | `if (!dirty && !extra) return input;` | The CoW core: zero allocation on clean input |
+| `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
+| `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
+| (output assembly handles key presence implicitly) | `{ ...input }` | Spread keeps presence and key order faithful naturally |
+| `for (const k in …)` unknown probe | same, copied line by line | strict/strip/loose semantics aligned |
 
-### 3.2 容器自身 checks：双路径时点
+### 3.2 The container's own checks: the two-path timing
 
-`.refine()` / `.min()` 挂在容器上时，stock 语义是"输出构造后对输出跑 checks"。
-zc-z4 把 checks 编译成独立校验子程序，**双路径调用**：
+When `.refine()` / `.min()` is attached to a container, the stock semantics is "run the checks on the output after the output
+is constructed". zc-z4 compiles the checks into a separate validation subroutine and **calls it on both paths**:
 
 ```js
-const cChecks = /* containerChecksFn 产物 */;
+const cChecks = /* the containerChecksFn product */;
 if (!x0 && !x1) {
-  if (cChecks(input) === INVALID) return INVALID;   // 干净：输出===输入
+  if (cChecks(input) === INVALID) return INVALID;   // clean: output === input
   return input;
 }
 const out = { ...input };
-/* …写回/剥离… */
-if (cChecks(out) === INVALID) return INVALID;       // 脏：对齐 stock 的"对输出跑 checks"
+/* ...write back / strip... */
+if (cChecks(out) === INVALID) return INVALID;       // dirty: aligned with stock's "run the checks on the output"
 return out;
 ```
 
-支持集：`custom`（`.refine()` 的 `def.fn` 纯谓词）+ array 的
-`min_length/max_length/length_equals`（`.length` 直读）+ map/set 的
-`min_size/max_size/size_equals`（`.size` 直读）。其余（superRefine 改写
-`ctx.value`、overwrite、自定义 `when`）→ 该节点整体降级官方 parser 产物。
+Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
+`min_length/max_length/length_equals` (`.length` read directly) + map/set's
+`min_size/max_size/size_equals` (`.size` read directly). Everything else (superRefine rewriting
+`ctx.value`, overwrite, a custom `when`) → the whole node degrades to the official parser product.
 
-## 4. 纯度分析：白名单与三大陷阱
+## 4. Purity analysis: the whitelist and the three traps
 
-**定义**：`isPure(schema)` = 校验通过 ⇒ 输出必然 `===` 输入引用，且无副作用。
-纯净子树走官方 validator（值=输入），拿不准的一律非纯（parser 产物 + 引用比较）。
+Definition: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.
+A pure subtree goes through the official validator (value = input); anything uncertain is treated as impure (parser product + reference comparison).
 
-| def.type | 判定 | 理由 |
+| def.type | Verdict | Reason |
 |---|---|---|
-| string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | 官方产物透传 accessor；但 checks 例外见下 |
-| optional/nullable | 递归 inner | 值透传 |
-| object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
-| record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
-| union | 全分支纯 | 分支透传 |
-| readonly | **false** | `Object.freeze` 副作用（冻输入的风险） |
-| default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | **false** | 值产生器/黑盒/新容器 |
+| string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | the official product passes the accessor through; checks are the exception, see below |
+| optional/nullable | recurse into the inner | the value passes through |
+| object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
+| record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
+| union | all branches pure | branches pass through |
+| readonly | **false** | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
+| default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | **false** | value producer / black box / new container |
 
-### 陷阱一：`overwrite` 是值改写（差分 seed=51 实证）
+### Trap one: `overwrite` rewrites values (proved by differential seed=51)
 
-`z.string().max(16).toLowerCase()` 在 zod4 里不是 schema 包装，而是 def.checks 里的
-**`overwrite` check**。白名单把 string 判纯 → validator 通过 → `return input` →
-stock 输出 "ab1" vs ours "AB1"。修复：叶子纯度必须检查自身 checks——
-`overwrite` 一律非纯；`custom` 无 `fn`（superRefine 可改写 `ctx.value`）一律非纯。
+In zod4 `z.string().max(16).toLowerCase()` is an `overwrite` check inside def.checks, not a schema wrapper.
+The whitelist judged string pure → the validator passed → `return input` →
+stock output "ab1" vs ours "AB1". Fix: leaf purity must inspect the node's own checks.
+`overwrite` is always impure; a `custom` check with no `fn` (superRefine can rewrite `ctx.value`) is always impure.
 
-### 陷阱二：length/size check 自带默认 `when`（诊断日志实证）
+### Trap two: length/size checks carry a default `when` (proved by diagnostic logs)
 
-`.max(64)` 的 check 实例上有 `when: [Function: _whenHasLength]`——官方
-`generateChecks` 用 `WHEN_DEFAULTED_CHECKS` 白名单豁免（max_size/min_size/
-size_equals/max_length/min_length/length_equals）。zc-z4 最初把任何 truthy `when`
-当"自定义 when"拒绝 → `.max(8)` 的 array 被误判非纯 → 走 parser → 每元素新数组
-→ CoW 全灭（S1 分配 98MB 的根因）。修复：照抄官方白名单，
-`hasCustomWhen = when && !WHEN_DEFAULTED_CHECKS.has(check)`。
+The check instance for `.max(64)` carries `when: [Function: _whenHasLength]`. The official
+`generateChecks` exempts these through the `WHEN_DEFAULTED_CHECKS` whitelist (max_size/min_size/
+size_equals/max_length/min_length/length_equals). zc-z4 initially rejected any truthy `when`
+as a "custom when" → an array with `.max(8)` was misjudged impure → it went through the parser → a new array per element
+→ CoW wiped out entirely (the root cause of the 98MB allocated in S1). Fix: copy the official whitelist verbatim,
+`hasCustomWhen = when && !WHEN_DEFAULTED_CHECKS.has(check)`.
 
-### 陷阱三：`nullable(object)` 必须剥壳（差分 seed=104/133/137 实证）
+### Trap three: `nullable(object)` must be unwrapped (proved by differential seed=104/133/137)
 
-容器识别若只看 `def.type === "object"`，`nullable(object)` 会落入"纯叶子键"分支，
-走官方 assertOnly——但官方 validator **跳过多余键剥离**（strip 是输出构造行为，
-不影响校验成败）→ 输入的多余键原样透传 → 与 stock 分歧。修复：
-`cowSafeContainerForChild` 沿 optional/nullable 链剥壳，`emitBoxedContainer`
-发射壳检查（null→null、undefined→undefined），到容器后走 CoW 骨架。
+If container recognition only looks at `def.type === "object"`, `nullable(object)` falls into the "pure leaf key" branch
+and goes through the official assertOnly. But the official validator skips stripping extra keys (strip is an
+output-construction behavior and does not affect whether validation succeeds) → the input's extra keys pass straight through →
+divergence from stock. Fix:
+`cowSafeContainerForChild` unwraps along the optional/nullable chain, `emitBoxedContainer`
+emits the wrapper checks (null→null, undefined→undefined), and once at the container the CoW skeleton takes over.
 
-> 方法论：这四个 bug 没有一个是靠读代码发现的，全部由随机 schema 差分测试
-> 抓出（`REPRO=seed:case` 一键复现）。**纯度分析的完备性只能靠 fuzz 验证**——
-> 白名单"宁可误判非纯"的保守性 + 5 万 case 差分，是这条路线的安全性边界。
+> Methodology: not one of these three traps was found by reading code; all of them were caught by differential testing
+> with random schemas (`REPRO=seed:case` reproduces one in a single command). The completeness of purity analysis can only be
+> verified by fuzzing: the whitelist's conservatism of "rather misjudge as impure" plus 50 000 differential cases is the
+> safety boundary of this route.
 
-## 5. record/map/set 骨架（v0.4 新增，激进全覆盖）
+## 5. record/map/set skeletons (added in v0.4, aggressive full coverage)
 
-官方这三个生成器同样"无条件新容器"：record `const v0 = {}`、map
-`new Map()`（还带每条目解构分配）、set `new Set()`。骨架策略与 object 一致，
-多出两个 CoW 特有问题：**键名会变**（数值键重试/键转换）与**键序**（声明驱动）。
+These three official generators are equally "unconditional new container": record `const v0 = {}`, map
+`new Map()` (plus a destructuring allocation per entry), set `new Set()`. The skeleton strategy matches object,
+with two extra CoW-specific problems: key names can change (numeric-key retry / key transformation) and key order is declaration-driven.
 
-### 5.1 record：三条编译期路径
+### 5.1 record: three compile-time paths
 
 ```
-keyType._zod.values 存在且非 partial?
-  ├─ 是 → 路径 A：声明驱动（z.record(z.enum([...]), v)）
-  └─ 否 → keyType 是 bare-string（type==="string" && 无 format && 无 coerce && 无 checks）?
-        ├─ 是 → 路径 C：键名恒不变，纯值比较
-        └─ 否 → 路径 B：keyFast 产物 + 数值键重试 + 键名引用比较
+keyType._zod.values exists and is not partial?
+  ├─ yes → Path A: declaration-driven (z.record(z.enum([...]), v))
+  └─ no  → is keyType a bare-string (type==="string" && no format && no coerce && no checks)?
+        ├─ yes → Path C: key names never change, compare values only
+        └─ no  → Path B: keyFast product + numeric-key retry + key-name reference comparison
 ```
 
-**路径 C**（最常见）生成代码骨架：
+Path C (the most common) generates this skeleton:
 
 ```js
-if (!c0(input)) return INVALID;                            // util.isPlainObject（官方同名函数）
+if (!c0(input)) return INVALID;                            // util.isPlainObject (the official function of the same name)
 let x0 = input, x1 = false;
 for (const k of Reflect.ownKeys(input)) {
   if (k === "__proto__") continue;
-  if (!c1.call(input, k)) continue;                        // propertyIsEnumerable（官方同款）
-  if (typeof k !== "string") return INVALID;               // symbol 键官方拒绝
+  if (!c1.call(input, k)) continue;                        // propertyIsEnumerable (same as the official code)
+  if (typeof k !== "string") return INVALID;               // the official code rejects symbol keys
   const vIn = input[k];
-  const t = cValue(vIn);                                   // 值产物（validator/parser/cow 子骨架）
+  const t = cValue(vIn);                                   // value product (validator / parser / CoW sub-skeleton)
   if (t === INVALID) return INVALID;
-  if (t !== vIn) {                                         // 引用比较
+  if (t !== vIn) {                                         // reference comparison
     if (!x1) { x1 = true; x0 = { ...input }; }
     x0[k] = t;
   }
 }
-return x0;                                                 // 干净 → 原引用
+return x0;                                                 // clean → the original reference
 ```
 
-**路径 B**（数值键重试，键名会变）：沿用官方 `keyFast + regexes.number 重试`
-模板，额外做**键名引用比较**——`outKey !== k` 也判脏，拷贝分支
-`delete out[k]; out[outKey] = t;`。键名不变的子场景（string format 键如
-`z.record(z.email(), v)`）中 `outKey === k` 恒成立，键名比较零成本。
+Path B (numeric-key retry, key names can change): reuses the official `keyFast + regexes.number retry`
+template and additionally performs a key-name reference comparison: `outKey !== k` also counts as dirty, and the copy branch does
+`delete out[k]; out[outKey] = t;`. In the sub-case where key names do not change (string-format keys such as
+`z.record(z.email(), v)`), `outKey === k` always holds and the key-name comparison costs nothing.
 
-**路径 A**（enum 声明驱动）：官方输出 = 按声明序**无条件物化全部声明键**
-（缺失键 + optional 值 → 写 undefined）+ 未知键 strict 拒绝。骨架：
+Path A (enum, declaration-driven): the official output unconditionally materializes every declared key in declaration order
+(a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
 
-- 缺失声明键即脏（`!(k in input)` → stock 会物化该键）；
-- 未知键 strict 拒绝照抄（`for...in → INVALID`）；
-- 拷贝分支 `{...input}` 后逐声明键写回（validator 产物键写 `inVar`——缺失时
-  `inVar === undefined` 恰好就是 stock 语义；parser 产物键写产物输出值）。
+- a missing declared key is dirty (`!(k in input)` → stock materializes that key);
+- the strict rejection of unknown keys is copied verbatim (`for...in → INVALID`);
+- in the copy branch, after `{...input}`, every declared key is written back (a validator-product key writes `inVar`; when the key
+  is missing, `inVar === undefined` happens to be exactly the stock semantics; a parser-product key writes the product's output value).
 
-实测语义锚点：`{a:1}` 对 `z.record(z.enum(["a","b"]), z.number().optional())`
-→ stock 物化 `b: undefined` → ours 判脏返回 `{a:1, b:undefined}` ✓；未知键
-`{a:1,b:2,extra:3}` → 双方都拒绝 ✓。
+Measured semantic anchors: `{a:1}` against `z.record(z.enum(["a","b"]), z.number().optional())`
+→ stock materializes `b: undefined` → ours marks it dirty and returns `{a:1, b:undefined}` ✓; an unknown key
+`{a:1,b:2,extra:3}` → both sides reject ✓.
 
 ### 5.2 map / set
 
 ```js
-// map：键/值双引用比较，首脏 new Map(input)
+// map: reference comparison on both key and value, new Map(input) on the first dirt
 for (const [kIn, vIn] of input) {
-  /* 纯键：cKey(kIn) 校验，键名恒不变（keyExpr = kIn）
-     非纯键：const ko = cKey(kIn)，键名引用比较 */
+  /* pure key: cKey(kIn) validates, the key name never changes (keyExpr = kIn)
+     impure key: const ko = cKey(kIn), key-name reference comparison */
   const vo = cValue(vIn);
   if (vo === INVALID) return INVALID;
   if (vo !== vIn || keyExpr !== kIn) {
@@ -345,194 +351,198 @@ for (const [kIn, vIn] of input) {
 }
 return out;
 
-// set：成员引用比较，首脏 new Set(input)，delete(vIn) + add(vo)
+// set: reference comparison on members, new Set(input) on the first dirt, delete(vIn) + add(vo)
 ```
 
-- **键纯时零开销**：键 schema（string/number）官方产物透传原键 → `keyExpr === kIn`
-  恒成立，键名比较被 V8 优化掉。
-- **键转换正确性**：键是容器/transform 时（罕见），cow/parser 产物返回新键，
-  `delete(kIn) + set(newKey)` 对齐 stock（stock 对 Map 也是 set 转换后的键）。
-- **NaN**：`vo !== vIn` 对 NaN 恒真 → 误判脏 → 过度拷贝但结果正确
-  （SameValueZero 下 `delete/add` 等价）。与 README 已有的 NaN 说明一致。
-- **Map/Set deepStrictEqual**：Node assert 对 Map/Set 做**条目集合比较**
-  （顺序无关），`delete+set/add` 的顺序差异不影响差分。
+- No cost when the key is pure: for a key schema (string/number) the official product passes the original key through →
+  `keyExpr === kIn` always holds, and V8 optimizes the key-name comparison away.
+- Key transformation stays correct: when the key is a container or a transform (rare), the CoW/parser product returns a new key, and
+  `delete(kIn) + set(newKey)` matches stock (stock also sets the transformed key on a Map).
+- NaN: `vo !== vIn` is always true for NaN → a false dirty verdict → an over-copy, but the result is correct
+  (under SameValueZero `delete/add` is equivalent). This matches the NaN note already in the README.
+- Map/Set deepStrictEqual: Node's assert compares Map/Set as entry sets
+  (order-independent), so the ordering difference of `delete+set/add` does not affect the differential.
 
-### 5.3 接线方式
+### 5.3 Wiring
 
-- `cowSafeContainerForChild` 增加 `record/map/set` case → 键位/元素位/顶层自动接管；
-- `emitBoxedContainer` 尾部扩到六容器 → `nullable(record)` / `optional(map)` / `optional(tuple)` 直接可用；
-- `checksAreCowSafe`/`containerChecksFn` 增加 map/set 的 size 系 check；
-- 值位置统一走 `childProduct()`（容器→cow 子骨架 / 纯→validator / 非纯→parser / async→async 岛），
-  与 object 键位、array 元素位共用同一条选择逻辑。
+- `cowSafeContainerForChild` gains `record/map/set` cases → key positions, element positions and the top level are taken over automatically;
+- `emitBoxedContainer` is extended at the end to all six containers → `nullable(record)` / `optional(map)` / `optional(tuple)` work directly;
+- `checksAreCowSafe` / `containerChecksFn` gain the size-family checks for map/set;
+- value positions all go through `childProduct()` (container → CoW sub-skeleton / pure → validator / impure → parser / async → async island),
+  sharing the same selection logic as object key positions and array element positions.
 
-### 5.4 tuple 骨架（v0.5 新增）
+### 5.4 tuple skeleton (added in v0.5)
 
-官方 `generateTupleCheck`（compile.js L1289-1374）的逐行镜像 + CoW 修饰。三个关键语义机制：
+A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-1374) plus CoW decoration. Three key semantic mechanisms:
 
-1. **optinStart / optoutStart**（官方 `getTupleOptStart` 逐字照抄）：从尾向头找第一个
-   不可省槽位。optin 三档梯子（`optin !== undefined` 即可省，含 optional/defaulted），
-   optout 两档（仅 `optout === "optional"`）。长度守卫：无 rest 时 `[optinStart, N]`，
-   有 rest 时 `>= optinStart`。
-2. **fillLen 变量**（本层发明）：官方用动态 `out.length` 做尾槽门控（`if (out.length === i)`），
-   但 CoW 时输出可能还是输入原引用（不能读/写 `.length`）——必须显式跟踪逻辑长度。
-   不变量：`out === input ⟹ fillLen === input.length`（截断/填充路径必先拷贝）。
-3. **三段式**：段 1 `[0, optoutStart)` 无条件槽（官方照样物化缺席槽：validator 槽写
-   `undefined`、值槽写产出）；段 2 尾槽门控 + 缺席三分支（`dropsWhenAbsent` → 截断
-   / validator → 截断 / IIFE → INVALID/undefined 截断、有值填充）；段 3 rest 无门控逐槽。
-   截断三态：已拷贝→实截；原引用且目标≠输入长→拷后截；**目标===输入长→输出===输入，零操作**
-   （trailing optional 截断到输入长度的场景可以保住原引用）。
+1. optinStart / optoutStart (the official `getTupleOptStart`, copied verbatim): scan from the tail toward the head for the first
+   slot that cannot be omitted. The optin ladder has three rungs (`optin !== undefined` is enough to be omissible, covering optional/defaulted),
+   optout has two (only `optout === "optional"`). Length guard: `[optinStart, N]` when there is no rest,
+   `>= optinStart` when there is.
+2. The fillLen variable (invented in this layer): the official code uses the dynamic `out.length` for trailing-slot gating (`if (out.length === i)`),
+   but under CoW the output may still be the original input reference (its `.length` must not be read or written), so the logical length
+   has to be tracked explicitly.
+   Invariant: `out === input ⟹ fillLen === input.length` (the truncate/fill paths always copy first).
+3. Three segments: segment 1, `[0, optoutStart)`, the unconditional slots (the official code materializes absent slots all the same: a validator slot writes
+   `undefined`, a value slot writes the produced value); segment 2, trailing-slot gating plus three absence branches (`dropsWhenAbsent` → truncate
+   / validator → truncate / IIFE → INVALID or undefined truncates, a value fills); segment 3, rest, slot by slot with no gating.
+   Truncation has three states: already copied → truncate for real; the original reference and the target length ≠ the input length → copy then truncate;
+   target === the input length → output === input, zero operations
+   (the case where a trailing optional truncates to the input length can keep the original reference).
 
-收益最大的场景：全数字/全干净 tuple——stock 每次都 `new Array` + 逐槽写，CoW 零拷贝
-（S6：4.57x vs stock / 3.06x vs 官方 parser，全部场景中比值最高）。
+The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
+(S6 in run 33837195401: 2.99x vs stock / 1.88x vs the official parser, the widest margin over the official parser of all scenarios).
 
-### 5.5 async 通道（v0.5 新增）
+### 5.5 async channel (added in v0.5)
 
-**设计前提**：官方 compileFn 对 async（refine/transform/custom/superRefine/pipe，共 6 处
-`isAsyncFunction` 检测点）一律抛 `ZodCompileAsyncError`——这恰好是现成的"子树 async 探测器"。
-本层把"探测到 async → 整树降级"改为"就地转 async 岛 + 骨架局部 await"：
+Design premise: the official compileFn always throws `ZodCompileAsyncError` for async (refine/transform/custom/superRefine/pipe, 6
+`isAsyncFunction` detection points in total), which is exactly a ready-made "subtree async detector".
+This layer turns "async detected → degrade the whole tree" into "convert in place to an async island + a local await in the skeleton":
 
-1. **async 岛**：`makeAsyncIsland(schema)` = async 黑盒，返回 `Promise<输出 | INVALID>`，
-   产物挂 `ZC_ASYNC` symbol 标记。
-2. **await 发射**：所有产物调用位（object 键/array 元素/tuple 槽/record 值/map 键值/set 成员/
-   容器 checks 的 async refine 谓词）检测 `isAsyncProduct(fn)` → 发射 `await` + `ctx.async = true`。
-3. **骨架 async 化**：`buildFn` 依 `ctx.async` 决定 `async (input) =>` 还是 `(input) =>`，
-   产物挂 `ZC_ASYNC` → 子骨架父层自动感知（`childProduct` 返回 `kind: "async"`）。
-4. **公开 API**：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
-   async 骨架下 sync API 抛 `$ZodAsyncError`（官方同款语义，实测 sync parse 对 async 树就是抛）。
-5. **lazy(async) 补漏**：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
-   Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
-   pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+1. async island: `makeAsyncIsland(schema)` = an async black box returning `Promise<output | INVALID>`,
+   and the product carries the `ZC_ASYNC` symbol marker.
+2. await emission: every product call site (object keys / array elements / tuple slots / record values / map keys and values / set members /
+   the async refine predicate of container checks) checks `isAsyncProduct(fn)` → emits `await` and sets `ctx.async = true`.
+3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
+   and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
+4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
+   under an async skeleton the sync API throws `$ZodAsyncError` (the same semantics as the official code; measured, a sync parse on an async tree does throw).
+5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
+   the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
+   the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
 
-**关键语义保留**：同步 island（`makeIsland`）遇到 Promise 时抛 `$ZodAsyncError`（官方
-compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。
+A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
+compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
 
-**混搭效果**：一棵树里只有 async 子树位付 microtask 成本，其余全部保持引用比较骨架
-（S7：5 万条 async transform 场景 2.50x vs stock safeParseAsync，分配 -63%）。
+In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
+(S7 in run 33837195401: an async transform scenario over 5 000 rows, 2.67x vs stock safeParseAsync, allocation -30%).
 
-## 6. 降级链状态机
+## 6. Degradation chain state machine
 
 ```
 compile(schema)
   │
-  ├─ compileCowFn（整树骨架编译）
-  │     ├─ emitBoxedContainer ── cowSafeContainerForChild（剥壳 + checks 安全）
-  │     │     ├─ object/array/tuple/record/map/set 骨架
-  │     │     │     ├─ 纯净叶子 → officialFn（assertOnly 产物）
-  │     │     │     │     └─ 生成失败 → officialFn(parser) → island
-  │     │     │     ├─ 非纯子树 → officialFn(parser 产物)
-  │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError）
-  │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland（await 通道）★v0.5
-  │     │     │     ├─ 容器子树 → subFn 递归（seen 防循环引用）
-  │     │     │     │     └─ 子骨架自身 async → kind:"async"，父位发射 await ★v0.5
-  │     │     │     └─ async 子树 → makeAsyncIsland + ctx.async（骨架变 async 函数）★v0.5
-  │     │     └─ checks 不安全（superRefine/overwrite/自定义 when）→ officialFn(parser) 降级
-  │     └─ 顶层不可编译（顶层递归 / schema catchall / __proto__ 键）
-  │           └─ stock = true：parse/safeParse/validate 全部直通 stock
+  ├─ compileCowFn (whole-tree skeleton compilation)
+  │     ├─ emitBoxedContainer ── cowSafeContainerForChild (unwrap + checks safe)
+  │     │     ├─ object/array/tuple/record/map/set skeletons
+  │     │     │     ├─ pure leaf → officialFn (assertOnly product)
+  │     │     │     │     └─ generation failed → officialFn(parser) → island
+  │     │     │     ├─ impure subtree → officialFn (parser product)
+  │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise)
+  │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
+  │     │     │     ├─ container subtree → subFn recursion (a seen set prevents circular references)
+  │     │     │     │     └─ the sub-skeleton is itself async → kind:"async", the parent position emits await ★v0.5
+  │     │     │     └─ async subtree → makeAsyncIsland + ctx.async (the skeleton becomes an async function) ★v0.5
+  │     │     └─ checks not safe (superRefine/overwrite/custom when) → degrade to officialFn(parser)
+  │     └─ top level not compilable (top-level recursion / schema catchall / __proto__ key)
+  │           └─ stock = true: parse/safeParse/validate all go straight to stock
   │
-  └─ 运行期：任何 INVALID → stock safeParse / safeParseAsync（完整 issues / error map / ZodError）
-        └─ 副作用注意：refine 回调在"骨架跑 1 次 + runtime 重跑 1 次"= 2 次
-           （官方 zod/compile shim 同语义，README 已标注）
+  └─ At runtime: any INVALID → stock safeParse / safeParseAsync (full issues / error map / ZodError)
+        └─ Side-effect note: a refine callback runs "once in the skeleton + once again in the runtime" = 2 times
+           (the official zod/compile shim has the same semantics; already noted in the README)
 
-async 骨架（ctx.async = true）的顶层契约：
-  Compiled.async = true → sync parse/safeParse/validate 抛 $ZodAsyncError；
-  parseAsync/safeParseAsync 可用，失败路径回退 stock safeParseAsync。
+Top-level contract of an async skeleton (ctx.async = true):
+  Compiled.async = true → sync parse/safeParse/validate throw $ZodAsyncError;
+  parseAsync/safeParseAsync are available, and the failure path falls back to stock safeParseAsync.
 ```
 
-递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
-顶层骨架照常编译——lazy 子树在元素位走官方 parser 产物，官方 `generateLazyCheck`
-自带 cache-parser 黑盒，正确处理循环引用（冒烟 #9：`stock: false` 且语义正常）。
-真正整树降级的是顶层递归 schema（def 树循环引用，官方 compileFn 拒绝）。
+Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
+compiles as usual. The lazy subtree goes through the official parser product at the element position, and the official `generateLazyCheck`
+brings its own cache-parser black box that handles circular references correctly (smoke test #9: `stock: false` and the semantics are normal).
+What really degrades the whole tree is a top-level recursive schema (a circular reference in the def tree, which the official compileFn rejects).
 
-## 7. 基准（50 万账户，node v24，--expose-gc，3 轮中位）
+## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, median of 3 runs)
 
-`zc-v1` 列是该前端删除前的最后一次测量，保留为历史对照；今天的 `bench:z4` 不再跑这一列。
+The numbers come from [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`. The earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, is kept in the CHANGELOG under v0.5; today's `bench:z4` no longer runs v1.
 
-| 场景 | stock | 官方 compileFn parser | zc-z4 | zc-v1 | arktype |
-|---|---|---|---|---|---|
-| S1 纯校验 | 654ms | 263ms | **283ms** | 521ms | 144ms |
-| S1 分配压力 | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
-| S1 gc 后驻留 | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
-| S2 脏负载（10% default） | 619ms | 363ms | **247ms** | 504ms | — |
-| S3 扫描 0% / 25% / 50% / 100% 脏 | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
-| S3 zc-z4 驻留 | +123.3MB 恒定 | — | **0 / 20 / 36 / 68.7MB** | — | — |
-| S4 validate | — | 219ms(逐账户) | **50ms** | — | 144ms |
-| S5 record/map/set | 922ms | 681ms | **353ms** | 不支持 | — |
-| S5 分配压力 | +256.1MB | +245.3MB | **+38.1MB** | — | — |
-| S5 gc 后驻留 | +217.4MB | +217.4MB | **0.0MB** | — | — |
-| S6 tuple | 508ms | 340ms | **111ms** | 不支持 | — |
-| S6 分配压力 / 驻留 | +214.0MB / +206MB | +202.2MB / +202MB | **+15.3MB / 0MB** | — | — |
-| S7 async transform（5 万条） | 262ms(safeParseAsync) | 编译拒绝 | **105ms(safeParseAsync)** | 不支持 | — |
-| S7 分配压力 | +95.6MB | — | **+34.9MB** | — | — |
+| Scenario | stock | official compileFn parser | zc-z4 | arktype |
+|---|---|---|---|---|
+| S1 pure validation | 75ms | 22ms | **20ms** | 8ms |
+| S1 allocation pressure | +63.5MB | +11.0MB | **+3.1MB** | +2.7MB |
+| S1 retained after GC | +12.4MB | +10.8MB | **0.0MB** | 0.0MB |
+| S2 dirty load (10% default) | 55ms | 21ms | **22ms** | — |
+| S3 sweep 0% / 25% / 50% / 100% dirty | 45/47/47/48ms | 20/24/27/27ms | **21/24/26/28ms** | — |
+| S3 zc-z4 retained | +12.3MB constant | — | **0.0 / 2.0 / 3.6 / 6.9MB** | — |
+| S4 validate | — | 14ms (official `assertOnly` validator) | **14ms** | 8ms |
+| S5 record/map/set | 69ms | 50ms | **28ms** | — |
+| S5 allocation pressure | +50.8MB | +61.3MB | **+29.4MB** | — |
+| S5 retained after GC | +21.7MB | +21.7MB | **0.0MB** | — |
+| S6 tuple | 18ms | 12ms | **6ms** | — |
+| S6 allocation pressure / retained | +53.4MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | — |
+| S7 async transform (5 000 rows) | 11ms (safeParseAsync) | compile rejected | **4ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.0MB | — | **+9.8MB** | — |
 
-三个层次的解读：
+How to read it:
 
-1. **对 stock**：2.31x（S1）~ 2.50x（S2）~ 2.61x（S5）~ **4.57x（S6 tuple，全场景最高）**，
-   且驻留从 123~217MB 归零；async 场景（S7）2.50x。
-2. **对官方 JIT parser**：干净场景基本持平（S1 0.93~1.00x，批间噪声内——骨架省掉的输出
-   构造恰好抵掉子骨架函数调用开销）；**脏场景反超**（S2 1.47x、S5 1.93x、S6 3.06x）——
-   官方 stock 语义的 default shallowClone 与整树重建是固定成本，CoW 只为真正变脏的路径
-   付费。S6 的 3.06x 说明：tuple 是重建占比最高的容器（每次 parse 都 new Array + 逐槽写，
-   而槽位几乎不变），CoW 修饰收益最大。
-3. **async 通道**（S7）：骨架局部 await——async 子树位付 microtask 成本，其余保持引用
-   比较骨架；async transform 全脏场景仍有 2.50x，分配 -63%（95.6→34.9MB）。
-4. **validate 快路径**：官方 assertOnly 整树单体产物 50ms / 50 万 = 100ns/账户，
-   比官方逐账户调用（219ms，含 payload 包装）快 4.4x，分配 0。
+1. Against stock: 2.43x (S5) ~ 2.47x (S2) ~ 2.99x (S6) ~ 3.67x (S1, the highest of all scenarios),
+   with retained memory going from 12~22MB to zero; the async scenario (S7) is 2.67x.
+2. Against the official JIT parser: level in the object scenarios (S1 1.08x, S2 0.94x, a 1 to 2ms gap at this record count and within runner noise; the output
+   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in the container scenarios (S5 1.76x, S6 1.88x),
+   because the whole-tree rebuild of the official stock semantics is a fixed cost, while CoW only pays for the paths
+   that actually got dirty. The 1.88x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
+   while the slots barely change), so CoW decoration gains the most there.
+3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
+   skeleton; an all-dirty async transform scenario is still 2.67x, with allocation -30% (14.0→9.8MB).
+4. validate fast path: `validate()` is the official assertOnly whole-tree product of the same array schema, so S4 reads level
+   with that baseline by construction (14ms against 14ms, 0.99x). Its value is the validation-only cost: 14ms / 50 000 = 280ns per account,
+   1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the same short-lived leaf allocation as in S1).
+   The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
-S1 的 +30.5MB 短命分配来自官方叶子产物内部（datetime/email 格式校验的临时值），
-gc 后驻留 0——CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍；速度与微量短命
-分配之间的取舍，在生产语境（minor GC 便宜）下选了 zc-z4——这也是 v1 最终被移除的原因之一。
+S1's +3.1MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
+and nothing is retained after GC: CoW itself copies nothing. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and
+a small amount of short-lived allocation was decided in favor of zc-z4 in a production context (where minor GC is cheap), which is also one of the reasons v1 was eventually removed.
 
-## 8. 正确性证据
+## 8. Correctness evidence
 
-- `tests/smoke-z4.test.ts`（11 组行为断言）+ `tests/smoke-z4-containers.test.ts`
-  （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
-  （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
-- `tests/differential-z4.test.ts`：**50000 case**（seeds=500×100，随机嵌套
+- `tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `tests/smoke-z4-containers.test.ts`
+  (the three record paths / map / set / size checks / container combinations) + `tests/smoke-z4-tuple-async.test.ts`
+  (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
+- `tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
-  + **async refine/async transform** 包装），与 stock zod4 全量一致：
-  - 成败奇偶一致（成功 20813 / 失败 29187）
-  - 输出 `deepStrictEqual` 一致（Map/Set 按条目集合比较）
-  - 输入零失真（structuredClone 快照比对）
-  - 顶层引用共享率 **89.1%**（成功 case），stock 降级 0 次
-- 已知不对齐项（刻意保留）：async rest 槽 + nullable null 输入时 stock runtime 产生
-  稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
-  .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）——
-  骨架输出稠密数组（更正确），差分生成器规避该组合；详见 upstream-issue-draft.md §Bonus。
-- 失败诊断钩子：`REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
-  打印 schema desc、input、CoW 骨架源码。
+  + async refine / async transform wrappers), fully consistent with stock zod4:
+  - success/failure parity identical (20813 successes / 29187 failures)
+  - outputs identical under `deepStrictEqual` (Map/Set compared as entry sets)
+  - zero input distortion (compared against a structuredClone snapshot)
+  - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
+- Known misalignment (deliberately kept): with an async rest slot and a nullable null input, the stock runtime produces
+  a sparse array and loses the null (deterministic repro: `z.tuple([z.string()], z.boolean().nullable().refine(async …))
+  .safeParseAsync(["a", null, null])` → ownKeys "0,2,length", slot 1 becomes a hole).
+  The skeleton outputs a dense array (which is more correct), and the differential generator avoids that combination; see upstream-issue-draft.md §Bonus.
+- Failure diagnostic hook: `REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
+  prints the schema description, the input, and the CoW skeleton source.
 
-## 9. 版本锚点与风险
+## 9. Version anchor and risks
 
-**依赖的官方内部面**（均经 `zod4/v4/core` 公开 exports，但官方注释定位为 internal）：
+The official internal surface we depend on (all publicly exported through `zod4/v4/core`, but positioned as internal by the official comments):
 
-| API | 用途 | 漂移风险 |
+| API | Purpose | Drift risk |
 |---|---|---|
-| `compileFn(schema, {assertOnly, debug})` | 叶子/子树产物 | 签名变化（低）；行为变化由差分兜底 |
-| `INVALID` | 失败哨兵 | 极低（Symbol.for 稳定） |
-| `ZodCompileUnsupportedError/AsyncError` | 降级判定 + **async 探测器**（v0.5） | 低 |
-| `$ZodAsyncError` | 同步 island 遇 Promise 的官方语义抛错；sync API 对 async 骨架 | 低 |
-| `regexes.number` / `util.isPlainObject` | record 骨架 | 低（官方内部一致性依赖同款） |
-| `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` 等语义谓词（照抄实现，非 import） | 纯度分析 | **中**——zod 改 when 语义时需同步 |
-| `getTupleOptStart` / `dropsWhenAbsent`（照抄实现，非 import） | tuple 尾槽截断语义（v0.5） | **中**——zod 改 optin/optout 梯子时需同步 |
+| `compileFn(schema, {assertOnly, debug})` | leaf/subtree products | signature change (low); behavior changes are backstopped by the differential tests |
+| `INVALID` | failure sentinel | extremely low (Symbol.for is stable) |
+| `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the **async detector** (v0.5) | low |
+| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton | low |
+| `regexes.number` / `util.isPlainObject` | record skeleton | low (the official internals depend on the same ones for consistency) |
+| `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | **medium**: must be synced when zod changes the `when` semantics |
+| `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | **medium**: must be synced when zod changes the optin/optout ladder |
 
-**缓解措施**：降级链保证任何漂移最多表现为"退化到 stock"（正确性无损）；
-async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器（官方扩展 async 检测点
-时本层自动跟随）；差分测试 5 万 case（含 tuple/async 生成器）是升级 zod 时的强制回归门槛；
-已起草上游 issue 推动 `compileFn`/assertOnly 转正（docs/upstream-issue-draft.md），
-消除最大的一块内部依赖。
+Mitigations: the degradation chain guarantees that any drift shows up at worst as "degrading to stock" (correctness is never lost);
+the async channel uses `ZodCompileAsyncError` as an async detector maintained by the official project (when the official code adds async detection points,
+this layer follows automatically); the 50 000-case differential test (including the tuple/async generators) is a mandatory regression gate when upgrading zod;
+an upstream issue has been drafted to push `compileFn`/assertOnly toward becoming public (docs/upstream-issue-draft.md),
+which would remove the largest single internal dependency.
 
-## 10. 结论：两条路线的适用域
+## 10. Conclusion: where each of the two routes applies
 
-- **v1（自研 codegen）** 的适用域是强受控环境 / 长支持窗口：零内部 API 依赖
-  （只读 `_zod.def`）、分配更低、可以锁定旧版 zod。本仓库不再需要这个域——
-  它只维护一条 zod4 线，v1 已随 issue #4 移除；下面的对比因此是决策记录，
-  而不是仍在维护的两个选项。
-- **zc-z4（官方 codegen + CoW 修饰）** 是 zod4 时代的正解：语义正确性外包给官方
-  编译器与 runtime，自研面缩到"纯度分析 + 6 个容器骨架 + async 通道"，跟随上游
-  优化自动受益；速度与官方 JIT 持平，脏场景反超 1.5~1.9x、tuple 3.1x、async 2.5x
-  （对 stock 2.3~4.6x），GC 驻留归零。
-- 两条路线共享同一个 CoW 心智模型：**引用比较即脏信号，path-copying 即拷贝策略**。
-  差别只在"校验与变换这一层由谁实现"。
+- v1 (self-written codegen) applies to strongly controlled environments and long support windows: zero dependence on internal APIs
+  (it only reads `_zod.def`), lower allocation, and the ability to pin an old zod version. This repository no longer needs that domain:
+  it maintains a single zod4 line, and v1 was removed with issue #4; the comparison below is therefore a decision record,
+  not two options still being maintained.
+- zc-z4 (official codegen + CoW decoration) is the right answer for the zod4 era: semantic correctness is outsourced to the official
+  compiler and runtime, the self-written surface shrinks to "purity analysis + 6 container skeletons + async channel", and upstream
+  optimizations benefit it automatically; speed is level with the official JIT on objects and ahead on containers (record/map/set 1.76x, tuple 1.88x), async 2.67x vs stock
+  (2.4~3.7x against stock overall; run 33837195401, see §7), with GC-retained memory down to zero.
+- Both routes share the same CoW mental model: reference comparison is the dirty signal, path-copying is the copy strategy.
+  The only difference is who implements the validation and transformation layer.
 
 ## 11. Source layout (issue #5)
 
@@ -552,3 +562,23 @@ The engine lives in `src/cow4/` as a set of modules cut along the seams describe
 | `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
 
 `emit.ts` and the six `emit-*.ts` modules import each other: `emitBoxedContainer` dispatches to the skeletons, and the skeletons recurse into child containers through `containerChildFn` / `childProduct`. The cycle is safe because every binding involved is a hoisted function declaration and none of these modules executes anything at load time. Do not add top-level code that calls across the cycle.
+
+## Appendix A. Structural differences between zod3 and zod4 (probed)
+
+This table was written for the removed self-written zod4 front-end (v0.2) and moved here from the README in issue #7. It describes stock zod3 vs zod4, so it still constrains the current line; every row was anchored by `src/probe-z4.ts`.
+
+| Dimension | zod3 | zod4 |
+|---|---|---|
+| checks location | the wrapper type (the checks array on `ZodString`) | a flat `def.checks`, and `z.email()/z.iso.*()/z.int()` attach the format check **directly on the def itself** (`def.check`) |
+| check instance | `c.kind` + `c.value` | `check` kinds are named differently (`min_length/max_length/greater_than/string_format/number_format/overwrite/custom`…), and may be an instance or a bare def, so they need normalizing |
+| `.int()` | `ZodNumber` check kind `"int"` | `number_format "safeint"` (isInteger + the 2^53 range, out of range reports too_big) |
+| object mode | the `def.unknownKeys` flag | strict = `catchall: never`, loose = `catchall: unknown` |
+| object output rebuild | the `alwaysSet` rule | **driven by `optin`/`optout`**: an absent optional key is not materialized, a present undefined is kept, an absent required key reports `nonoptional` |
+| `.default()` | the default value **must pass** the inner validation | **short-circuits** (the default value is not validated); and `handleDefaultResult` fills in the default when the inner produces undefined |
+| `.optional()` | passes undefined straight through | when the inner has `optin === "defaulted"` it **hands undefined to the inner** (so the default fires) |
+| `.catch()` | **swallows exceptions** | **does not swallow exceptions** (only a validation failure falls back to the catch value) |
+| `.transform()` | `ZodEffects` | `pipe(in, transform)`; `fn(value, payload{issues, addIssue})` |
+| refine | `ZodEffects.refinement` | a `custom` check inside `def.checks`; every check instance has a lazily compiled `_zod.check(payload)`, which serves as the generic channel for kinds we did not hand-write |
+| string format | regexes copied verbatim into `regexes.ts` | a `string_format` check **carries its own pattern regex** (email/uuid/datetime/ipv4… inlined directly) |
+| record keys | string only | number keys are supported (retried by falling back to the numeric string); **enum/literal keys are declaration-driven** (all declared keys required + extra keys report unrecognized_keys) |
+| NaN | `invalid_type received nan` | same as zod3 (z.number() rejects NaN) |

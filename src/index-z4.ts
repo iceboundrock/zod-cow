@@ -40,7 +40,7 @@ export interface Compiled<T extends z.ZodType> {
   safeParseAsync(
     data: unknown,
   ): Promise<{ success: true; data: z.output<T> } | { success: false; error: z.ZodError }>;
-  /** Pure validation: on success returns the original input reference (DeepReadonly hints at the sharing), null on failure */
+  /** Pure validation: on success returns the original input reference (typed `unknown`; unlike the zod3 line there is no DeepReadonly view), null on failure */
   validate(data: unknown): unknown;
 }
 

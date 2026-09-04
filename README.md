@@ -213,6 +213,7 @@ bench/bench.ts              zod3 benchmark (500 000 accounts)
 examples/demo.ts            60-second demo
 docs/ARCHITECTURE-z4.md     architecture deep dive on the zod4 engine (English source; docs/ARCHITECTURE-z4.zh-CN.md is a frozen Chinese snapshot)
 docs/upstream-issue-draft.md   draft issue for zod upstream: make compileFn / assertOnly / INVALID public
+docs/adr/0001-package-layout.md   ADR: one package per zod major in a pnpm workspace, `zod-cow-v4` published name, benchmarks split per line, peer-dependency policy, zod3 line unpublished
 CHANGELOG.md                v0.1 to v0.5 history with the historical benchmark tables
 ```
 

@@ -463,7 +463,7 @@ The numbers come from [Benchmarks workflow run 33831110881](https://github.com/i
 | S2 dirty load (10% default) | 51ms | 23ms | **25ms** | — |
 | S3 sweep 0% / 25% / 50% / 100% dirty | 45/49/49/45ms | 22/28/23/29ms | **24/29/27/29ms** | — |
 | S3 zc-z4 retained | +12.3MB constant | — | **0.0 / 2.0 / 3.6 / 6.9MB** | — |
-| S4 validate | — | 13ms (per account) | **3ms** | 9ms |
+| S4 validate | — | 13ms (official `assertOnly` validator, per account) | **3ms** | 9ms |
 | S5 record/map/set | 68ms | 46ms | **31ms** | — |
 | S5 allocation pressure | +50.9MB | +60.7MB | **+29.4MB** | — |
 | S5 retained after GC | +21.7MB | +21.7MB | **0.0MB** | — |
@@ -484,7 +484,8 @@ How to read it:
 3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
    skeleton; an all-dirty async transform scenario is still 3.23x, with allocation -32% (14.5→9.9MB).
 4. validate fast path: the official assertOnly whole-tree product, 3ms / 50 000 = 60ns per account,
-   4.3x faster than the official per-account call (13ms, including payload wrapping), with zero allocation.
+   4.3x faster than the official `assertOnly` validator called once per account (13ms, including payload wrapping), with zero allocation.
+   The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
 S1's +3.1MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
 and nothing is retained after GC: CoW itself copies nothing. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and

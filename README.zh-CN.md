@@ -139,7 +139,7 @@ zod3 线则靠探针对齐（`src/probe.ts` 在运行时实测 stock zod3 的边
 
 ## 基准
 
-zod4 线，[Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，3 轮取中位（`pnpm run bench:z4`，`BENCH_N=50000`）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物。
+zod4 线，[Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，3 轮取中位（`pnpm run bench:z4`，`BENCH_N=50000`）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物；S4 的基线是例外，它是官方 `assertOnly` validator 逐账户调用，因为 parser 没有纯校验模式。
 
 | 场景 | stock zod4 | 官方 parser | **zc-z4（CoW）** | arktype |
 |---|---|---|---|---|
@@ -149,7 +149,7 @@ zod4 线，[Benchmarks workflow run 33831110881](https://github.com/iceboundrock
 | S2 脏负载（10% default 注入） | 51 ms | 23 ms | **25 ms** | — |
 | S3 扫描 0% / 25% / 50% / 100% 脏 | 45 / 49 / 49 / 45 ms | 22 / 28 / 23 / 29 ms | **24 / 29 / 27 / 29 ms** | — |
 | S3 gc 后驻留 | +12.3 MB 恒定 | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
-| S4 validate | — | 13 ms（逐账户） | **3 ms** | 9 ms |
+| S4 validate | — | 13 ms（官方 `assertOnly` validator，逐账户） | **3 ms** | 9 ms |
 | S5 record / map / set | 68 ms | 46 ms | **31 ms** | — |
 | S5 分配压力 / 驻留 | +50.9 MB / +21.7 MB | +60.7 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
 | S6 tuple | 29 ms | 16 ms | **7 ms** | — |

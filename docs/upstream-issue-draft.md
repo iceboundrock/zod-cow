@@ -65,9 +65,9 @@ GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 passe
 | S5 record+map+set | 68ms | 46ms | **31ms** | 2.23x | 1.50x | 50.9MB → 29.4MB | 21.7MB → **0** |
 | S6 tuple | 29ms | 16ms | **7ms** | 4.39x | 2.47x | 53.4MB → 1.5MB | 20.6MB → **0** |
 | S7 async transform (5k rows) | 16ms | (unsupported) | **5ms** | 3.23x | — | 14.5MB → 9.9MB | — |
-| validate fast path (per-account) | 13ms | — | **3ms** | 4.3x | — | — | — |
+| validate fast path (per-account) | — | 13ms (`assertOnly` validator, per account) | **3ms** | — | 4.3x | — | — |
 
-\* S2 retains 1.0MB because the injected `default("viewer")` values are genuinely new strings the caller didn't have.
+\* S2 retains 1.0MB because the output cannot alias the input everywhere: the top-level array is copied once (one changed element is enough) and the 10% of records that received the default are shallow-copied. The other 90% of records are the input's own objects, and the default value itself is the schema's literal `"viewer"`, so no per-record string is allocated.
 
 The deeper and heavier the containers, the more of stock's time goes into output construction, and the more CoW saves. Tuple was the biggest surprise (2.47x over the official parser): numeric tuples get a `new Array` on every parse yet almost never change.
 

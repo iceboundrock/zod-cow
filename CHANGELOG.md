@@ -60,7 +60,7 @@ The full v0.5 table (S1 to S7), superseded by the CI-run table in the [README](R
 | S2 dirty load (10% default) | 619ms | 363ms | **247ms** | 504ms | — |
 | S3 sweep 0% / 25% / 50% / 100% dirty | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
 | S3 zc-z4 retained | +123.3MB constant | — | **0 / 20 / 36 / 68.7MB** | — | — |
-| S4 validate | — | 219ms (per account) | **50ms** | — | 144ms |
+| S4 validate | — | 219ms (official `assertOnly` validator, per account) | **50ms** | — | 144ms |
 | S5 record/map/set | 922ms | 681ms | **353ms** | not supported | — |
 | S5 allocation pressure | +256.1MB | +245.3MB | **+38.1MB** | — | — |
 | S5 retained after GC | +217.4MB | +217.4MB | **0.0MB** | — | — |
@@ -131,7 +131,7 @@ Coexists with the global "zod/compile" shim: the fallback path gets the official
 | S1 retained after GC | +123.4 MB | +108.1 MB | **0.0 MB** | 0.0 MB | 0.0 MB |
 | S2 dirty load (10% default injection) | 641 ms | 383 ms | **238 ms** | 537 ms | — |
 | S3 100% dirty | 662 ms | 439 ms | **420 ms** | 668 ms | — |
-| S4 validate (whole-tree product) | — | 174 ms (per account) | **27 ms** | — | 120 ms |
+| S4 validate (whole-tree product) | — | 174 ms (official `assertOnly` validator, per account) | **27 ms** | — | 120 ms |
 
 The `zc-v1` column is the v0.3 measurement of the self-written zod4 front-end, which was removed in #4.
 

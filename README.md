@@ -140,7 +140,7 @@ The full design, with generated code dumped side by side against the official pr
 
 ## Benchmarks
 
-zod4 line, [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs (`pnpm run bench:z4` with `BENCH_N=50000`). "official parser" is zod4's own `compileFn` parser product.
+zod4 line, [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs (`pnpm run bench:z4` with `BENCH_N=50000`). "official parser" is zod4's own `compileFn` parser product; the S4 baseline is the exception, it is the official `assertOnly` validator called once per account, since the parser has no validation-only mode.
 
 | Scenario | stock zod4 | official parser | **zc-z4 (CoW)** | arktype |
 |---|---|---|---|---|
@@ -150,7 +150,7 @@ zod4 line, [Benchmarks workflow run 33831110881](https://github.com/iceboundrock
 | S2 dirty load (10% default injection) | 51 ms | 23 ms | **25 ms** | — |
 | S3 sweep, 0% / 25% / 50% / 100% dirty | 45 / 49 / 49 / 45 ms | 22 / 28 / 23 / 29 ms | **24 / 29 / 27 / 29 ms** | — |
 | S3 retained after GC | +12.3 MB constant | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
-| S4 validate | — | 13 ms (per account) | **3 ms** | 9 ms |
+| S4 validate | — | 13 ms (official `assertOnly` validator, per account) | **3 ms** | 9 ms |
 | S5 record / map / set | 68 ms | 46 ms | **31 ms** | — |
 | S5 allocation pressure / retained | +50.9 MB / +21.7 MB | +60.7 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
 | S6 tuple | 29 ms | 16 ms | **7 ms** | — |

@@ -275,7 +275,7 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const rv =
     measure(() => V2Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   console.log(
-    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(7)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
+    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(8)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
   );
 }
 

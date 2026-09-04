@@ -2,32 +2,43 @@
 
 [![CI](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/iceboundrock/zod-cow/actions/workflows/ci.yml)
 
-Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) 思路的延伸。
+English | [简体中文](README.zh-CN.md)
 
-> **当前在仓库里的两条编译线**：zod3 前端（`src/compile.ts` + `src/index.ts`，自研闭包树，冻结参考实现）
-> 与 zod4 前端（`src/cow4/` + `src/index-z4.ts`，复用官方 codegen，活跃开发线）。
-> 早期的 zod4 自研前端（当时的 `compile-z4.ts` + `index-z4.ts`）已被当前这条线完全取代并移除
-> —— `src/index-z4.ts` 这个路径现在指的是当前前端的入口。其适配结论与实测数字作为历史记录
-> 保留在 [zod4 适配（v0.2）](#zod4-适配v02历史) 一节。
+A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**, grown out of the [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) idea.
 
-**核心差异**：Numeric 为了让 `parse` 返回原始对象，直接删除了 `default / transform / coerce / catch / pipe / preprocess / intersection` 七个特性；本原型用 **引用比较作为脏信号 + 按需路径拷贝**，让这些特性全部保留，且只在"运行时真的产生了新值"的那一点才拷贝。
+`compile(schema)` returns a fast parser whose output is `===` the input reference whenever nothing was forced to change (no default, transform, strip, coerce, catch, preprocess or pipe fired). When something did change, only the path from that leaf to the root is copied; every sibling subtree keeps sharing the input.
 
-- 不 fork zod、不改 Zod API：zod schema 原样消费（读取 `.def` 树），类型推断继续用 `z.infer`
-- 编译期一次性解析 shape / keys / checks，生成特化校验闭包
-- 单一可变 ctx + 惰性 path（只在产生 issue 时物化 path 快照）
-- **输入永不失真**：绝不原地修改（Numeric fork 的 strip 会原地 delete 多余键，这里修复了该 footgun）
+**The difference from the Numeric fork**: Numeric made `parse` return the original object by deleting seven features (`default / transform / coerce / catch / pipe / preprocess / intersection`). This prototype keeps all of them. It uses **reference comparison as the dirty signal and copies on demand**, so the copy happens only at the point where a new value was actually produced at runtime.
 
-## 快速开始
+- No fork of zod and no change to the Zod API: schemas are consumed as they are (the `.def` tree is read), type inference stays `z.infer`.
+- Shape, keys and checks are resolved once at compile time into specialized validation code.
+- **The input is never altered**: nothing is mutated in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here.
+- Failure paths carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
+
+## Two compiler lines
+
+| Line | Entry | Engine | Status |
+|---|---|---|---|
+| **zod4** | `src/index-z4.ts` → `src/cow4/` | Reuses zod4's **official JIT codegen** (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Active line**, all new work goes here |
+| zod3 | `src/index.ts` → `src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Frozen reference implementation**: the origin of the CoW idea and a comparison baseline, kept passing but not extended |
+
+zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1, `import { z } from "zod4"` is the npm alias for zod@4.5.4. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
+
+## Quick start
 
 Requires Node.js >= 22.13.0 and pnpm 11.24.0.
 
 ```bash
 pnpm install
-pnpm run probe       # 实测 stock zod 边界语义（探针驱动版本兼容）
-pnpm test            # 27 个单元测试 + 20000 case 差分模糊测试（对比 stock zod）
-pnpm run bench       # 50 万账户基准（需 node --expose-gc，脚本已配置）
-pnpm exec tsx examples/demo.ts   # 60 秒上手 demo
+pnpm run test:z4     # zod4 line: version canary + smoke tests + 20 000-case differential fuzz against stock zod4
+pnpm test            # zod3 line: 27 unit tests + 20 000-case differential fuzz against stock zod3
+pnpm run bench:z4    # zod4 benchmark, 500 000 records (needs node --expose-gc, already in the script)
+pnpm run bench       # zod3 benchmark
+pnpm run probe:z4    # survey stock zod4 def structure and behavior
+pnpm exec tsx examples/demo.ts   # 60-second demo of the three CoW promises (zod3 line)
 ```
+
+Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200 × 100), `REPRO=seed:case` re-runs one failing zod4 differential case and dumps the schema, input and generated code, `BENCH_N` sets the benchmark record count.
 
 > **CI benchmark runs are smoke results, not reference numbers.** The
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
@@ -37,11 +48,13 @@ pnpm exec tsx examples/demo.ts   # 60 秒上手 demo
 > runners are too noisy for the numbers to be compared across runs. All numbers
 > in this README and in `docs/` come from local runs (node v24, 500 000 records).
 
-## 使用
+## Usage
+
+### zod4 line
 
 ```ts
-import { z } from "zod";
-import { compile } from "./src/index.js";
+import { z } from "zod4";                       // zod@4.5.4 through the npm alias
+import { compile } from "./src/index-z4.js";
 
 const User = z.object({
   id: z.number().int(),
@@ -51,275 +64,157 @@ const User = z.object({
 
 const fast = compile(User);
 
-fast.parse(data);     // CoW：未被迫修改时 === 输入原引用；被迫时只拷贝脏路径
-fast.validate(data);  // 同 parse 的运行时，返回 DeepReadonly<User> 类型视图
-fast.safeParse(data); // 不抛错版本
-fast.pure;            // 静态纯度：true 表示成功时恒等返回输入引用
+fast.parse(data);           // CoW: === the input reference when clean, otherwise only the dirty path is copied
+fast.safeParse(data);       // non-throwing; the failure path is stock safeParse, so issues/ZodError are official
+fast.validate(data);        // validation only (official whole-tree assertOnly product): the input reference on success, null on failure
+await fast.parseAsync(data);     // async variants; the only usable entry when the schema holds an async refine/transform
+await fast.safeParseAsync(data);
+fast.async;                 // true = the skeleton holds an async subtree; the sync API then throws $ZodAsyncError, as stock does
+fast.stock;                 // true = this layer gave up on the whole tree and everything goes through stock (never a semantic loss)
+fast.code;                  // generated CoW skeleton source, for debugging (null when degraded to stock)
 ```
 
-## CoW 机制（为什么不需要任何"修改通知"协议）
-
-每个编译后的节点是 `(data, ctx) => value | FAILED`：
-
-| 输入类型 | 脏信号判定 |
-|---|---|
-| 原始类型（string/number/bigint…） | 值比较：`'  x '.trim() !== '  x'` → 脏；`'x'.trim() === 'x'` → 不脏，零拷贝 |
-| 对象 / 数组 / Map / Set | 引用比较：子节点透传原引用 → 父层不拷贝 |
-| default / transform / coerce / catch / preprocess / pipe | 返回新值 → 父层通过 `outVal !== inVal` 自动感知 |
-
-父层在**第一个**变化点做一次浅拷贝（`{...data}` / `slice()`），后续脏字段直接写入该副本；
-兄弟子树继续共享 —— 即持久化数据结构的 path-copying：改一个叶子只拷贝它到根的一条路径。
-成本模型：期望分配次数 ≈ Σ P(节点变脏) × 深度；最坏退化为全量重建（= stock 行为），典型 ≈ 0。
-
-## "被迫复制"的完整清单
-
-| 特性 | 何时拷贝 |
-|---|---|
-| string/number/boolean/bigint/date/literal/enum/instanceof 类、refine（纯谓词）、optional/nullable/readonly/any/unknown | **永不** |
-| object/array/record/tuple/map/set | 所有子值未变 → **原引用** |
-| union / discriminatedUnion（判别值快速分派） | 命中分支的产出未变 → 原引用 |
-| default | 仅当 undefined 实际注入（且默认值同样过内层校验，与 stock 一致） |
-| transform / preprocess / pipe / catch | 仅当运行时实际产生新值 |
-| strip（默认模式） | 仅当输入**确实存在**多余键（零分配 for-in + Set 探测） |
-| strict / passthrough | 永不（strict 有多余键直接失败） |
-| `.trim() / .toLowerCase() / .toUpperCase()` | 仅当值实际变化（值比较） |
-
-## 与 stock zod 的语义对齐
-
-探针（`src/probe.ts`）在运行时实测 stock 行为，编译器据此自适应：
-
-- **缺席 optional 键**：不物化（输出 `{}`，与 stock 3.24.1 一致 —— 透传天然正确）
-- **present-undefined 键**：保留显式 `undefined`（`alwaysSet` 语义，strip 重建分支有对应守卫）
-- **default 值**：同样通过内层 schema 校验（非法默认值 → 失败，与 stock 一致）
-- **issue 收集**：失败后继续遍历兄弟字段/元素，一次 parse 收集全部 issue（表单校验友好）
-- **readonly**：浅冻结输出（stock 行为）；CoW 下冻结的共享结构天然防篡改
-- **string 格式校验**（email/uuid/datetime/…）：正则逐字拷贝自 zod 3.24.1 内部实现
-
-**验证**：单元测试 27 项 + 差分模糊测试 20000 case（随机 schema + 随机数据，断言
-成败奇偶 / 输出 deepStrictEqual / 输入零失真）。当前全部通过，成功 case 的顶层引用共享率 ≈ 92%。
-
-## 基准（50 万账户，node v24，--expose-gc，3 轮取中位）
-
-| 变体 | 耗时（中位） | 分配压力（gc 前） | gc 后驻留 |
-|---|---|---|---|
-| S1 纯校验 · stock zod 3.24.1 | 2092 ms | +266.7 MB | +183.8 MB |
-| S1 纯校验 · **zc compiled（CoW）** | **487 ms（4.29x）** | **+10.1 MB** | **+0.0 MB** |
-| S1 参照线 · arktype 2.2 | 182 ms | +10.7 MB | +0.0 MB |
-| S2 脏负载（role 带 default，10% 缺失）· stock | 2185 ms | +246.8 MB | +183.8 MB |
-| S2 脏负载 · **zc compiled（CoW）** | **434 ms（5.03x）** | **+20.2 MB** | +10.3 MB |
-
-对比 Numeric 报告的 ~2x：本原型 4.3-5.0x，因为除零拷贝外还叠加了
-无包装对象 / 惰性 path / 编译期 shape 解析。与 arktype 剩余 ~2.7x 差距 =
-逐节点函数分发（解释器残差），下一步可用 `new Function` 单体 codegen 消除（ArkType 路线）。
-
-## zod4 适配（v0.2，历史）
-
-> **该编译线已移除**。本节记录的是自研 zod4 前端（当时的 `src/compile-z4.ts` + `src/index-z4.ts`）
-> 的适配结论与当时实测的基准数字；代码本身已在当前 zod4 线落地后删除（issue #4）。
-> 下面的命令与文件路径说的都是当时那份实现 —— `src/index-z4.ts`、`test:z4`、`bench:z4`
-> 这几个名字此后已被当前 zod4 线复用，含义不同。**结构差异表仍然有效**——那是 stock zod3/zod4
-> 的差异，当前这条线同样受其约束；基准表则是一次带日期的历史测量，不是当前性能。
-
-### 使用（历史）
+### zod3 line
 
 ```ts
-import { z } from "zod4";                          // zod@4.5.4（npm 别名，与 zod3 共存）
-import { compile } from "./src/index-z4.js";       // 当时的自研前端入口（该路径现由当前 zod4 线复用）
+import { z } from "zod";                        // zod@3.24.1
+import { compile } from "./src/index.js";
 
 const fast = compile(User);
-fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
+
+fast.parse(data);     // CoW semantics as above; throws ZcError with issues on failure
+fast.validate(data);  // same runtime as parse, typed as DeepReadonly<User>
+fast.safeParse(data); // non-throwing
+fast.pure;            // static purity: true means success always returns the input reference
 ```
 
-### zod4 与 zod3 的结构差异（全部经 `src/probe-z4.ts` 实测锚定）
+## The CoW invariant
 
-| 维度 | zod3 | zod4 |
-|---|---|---|
-| checks 位置 | 包装类型（`ZodString` 的 checks 数组） | 扁平 `def.checks`，且 `z.email()/z.iso.*()/z.int()` 把 format check **直接挂在 def 本身**（`def.check`） |
-| check 实例 | `c.kind` + `c.value` | `check` kind 命名不同（`min_length/max_length/greater_than/string_format/number_format/overwrite/custom`…），可能是实例或裸 def，需归一化 |
-| `.int()` | `ZodNumber` check kind `"int"` | `number_format "safeint"`（isInteger + 2^53 范围，越界报 too_big） |
-| 对象模式 | `def.unknownKeys` 标志 | strict = `catchall: never`，loose = `catchall: unknown` |
-| 对象输出重建 | `alwaysSet` 规则 | **`optin`/`optout` 驱动**：缺席 optional 键不物化、present-undefined 保留、缺席必填键报 `nonoptional` |
-| `.default()` | 默认值**要过**内层校验 | **短路**（默认值不校验）；且 `handleDefaultResult` 会在内层产出 undefined 时补默认值 |
-| `.optional()` | 纯透传 undefined | 内层 `optin === "defaulted"` 时把 undefined **交给内层**（让 default 点火） |
-| `.catch()` | **吞异常** | **不吞异常**（只有校验失败才落 catch 值） |
-| `.transform()` | `ZodEffects` | `pipe(in, transform)`；`fn(value, payload{issues, addIssue})` |
-| refine | `ZodEffects.refinement` | `def.checks` 里的 `custom` check；所有 check 实例都有惰性编译的 `_zod.check(payload)` —— 作为未手写 kind 的通用通道 |
-| string format | 正则逐字拷贝进 `regexes.ts` | `string_format` 检查**自带 pattern 正则**（email/uuid/datetime/ipv4…直接内联） |
-| record 键 | 仅 string | 支持 number 键（数值字符串回退重试）；**enum/literal 键是声明键驱动**（声明键全部必填 + 多余键报 unrecognized_keys） |
-| NaN | `invalid_type received nan` | 同左（z.number() 拒绝 NaN） |
+Every compiled node is `(input) => output | FAILED-sentinel`. No "change notification" protocol is needed:
 
-### zod4 基准（历史；50 万账户，node v24.19，--expose-gc，3 轮取中位）
+| Input type | Dirty signal |
+|---|---|
+| Primitives (string, number, bigint, …) | Value comparison: `'  x '.trim() !== '  x'` is dirty; `'x'.trim() === 'x'` is clean, zero copy |
+| object / array / tuple / record / Map / Set | Reference comparison: a child returning the input reference means "unchanged", so the parent does not copy |
+| default / transform / coerce / catch / preprocess / pipe | Return a new value, which the parent notices through `outVal !== inVal` |
 
-| 变体 | 耗时（中位） | 分配压力（gc 前） | gc 后驻留 |
-|---|---|---|---|
-| S1 纯校验 · stock zod4 parse | **223 ms** | +110 MB | +108 MB |
-| S1 纯校验 · stock zod4 + JIT（`zod4/compile`） | 235 ms | +110 MB | +108 MB |
-| S1 纯校验 · **zc CoW parse** | 510 ms（0.51x） | **+0.3 MB** | **+0.0 MB** |
-| S1 参照线 · arktype 2.2 | 158 ms | +27 MB | +0.0 MB |
-| S2 脏负载（default，10% 缺失）· stock | 381 ms | +134 MB | +123 MB |
-| S2 脏负载 · **zc CoW** | 500 ms（0.76x） | **+18 MB** | +10 MB |
-| S3 脏比例扫描 zc 驻留 | 0%→0 MB / 25%→20 MB / 50%→36 MB / 100%→69 MB | — | （stock 恒 +123 MB） |
+A parent does its **first** shallow copy (`{...input}` / `slice()` / `new Map(input)`) at the first changed child and writes further dirty children into that copy. Siblings keep sharing. This is the path copying of persistent data structures: changing one leaf copies exactly the path from that leaf to the root. Cost model: expected allocations ≈ Σ P(node is dirty) × depth; the worst case is a full rebuild (stock behavior), the typical case is about zero.
 
-**结论（z4 上价值主张的变化）**：
+### When a copy is forced
 
-1. **zod4 已把"解释器税"基本消掉**：同一场景 z3 stock 2092ms → z4 stock 223ms（9.4x）。z4 的 parse 已是每类型特化函数 + 惰性 path，无每节点上下文分配。
-2. **zc CoW 在 z4 上不再是速度冠军**（z3 时代 4.3-5.0x → z4 上 0.5-0.8x）：免重建输出树省下的分配成本（V8 bump-allocator 很便宜）不足以抵消通用闭包树相对 z4 特化函数的调用开销。微探针显示 zc 的**叶子校验更快**（string 1.6x / number 2.4x），差距集中在 object 组装层 —— z4 classic 的 object 走 `$ZodObjectJIT` 代码生成。
-3. **zc 的结构性收益不变且更纯粹**：分配压力 -99.7%、gc 后驻留 0 MB（stock 恒 +108 MB）、输出 === 输入原引用（结构共享、可安全 alias、支持增量更新语义）。
-4. `zod4/compile` JIT 在本场景与 stock 持平（其收益场景不同）；arktype 仍最快（158ms）。
-5. 若要追平速度，路线仍是 worklog v0.1 提出的 `new Function` 单体 codegen（把 CoW 语义编译进单个函数体），消除逐闭包分发 —— zc 的语义层已经就绪，缺的只是代码生成层。
+| Feature | Copies when |
+|---|---|
+| string / number / boolean / bigint / date / literal / enum / instanceof, refine (pure predicate), optional / nullable / readonly / any / unknown | **Never** |
+| object / array / tuple / record / map / set | Never while every child is unchanged: the **input reference** is returned |
+| union / discriminatedUnion | Never while the matching branch returns its input |
+| default | Only when `undefined` is actually replaced |
+| transform / preprocess / pipe / catch | Only when a new value is actually produced at runtime |
+| strip (default object mode) | Only when the input **really has** extra keys (zero-allocation `for...in` plus `Set` probe) |
+| strict / passthrough | Never (strict fails on extra keys) |
+| `.trim()` / `.toLowerCase()` / `.toUpperCase()` | Only when the value actually changes (value comparison) |
 
-### zod4 验证（历史）
+Consequences that constrain every change:
 
-- `pnpm run test:z4`（**当时那份实现已移除；同名脚本现在跑的是当前 zod4 线**）：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
-- `pnpm run bench:z4`（**同上，名字已被当前 zod4 线复用**）：本基准
-- `pnpm run probe:z4`（仍在）：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
+- Never mutate the input. Strip must never `delete` on the input object.
+- Output may alias input, so refines must not mutate, and `readonly` freezing is applied to shared structure.
+- Failure paths return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`.
 
-其中的**探针金丝断言**（stock zod4 行为 ↔ 编译器假设）已迁到 `tests/canary-z4.test.ts`，
-作为 `pnpm run test:z4` 的第一步运行——zod 升级改变隐式契约时，测试仍会先红。
+## How the zod4 line stays aligned with stock
 
-## 已知限制（原型范围）
+The zod4 line does not re-implement zod's semantics. zod4 (>= 4.1) ships a JIT compiler (`src/v4/core/compile.ts`) whose products are reused per subtree:
 
+1. **Official products as leaves and subtrees.** `compileFn(schema)` gives a stock-semantics parser; `compileFn(schema, {assertOnly: true})` gives a validator that skips output construction.
+2. **Purity analysis** is a conservative whitelist deciding "validation passes ⇒ output === input". Pure subtrees get the official validator, impure subtrees get the official parser plus a reference comparison.
+3. **Container skeletons** are string-templated codegen that mirrors zod's own `generate*` functions line by line, then rewrites the unconditional `const out = {...}` into "compare references, copy on first dirt, `return input` when clean". Container-level checks (`min` / `max` / `refine`) run on the final output on both paths.
+4. **Async**: async subtrees become async islands, every product call site emits `await`, and the skeleton becomes an async function. The sync API on an async product throws `$ZodAsyncError`, same as stock.
+5. **Degradation chain**, per subtree, never trading correctness: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`).
 
-- **结构共享可观察**：两次 parse 同一输入返回同一引用；修改输出会影响输入。
-  → 类型层用 `DeepReadonly` 提示；需要独立副本时用 stock `schema.parse`。
-- **refine 不得修改输入**（CoW 前提）；开发期可用 deep-freeze 输入抓违规。
-- **键序**：纯透传保留输入键序；stock 按 shape 序重排（deepStrictEqual 不感知，快照工具可能感知）。
-- **不支持**（编译期抛 `ZcNotSupportedError`，明确而非静默漂移）：
-  z3：`intersection`、`catchall`、tuple rest、`ZodPromise`、异步 refine（运行时检测）；
-  z4：`intersection`、`file/templateLiteral/promise` 等未覆盖 def.type、无 pattern 的 string_format（如 url）、异步 refine/transform（运行时检测）。
-- **NaN 细节**：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
-- **symbol 键 / getter**：透传会保留 spread 可见的自有可枚举 symbol 键，与 stock 的重建行为有细微差异。
-- 未做：`new Function` 单体 codegen（追平 z4 JIT/arktype 速度的下一步）、async。
+The layer depends on zod4 internals (`compileFn`, `INVALID`, the compile error classes from `zod4/v4/core`) and on a few hand-copied predicates. It is anchored to **zod 4.5.4**: `tests/canary-z4.test.ts` asserts the stock behaviors the compiler assumes, so an upgrade turns the tests red instead of drifting silently. [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) asks zod upstream to make that surface public.
 
-## 目录
+The zod3 line aligns itself with probes instead (`src/probe.ts` measures stock zod3 edge semantics at runtime): absent optional keys are not materialized, present-undefined keys are kept, default values pass the inner validation, issues are collected across sibling fields, `readonly` freezes shallowly.
 
-```
-src/internal.ts         协议（z3 前端）：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
-src/probe.ts            stock zod3 行为探针
-src/probe-z4.ts         zod4 def 结构 + 行为勘察（一次性诊断，含 REPRO 钩子）
-src/probe-z4-flags.ts   zod4 语义金丝 flag（版本升级自动报警）
-src/regexes.ts          zod 3.24.1 内部格式正则的逐字拷贝（z3 前端用）
-src/compile.ts          zod3 前端编译器
-src/index.ts            zod3 compile() API
-src/cow4/               zod4 引擎（官方 codegen + CoW 容器骨架 + async 通道；模块布局见 AGENTS.md）
-src/index-z4.ts         zod4 compile() API
-tests/harness.ts            零依赖测试框架（test/summary/deepEqual）
-tests/unit.test.ts          z3 单元测试（27 项）
-tests/differential.test.ts  z3 差分模糊（20000 case）
-tests/canary-z4.test.ts     zod 版本金丝（stock z4 行为 ↔ 编译器假设）
-tests/smoke-z4*.test.ts     zod4 线行为断言（容器 / tuple / async）
-tests/differential-z4.test.ts zod4 线差分模糊（20000 case，REPRO 钩子）
-bench/bench.ts          z3 基准（50 万账户）
-bench/bench-z4.ts       zod4 线基准（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5-S7 容器·tuple·async）
-examples/demo.ts        60 秒上手
-```
+The full design, with generated code dumped side by side against the official products, is in [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md).
 
-## v0.3 — zc-z4：复用 zod4 官方 codegen 的 CoW 修饰层
+## Benchmarks
 
-### 动机
+zod4 line, v0.5 measurement: 500 000 accounts, node v24.19, `--expose-gc`, median of 3 runs (`pnpm run bench:z4`). "official parser" is zod4's own `compileFn` parser product.
 
-zod4（≥4.1）自带 JIT 编译器：`src/v4/core/compile.ts`，经 side-effect 入口
-`import "zod/compile"` 或显式 `z.compile()` 暴露。它把整棵 schema 树编译成
-单体校验函数（`new Function` + 常量提升），并内置了两个关键产物：
+| Scenario | stock zod4 | official parser | **zc-z4 (CoW)** | arktype |
+|---|---|---|---|---|
+| S1 pure validation | 654 ms | 263 ms | **283 ms** | 144 ms |
+| S1 allocation pressure | +160.5 MB | +111.0 MB | **+30.5 MB** | +26.7 MB |
+| S1 retained after GC | +123.4 MB | +108.1 MB | **0.0 MB** | 0.0 MB |
+| S2 dirty load (10% default injection) | 619 ms | 363 ms | **247 ms** | — |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 622 / 647 / 679 / 660 ms | 391 / 415 / 452 / 449 ms | **245 / 268 / 311 / 404 ms** | — |
+| S3 retained after GC | +123.3 MB constant | — | **0 / 20 / 36 / 68.7 MB** | — |
+| S4 validate | — | 219 ms (per account) | **50 ms** | 144 ms |
+| S5 record / map / set | 922 ms | 681 ms | **353 ms** | — |
+| S5 allocation pressure / retained | +256.1 MB / +217.4 MB | +245.3 MB / +217.4 MB | **+38.1 MB / 0.0 MB** | — |
+| S6 tuple | 508 ms | 340 ms | **111 ms** | — |
+| S6 allocation pressure / retained | +214.0 MB / +206 MB | +202.2 MB / +202 MB | **+15.3 MB / 0 MB** | — |
+| S7 async transform (50 000 rows) | 262 ms (safeParseAsync) | compile refused | **105 ms (safeParseAsync)** | — |
+| S7 allocation pressure | +95.6 MB | — | **+34.9 MB** | — |
 
-| 官方能力 | 说明 | 本层如何复用 |
-|---|---|---|
-| `compileFn(schema)` parser 产物 | stock 语义（无条件新容器） | 非纯净子树的语义后端（transform/default/catch/record/union… 全部官方实现） |
-| `compileFn(schema, {assertOnly:true})` validator 产物 | 纯校验、跳过输出构造 | 纯净叶子键的校验后端 + `validate()` 整树快路径 |
-| `INVALID` 哨兵 + runtime fallback | 失败路径回退 runtime 收集完整 issues | 本层任何失败只回传哨兵，issues/path/ZodError 100% 官方 |
+How to read it:
 
-早先的自研 zod4 前端（Task3）写了 ~1100 行语义 codegen；本层的自研代码只剩：
+- **Against stock**: 2.31x (S1) to 2.61x (S5) to **4.57x (S6 tuple, the highest)**, and memory retained after GC drops from 123 to 217 MB to zero. Async (S7) is 2.50x.
+- **Against the official JIT parser**: level on clean input (S1 0.93x to 1.00x, within run-to-run noise: the output construction the skeleton skips pays for the sub-skeleton calls), and ahead on dirty input (S2 1.47x, S5 1.93x, S6 3.06x) because the default `shallowClone` and the whole-tree rebuild are fixed costs of stock semantics while CoW pays only for the paths that really changed.
+- **validate fast path**: the official whole-tree `assertOnly` product does 50 ms / 500 000 = 100 ns per account with zero allocation.
+- The +30.5 MB in S1 is short-lived allocation inside the official leaf products (datetime/email format temporaries); the CoW layer itself copies nothing.
 
-1. **纯度分析**（~120 行，保守白名单）：判定"校验通过 ⇒ 输出必 === 输入"。
-   陷阱实测：`overwrite` check（`.trim()/.toLowerCase()`）是值改写 → 非纯；
-   length/size 系 check 自带默认 `when` 函数（官方 `WHEN_DEFAULTED_CHECKS`
-   白名单），不能当作自定义 when 拒绝；
-   `optional/nullable` 包装的容器必须剥壳识别（裸判 def.type 会把
-   `nullable(object)` 误送官方 assertOnly，丢失 strip 剥离语义）。
-2. **容器 CoW 骨架 codegen**（object/array 两个模板，~200 行）：把官方
-   "无条件新容器"（`const out = {...}` / `new Array(n)`）改写为
-   "引用比较判脏 + 条件浅拷贝"。干净输入 `return input`（官方模板没有的一行）；
-   被迫拷贝时 `out = { ...input }` —— 键存在性/键序由扩展天然保真，
-   strip 多余键用官方同款 `for...in + Set` 探测后 delete。
-3. **容器自身 checks 子程序**（refine/min/max）：独立校验函数，双路径调用
-   对齐 stock 语义（checks 作用于最终输出：干净时=输入，脏时=重建后的 out）。
+The zod3 line measured 4.3 to 5.0x against stock zod 3.24.1 (which still pays the interpreter tax). That table, and the tables of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 
-### 降级链（每棵子树独立，永不牺牲正确性）
+## Correctness evidence
+
+- **Differential fuzzing** (`tests/differential-z4.test.ts`): random nested object / array / tuple / record / map / set / union schemas with optional / nullable / default / refine / transform and async refine / transform wrappers, compared against stock zod4 on success parity, `deepStrictEqual` outputs (Map/Set compared as entry sets) and zero input mutation (structuredClone snapshot). The v0.5 run of 50 000 cases had 20 813 successes / 29 187 failures, a top-level reference-sharing rate of **89.1%** on successful cases and 0 stock degradations. The code default is 200 × 100 = 20 000 cases.
+- **Smoke tests** (`tests/smoke-z4*.test.ts`): behavior assertions for the original reference, strip, strict, default, transform, nested sharing, array elements, optional, union, the degradation chain, the three record paths, map / set and size checks, tuple truncation / fill / rest / refine, and async through all containers, `lazy(async)` and union async branches.
+- **Version canary** (`tests/canary-z4.test.ts`): asserts the stock zod4 behaviors the compiler assumes (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, …).
+- The zod3 line has 27 unit tests plus its own 20 000-case differential fuzzer (`tests/differential.test.ts`), with a top-level reference-sharing rate of about 92%.
+- Every one of the purity traps described in the architecture doc was found by the fuzzer, not by reading code. Purity analysis can only be proven complete by fuzzing, which is why any change to the purity rules or a container skeleton must be validated with the differential suite and its reference-sharing rate reported.
+
+## Known limitations (prototype scope)
+
+- **Structural sharing is observable**: parsing the same input twice returns the same reference, and modifying the output modifies the input. The type layer hints at this with `DeepReadonly`; use stock `schema.parse` when an independent copy is needed.
+- **Refines must not mutate the input** (the CoW premise); deep-freeze inputs during development to catch violations.
+- **Refine side effects on failure**: a failing parse runs the refine callback in the skeleton and again in the stock fallback, so it runs twice. The official `zod/compile` shim has the same semantics.
+- **Key order**: pass-through preserves the input's key order; stock rebuilds in shape order (`deepStrictEqual` does not notice, snapshot tools might).
+- **Unsupported, with an explicit failure rather than silent drift**:
+  - zod4 line: `intersection`, `file` / `templateLiteral` / `promise`, `string_format` without a `pattern` (such as `url`), recursive top-level schemas and schema-level `catchall`. The official `ZodCompileUnsupportedError` makes the tree degrade to stock (`compiled.stock === true`), which is correct but not CoW.
+  - zod3 line: `intersection`, `catchall`, tuple rest, `ZodPromise`, async refine. `ZcNotSupportedError` is thrown at compile time.
+- **NaN**: `z.nan()` is always judged dirty (`NaN !== NaN`); the output is still correct, at the cost of one extra copy.
+- **Symbol keys / getters**: pass-through keeps own enumerable symbol keys visible to spread, a small difference from stock's rebuild.
+- **Known stock quirk, deliberately not matched**: with an async rest element and a `null` input in a nullable slot, stock zod4's runtime produces a sparse array and loses the `null`; the skeleton outputs a dense array. The differential generator avoids that combination; the reproduction is in the upstream issue draft.
+
+## Repository layout
 
 ```
-CoW 容器骨架
-  ├─ 纯净叶子 → 官方 assertOnly validator（校验完整、零构造）
-  ├─ 非纯子树 → 官方 parser 产物 + 引用比较判脏
-  ├─ 产物生成失败 → runtime island（黑盒 _zod.run）
-  └─ 整树不可编译（async/递归顶层/schema catchall）→ stock safeParse
-失败路径统一回退 stock（完整 issues/error map/ZodError）。
-与 "zod/compile" 全局 shim 共存：回退路径自动享受官方 JIT。
+src/index-z4.ts             zod4 compile() API (active line)
+src/cow4/                   zod4 engine: official codegen + CoW container skeletons + async channel
+                            (index, product, codectx, predicates, purity, official, emit, emit-{object,array,tuple,record,map,set})
+src/probe-z4.ts             zod4 def structure and behavior survey (one-off diagnostics)
+src/probe-z4-flags.ts       zod4 semantic canary flags (a version bump raises an alarm)
+src/index.ts                zod3 compile() API (frozen reference)
+src/compile.ts              zod3 closure-tree compiler
+src/internal.ts             zod3 protocol: FAILED sentinel / Ctx / issue helpers / safeSet
+src/regexes.ts              verbatim copy of zod 3.24.1's internal format regexes (zod3 line)
+src/probe.ts                stock zod3 behavior probes
+tests/harness.ts            zero-dependency test harness (test / summary / deepEqual)
+tests/canary-z4.test.ts     zod version canary (stock zod4 behavior vs compiler assumptions)
+tests/smoke-z4*.test.ts     zod4 behavior assertions (containers / tuple / async)
+tests/differential-z4.test.ts   zod4 differential fuzzer (20 000 cases, REPRO hook)
+tests/unit.test.ts          zod3 unit tests (27)
+tests/differential.test.ts  zod3 differential fuzzer (20 000 cases)
+bench/bench-z4.ts           zod4 benchmark (S1 pure / S2 dirty / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 async)
+bench/bench.ts              zod3 benchmark (500 000 accounts)
+examples/demo.ts            60-second demo
+docs/ARCHITECTURE-z4.md     architecture deep dive on the zod4 engine (English source; docs/ARCHITECTURE-z4.zh-CN.md is a frozen Chinese snapshot)
+docs/upstream-issue-draft.md   draft issue for zod upstream: make compileFn / assertOnly / INVALID public
+CHANGELOG.md                v0.1 to v0.5 history with the historical benchmark tables
 ```
 
-### 基准（v0.3，50 万账户，node v24，--expose-gc，3 轮取中位）
+## Further reading
 
-| 场景 | stock | 官方 JIT parser | zc-z4 (CoW) | zc-v1 (自研) | arktype |
-|---|---|---|---|---|---|
-| S1 纯校验 | 685ms | 279ms | **280ms** | 566ms | 120ms |
-| S1 分配压力 | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
-| S1 gc 后驻留 | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
-| S2 脏负载（10% default 注入） | 641ms | 383ms | **238ms** | 537ms | — |
-| S3 100% 脏 | 662ms | 439ms | **420ms** | 668ms | — |
-| S4 validate（整树产物） | — | 174ms(逐账户) | **27ms** | — | 120ms |
-
-（`zc-v1` 列是 v0.3 当时对自研前端的一次测量；该前端此后已移除，见上文
-[zod4 适配（v0.2，历史）](#zod4-适配v02历史)。）
-
-要点：
-
-- **复用官方 codegen 后，zc-z4 比 v1 快 2.0x**（S1 566→280ms），与官方
-  parser 产物速度持平（1.00x），但分配 -73%（30.5 vs 111MB）、驻留 0MB。
-- 脏负载下 zc-z4 反超官方 parser **1.61x**（default shallowClone 与输出
-  重建是官方 stock 语义的固定成本，CoW 免除干净部分的重建）。
-- `validate()` 是官方 assertOnly 整树单体产物：27ms / 50 万账户 = 54ns/账户，
-  比 arktype（120ms）快 4.4x，分配 0。
-- 剩余 30.5MB 短命分配来自官方叶子产物内部（datetime/email 格式校验的临时
-  值），gc 后驻留 0MB —— CoW 本身零拷贝。
-
-### 正确性
-
-- `tests/differential-z4.test.ts`：50000 case 随机 schema/数据，与 stock
-  zod4 成败奇偶 + 输出 deepStrictEqual + 输入零失真全部一致（REPRO=seed:case
-  可复现）。顶层引用共享率 81.8%（成功 case）。
-- `tests/smoke-z4.test.ts`：11 组行为断言（原引用/strip/strict/default/transform/
-  嵌套共享/数组元素/optional/union/降级链）。
-
-### 版本锚点
-
-本层读取 zod4 内部 API：`zod4/v4/core` 的 `compileFn/INVALID/
-ZodCompileUnsupportedError/ZodCompileAsyncError`，以及语义谓词的照抄实现
-（`WHEN_DEFAULTED_CHECKS`、`fastPathAcceptsAbsence`、`mayOutputUndefined`）。
-锚定 zod **4.5.4**；升级 zod 时需重跑差分测试确认谓词未漂移。
-
-## v0.4 — record/map/set CoW 骨架 + 架构对比文档
-
-- **record 骨架**（激进全覆盖，三条编译期路径）：
-  - 路径 A：enum 声明驱动键——缺失声明键判脏（stock 无条件物化）、未知键 strict 拒绝、拷贝分支逐声明键写回
-  - 路径 B：一般键（string format / number 数值重试 / partialRecord）——官方 keyFast + 数值键重试模板 + **键名引用比较**（outKey !== k → 删旧键写新键）
-  - 路径 C：bare-string 键——键名恒不变，纯值比较
-- **map/set 骨架**：键/值/成员引用比较，首脏 `new Map(input)` / `new Set(input)`，纯键零开销（键名恒等）；Map/Set `.min()/.max()` size checks 支持
-- 接线：`cowSafeContainerForChild` / `emitBoxedContainer` / `childProduct()` 统一扩展，`nullable(record)`、`optional(map)`、record 值为嵌套 object 等组合全部 CoW
-- 验证：差分 50000 case（含 map/set 生成器）与 stock 全一致，成功 case 引用共享率 89.8%；S5 容器基准 2.65x vs stock、1.93x vs 官方 parser、驻留 0MB
-- 架构深度走读：**[docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)** —— v1 自研 codegen vs zc-z4 复用官方 codegen 的完整对比（生成代码并排 dump、纯度白名单、三大陷阱复盘、降级链状态机、基准解读）
-
-## v0.5 — tuple CoW 骨架 + async schema 支持 + 上游 issue 草稿
-
-- **tuple 骨架**（六容器齐装）：官方 `generateTupleCheck` 逐行镜像 + CoW 修饰。
-  - `optinStart`/`optoutStart`（官方 `getTupleOptStart` 逐字照抄）+ 官方同款长度守卫（无 rest 时 `[optinStart, N]`）
-  - **fillLen 变量**：官方用动态 `out.length` 做尾槽门控，CoW 时输出可能还是输入引用（不能读写 `.length`）→ 显式跟踪逻辑长度；不变量 `out === input ⟹ fillLen === input.length`
-  - 三段式：无条件槽（缺席槽保留官方物化语义）/ 尾槽门控 + 缺席三分支（`dropsWhenAbsent` 截断 / validator 截断 / IIFE INVALID/undefined 截断、有值填充）/ rest 无门控逐槽
-  - 截断三态：已拷贝→实截；原引用且目标≠输入长→拷后截；**目标===输入长→输出===输入，零操作**（trailing optional 短输入可保住原引用）
-- **async 通道**（不再整树降级）：
-  - 官方 compileFn 的 6 处 `isAsyncFunction` 抛点即现成的 async 探测器 → `ZodCompileAsyncError` 就地转 **async 岛**（返回 `Promise<out|INVALID>`，产物挂 `ZC_ASYNC` 标记）
-  - 全部产物调用位（object 键/array 元素/tuple 槽/record 值/map 键值/set 成员/容器 checks 谓词）async 感知 → 发射 `await` + `ctx.async` → 骨架变 async 函数，子骨架父层自动感知
-  - `lazy(async…)` 补漏：官方对 lazy 产物是 runtime island 编译期不报 async → `subtreeHasAsync` 静态探测（def 树递归 + getter 展开 + 防环）
-  - 同步 island 遇 Promise 抛 `$ZodAsyncError`（官方 `throwAsync` 同款语义：返回 INVALID 会被 union 误读成分支拒绝）
-  - 公开 API：`Compiled.async` 标志 + `parseAsync`/`safeParseAsync`；async 骨架下 sync API 抛 `$ZodAsyncError`（官方同款）
-- **验证**：差分 50000 case（生成器新增 bTuple + async refine/transform 变体）与 stock 全一致（成功 20813/失败 29187，引用共享率 89.1%，stock 降级 0）；冒烟新增 14 组 tuple/async 行为断言
-- **基准**（本批，50 万条，node v24.19）：S6 tuple **4.57x** vs stock / **3.06x** vs 官方 parser（全场景最高——tuple 是重建占比最大的容器）；S7 async（5 万条）**2.50x** vs stock safeParseAsync、分配 -63%
-- **上游 issue 草稿**：[docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) —— 推动 `compileFn`/`assertOnly`/`INVALID`/错误类转正为公开 API；附模糊测试中发现的 zod4 runtime quirk（async rest 槽稀疏数组丢 null，确定性复现）
+- [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md): generated code side by side with the official products, the purity whitelist and its three traps, the record / map / set / tuple skeletons, the async channel, the degradation-chain state machine, the version anchor and its risks.
+- [CHANGELOG.md](CHANGELOG.md): how the project moved from a self-written zod3 compiler (v0.1) through a self-written zod4 port (v0.2, removed) to the official-codegen reuse (v0.3 to v0.5), with the benchmark table of each step.
+- [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md): the case for a public `compileFn` API, plus the zod4 runtime quirk found while fuzzing.
+- [AGENTS.md](AGENTS.md): working conventions for contributors and coding agents (commands, module map, version anchoring, PR rules).

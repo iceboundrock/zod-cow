@@ -43,7 +43,7 @@ Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200
 
 > The benchmark tables in this README and in `docs/` come from the
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml),
-> [run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881):
+> [run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401):
 > a GitHub-hosted `ubuntu-latest` runner, node v24, `BENCH_N=50 000`, median of
 > 3 runs. The workflow runs `bench:z4` and `bench` manually or weekly and prints
 > the tables in the job summary. Runner noise is a few milliseconds at this
@@ -140,32 +140,32 @@ The full design, with generated code dumped side by side against the official pr
 
 ## Benchmarks
 
-zod4 line, [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs (`pnpm run bench:z4` with `BENCH_N=50000`). "official parser" is zod4's own `compileFn` parser product; the S4 baseline is the exception, it is the official `assertOnly` validator called once per account, since the parser has no validation-only mode.
+zod4 line, [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs (`pnpm run bench:z4` with `BENCH_N=50000`). "official parser" is zod4's own `compileFn` parser product; the S4 baseline is its `assertOnly` validator for the same array schema, since the parser has no validation-only mode.
 
 | Scenario | stock zod4 | official parser | **zc-z4 (CoW)** | arktype |
 |---|---|---|---|---|
-| S1 pure validation | 65 ms | 21 ms | **23 ms** | 9 ms |
+| S1 pure validation | 75 ms | 22 ms | **20 ms** | 8 ms |
 | S1 allocation pressure | +63.5 MB | +11.0 MB | **+3.1 MB** | +2.7 MB |
 | S1 retained after GC | +12.4 MB | +10.8 MB | **0.0 MB** | 0.0 MB |
-| S2 dirty load (10% default injection) | 51 ms | 23 ms | **25 ms** | — |
-| S3 sweep, 0% / 25% / 50% / 100% dirty | 45 / 49 / 49 / 45 ms | 22 / 28 / 23 / 29 ms | **24 / 29 / 27 / 29 ms** | — |
+| S2 dirty load (10% default injection) | 55 ms | 21 ms | **22 ms** | — |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 45 / 47 / 47 / 48 ms | 20 / 24 / 27 / 27 ms | **21 / 24 / 26 / 28 ms** | — |
 | S3 retained after GC | +12.3 MB constant | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
-| S4 validate | — | 13 ms (official `assertOnly` validator, per account) | **3 ms** | 9 ms |
-| S5 record / map / set | 68 ms | 46 ms | **31 ms** | — |
-| S5 allocation pressure / retained | +50.9 MB / +21.7 MB | +60.7 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
-| S6 tuple | 29 ms | 16 ms | **7 ms** | — |
+| S4 validate | — | 14 ms (official `assertOnly` validator) | **14 ms** | 8 ms |
+| S5 record / map / set | 69 ms | 50 ms | **28 ms** | — |
+| S5 allocation pressure / retained | +50.8 MB / +21.7 MB | +61.3 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
+| S6 tuple | 18 ms | 12 ms | **6 ms** | — |
 | S6 allocation pressure / retained | +53.4 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | — |
-| S7 async transform (5 000 rows) | 16 ms (safeParseAsync) | compile refused | **5 ms (safeParseAsync)** | — |
-| S7 allocation pressure | +14.5 MB | — | **+9.9 MB** | — |
+| S7 async transform (5 000 rows) | 11 ms (safeParseAsync) | compile refused | **4 ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.0 MB | — | **+9.8 MB** | — |
 
 How to read it:
 
-- Against stock: 2.09x on S2, 2.23x on S5, 2.86x on S1 and 4.39x on S6 (tuple, the highest), and the 12 to 22 MB retained after GC drops to zero. Async (S7) is 3.23x.
-- Against the official JIT parser: level on the object scenarios (S1 and S2 both 0.92x, a 2 ms gap at this record count and within runner noise, since the output construction the skeleton skips pays for the sub-skeleton calls). Ahead on the container scenarios (S5 1.50x, S6 2.47x): the whole-tree rebuild is a fixed cost of stock semantics, while CoW pays only for the paths that changed.
-- validate fast path: the official whole-tree `assertOnly` product does 3 ms / 50 000 = 60 ns per account with zero allocation.
+- Against stock: 2.43x on S5, 2.47x on S2, 2.99x on S6 and 3.67x on S1 (the highest), and the 12 to 22 MB retained after GC drops to zero. Async (S7) is 2.67x.
+- Against the official JIT parser: level on the object scenarios (S1 1.08x, S2 0.94x, a 1 to 2 ms gap at this record count and within runner noise, since the output construction the skeleton skips pays for the sub-skeleton calls). Ahead on the container scenarios (S5 1.76x, S6 1.88x): the whole-tree rebuild is a fixed cost of stock semantics, while CoW pays only for the paths that changed.
+- validate fast path: `validate()` is the official whole-tree `assertOnly` product of the same array schema, so S4 reads level with that baseline by construction (0.99x). Its value is the validation-only cost: 14 ms / 50 000 = 280 ns per account, 1.42x below the S1 parse of the same data, with nothing retained after GC.
 - The +3.1 MB in S1 is short-lived allocation inside the official leaf products (datetime/email format temporaries); the CoW layer itself copies nothing.
 
-The zod3 line measured about 4.4x against stock zod 3.24.1 in the same run (S1 4.37x, S2 4.43x; stock zod3 still pays the interpreter tax). The earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
+The zod3 line measured 4.4x to 4.8x against stock zod 3.24.1 in the same run (S1 4.36x, S2 4.77x; stock zod3 still pays the interpreter tax). The earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 
 ## Correctness evidence
 

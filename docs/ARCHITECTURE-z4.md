@@ -453,38 +453,39 @@ What really degrades the whole tree is a top-level recursive schema (a circular 
 
 ## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, median of 3 runs)
 
-The numbers come from [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`. The earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, is kept in the CHANGELOG under v0.5; today's `bench:z4` no longer runs v1.
+The numbers come from [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`. The earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, is kept in the CHANGELOG under v0.5; today's `bench:z4` no longer runs v1.
 
 | Scenario | stock | official compileFn parser | zc-z4 | arktype |
 |---|---|---|---|---|
-| S1 pure validation | 65ms | 21ms | **23ms** | 9ms |
+| S1 pure validation | 75ms | 22ms | **20ms** | 8ms |
 | S1 allocation pressure | +63.5MB | +11.0MB | **+3.1MB** | +2.7MB |
 | S1 retained after GC | +12.4MB | +10.8MB | **0.0MB** | 0.0MB |
-| S2 dirty load (10% default) | 51ms | 23ms | **25ms** | — |
-| S3 sweep 0% / 25% / 50% / 100% dirty | 45/49/49/45ms | 22/28/23/29ms | **24/29/27/29ms** | — |
+| S2 dirty load (10% default) | 55ms | 21ms | **22ms** | — |
+| S3 sweep 0% / 25% / 50% / 100% dirty | 45/47/47/48ms | 20/24/27/27ms | **21/24/26/28ms** | — |
 | S3 zc-z4 retained | +12.3MB constant | — | **0.0 / 2.0 / 3.6 / 6.9MB** | — |
-| S4 validate | — | 13ms (official `assertOnly` validator, per account) | **3ms** | 9ms |
-| S5 record/map/set | 68ms | 46ms | **31ms** | — |
-| S5 allocation pressure | +50.9MB | +60.7MB | **+29.4MB** | — |
+| S4 validate | — | 14ms (official `assertOnly` validator) | **14ms** | 8ms |
+| S5 record/map/set | 69ms | 50ms | **28ms** | — |
+| S5 allocation pressure | +50.8MB | +61.3MB | **+29.4MB** | — |
 | S5 retained after GC | +21.7MB | +21.7MB | **0.0MB** | — |
-| S6 tuple | 29ms | 16ms | **7ms** | — |
+| S6 tuple | 18ms | 12ms | **6ms** | — |
 | S6 allocation pressure / retained | +53.4MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | — |
-| S7 async transform (5 000 rows) | 16ms (safeParseAsync) | compile rejected | **5ms (safeParseAsync)** | — |
-| S7 allocation pressure | +14.5MB | — | **+9.9MB** | — |
+| S7 async transform (5 000 rows) | 11ms (safeParseAsync) | compile rejected | **4ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.0MB | — | **+9.8MB** | — |
 
 How to read it:
 
-1. Against stock: 2.09x (S2) ~ 2.23x (S5) ~ 2.86x (S1) ~ 4.39x (S6 tuple, the highest of all scenarios),
-   with retained memory going from 12~22MB to zero; the async scenario (S7) is 3.23x.
-2. Against the official JIT parser: level in the object scenarios (S1 and S2 both 0.92x, a 2ms gap at this record count and within runner noise; the output
-   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in the container scenarios (S5 1.50x, S6 2.47x),
+1. Against stock: 2.43x (S5) ~ 2.47x (S2) ~ 2.99x (S6) ~ 3.67x (S1, the highest of all scenarios),
+   with retained memory going from 12~22MB to zero; the async scenario (S7) is 2.67x.
+2. Against the official JIT parser: level in the object scenarios (S1 1.08x, S2 0.94x, a 1 to 2ms gap at this record count and within runner noise; the output
+   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in the container scenarios (S5 1.76x, S6 1.88x),
    because the whole-tree rebuild of the official stock semantics is a fixed cost, while CoW only pays for the paths
-   that actually got dirty. The 2.47x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
+   that actually got dirty. The 1.88x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
    while the slots barely change), so CoW decoration gains the most there.
 3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
-   skeleton; an all-dirty async transform scenario is still 3.23x, with allocation -32% (14.5→9.9MB).
-4. validate fast path: the official assertOnly whole-tree product, 3ms / 50 000 = 60ns per account,
-   4.3x faster than the official `assertOnly` validator called once per account (13ms, including payload wrapping), with zero allocation.
+   skeleton; an all-dirty async transform scenario is still 2.67x, with allocation -30% (14.0→9.8MB).
+4. validate fast path: `validate()` is the official assertOnly whole-tree product of the same array schema, so S4 reads level
+   with that baseline by construction (14ms against 14ms, 0.99x). Its value is the validation-only cost: 14ms / 50 000 = 280ns per account,
+   1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the same short-lived leaf allocation as in S1).
    The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
 S1's +3.1MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),

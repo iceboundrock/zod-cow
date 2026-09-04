@@ -13,13 +13,17 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - The zod4 engine was split from one file into cohesive modules under `src/cow4/` (product contract, code context, copied predicates, purity analysis, official-product wrappers, codegen core, one skeleton module per container). Section 11 of `docs/ARCHITECTURE-z4.md` maps modules to document sections (#5, #20).
 - Package management moved to pnpm 11 with a Node.js >= 22.13.0 floor (#11).
 - All code comments and test/bench output strings were translated to English (#6, #21, #22, #23, #24). The README, the architecture document and this changelog followed in #7; the Chinese README is `README.zh-CN.md` and the Chinese architecture text is kept as a frozen snapshot in `docs/ARCHITECTURE-z4.zh-CN.md`.
-- The benchmark tables in both READMEs, `docs/ARCHITECTURE-z4.md` §7 and the upstream issue draft now quote [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, median of 3 runs) instead of a local 500 000-record run. The superseded v0.5 table is kept below under 0.5.0.
+- The benchmark tables in both READMEs, `docs/ARCHITECTURE-z4.md` §7 and the upstream issue draft now quote [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, median of 3 runs) instead of a local 500 000-record run. The superseded v0.5 table is kept below under 0.5.0.
 
 ### Added
 
 - GitHub Actions CI: typecheck plus both test lines on a Node 22/24/26 matrix, and a separate Biome lint job (`.github/workflows/ci.yml`).
 - A manual/weekly benchmark workflow (`.github/workflows/bench.yml`) that runs `bench:z4` and `bench` on a GitHub-hosted runner (node 24, `BENCH_N=50 000`) and writes the tables to the job summary. The published benchmark tables quote one run of it by run id (see Changed above); the other runs check that the bench scripts still work and can be compared against the cited run.
 - Biome for linting and formatting (`biome.json`).
+
+### Fixed
+
+- `bench/bench-z4.ts` S4: the zc-z4 side was compiled from the array schema but called once per account, so `validate()` rejected every input at the type check and the reported time was the cost of the rejections, not of validation (this also affects the S4 rows of the v0.3 and v0.5 tables below, marked there). Both validators now take the whole S1 array, the run asserts that both accept it, and every timed call throws on a rejection. S4 now reads level with the official `assertOnly` validator, which `validate()` wraps (#25).
 
 ## [0.5.0]
 
@@ -60,7 +64,7 @@ The full v0.5 table (S1 to S7), superseded by the CI-run table in the [README](R
 | S2 dirty load (10% default) | 619ms | 363ms | **247ms** | 504ms | — |
 | S3 sweep 0% / 25% / 50% / 100% dirty | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
 | S3 zc-z4 retained | +123.3MB constant | — | **0 / 20 / 36 / 68.7MB** | — | — |
-| S4 validate | — | 219ms (official `assertOnly` validator, per account) | **50ms** | — | 144ms |
+| S4 validate | — | 219ms (official `assertOnly` validator, per account) | **50ms** (invalid, see note) | — | 144ms |
 | S5 record/map/set | 922ms | 681ms | **353ms** | not supported | — |
 | S5 allocation pressure | +256.1MB | +245.3MB | **+38.1MB** | — | — |
 | S5 retained after GC | +217.4MB | +217.4MB | **0.0MB** | — | — |
@@ -68,6 +72,8 @@ The full v0.5 table (S1 to S7), superseded by the CI-run table in the [README](R
 | S6 allocation pressure / retained | +214.0MB / +206MB | +202.2MB / +202MB | **+15.3MB / 0MB** | — | — |
 | S7 async transform (50 000 rows) | 262ms (safeParseAsync) | compile rejected | **105ms (safeParseAsync)** | not supported | — |
 | S7 allocation pressure | +95.6MB | — | **+34.9MB** | — | — |
+
+Note on S4: the zc-z4 value of this row is not a validation cost. The bench compiled the zc-z4 side from the array schema and called it once per account, so `validate()` rejected every account at the type check and the 50ms timed 500 000 rejections (fixed under Unreleased). The official-validator and arktype values of the row are unaffected.
 
 ## [0.4.0]
 
@@ -131,7 +137,7 @@ Coexists with the global "zod/compile" shim: the fallback path gets the official
 | S1 retained after GC | +123.4 MB | +108.1 MB | **0.0 MB** | 0.0 MB | 0.0 MB |
 | S2 dirty load (10% default injection) | 641 ms | 383 ms | **238 ms** | 537 ms | — |
 | S3 100% dirty | 662 ms | 439 ms | **420 ms** | 668 ms | — |
-| S4 validate (whole-tree product) | — | 174 ms (official `assertOnly` validator, per account) | **27 ms** | — | 120 ms |
+| S4 validate (whole-tree product) | — | 174 ms (official `assertOnly` validator, per account) | **27 ms** (invalid, see the S4 note under 0.5.0) | — | 120 ms |
 
 The `zc-v1` column is the v0.3 measurement of the self-written zod4 front-end, which was removed in #4.
 
@@ -139,7 +145,7 @@ Takeaways at the time:
 
 - Reusing the official codegen made zc-z4 2.0x faster than v1 (S1 566 → 280 ms), level with the official parser product (1.00x), with 73% less allocation (30.5 vs 111 MB) and 0 MB retained.
 - Under dirty load zc-z4 beat the official parser by 1.61x: the default `shallowClone` and the output rebuild are fixed costs of stock semantics, CoW skips the rebuild of the clean part.
-- `validate()` is the official whole-tree `assertOnly` product: 27 ms / 500 000 accounts = 54 ns per account, 4.4x faster than arktype (120 ms), zero allocation.
+- `validate()` is the official whole-tree `assertOnly` product. The takeaway drawn from S4 at the time (27 ms, 54 ns per account, 4.4x faster than arktype) was wrong: the 27 ms timed rejections of a mismatched input, see the S4 note under 0.5.0.
 - The remaining 30.5 MB of short-lived allocation comes from inside the official leaf products (temporaries of datetime/email format checks); 0 MB retained after GC, the CoW layer itself copies nothing.
 
 ### Verification

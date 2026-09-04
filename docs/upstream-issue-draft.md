@@ -5,7 +5,7 @@
 >
 > Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `bench/bench-z4.ts` (reproducible benchmarks),
 > `tests/differential-z4.test.ts` (50 000-case differential suite).
-> Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)).
+> Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)).
 > If upstream would rather fix the bug first, the runtime quirk in the "Bonus" section can be filed as a separate issue.
 
 ---
@@ -56,20 +56,20 @@ Three artifact contracts we rely on:
 
 zc-z4 is a CoW post-processor over the official compiler. A purity analysis picks an official artifact for each subtree. The layer itself only emits container skeletons (object, array, tuple, record, map, set) in which the unconditional new container is replaced by a reference comparison that acts as the dirty signal, with a copy made on the first forced write. Any `INVALID` falls back to stock `safeParse`, so issues, paths and `ZodError` behave as in stock. A randomized differential run of 50k cases against stock found 0 divergences.
 
-GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 passes, 50k records (`BENCH_N` adjustable; [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)):
+GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 passes, 50k records (`BENCH_N` adjustable; [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)):
 
 | Scenario | stock zod4 | official parser (JIT) | **zc-z4 (CoW)** | stock/z4 | JIT/z4 | allocation (stock → z4) | retained after GC |
 |---|---|---|---|---|---|---|---|
-| S1 pure objects | 65ms | 21ms | **23ms** | 2.86x | 0.92x | 63.5MB → 3.1MB | 12.4MB → **0** |
-| S2 dirty 10% (default inject) | 51ms | 23ms | **25ms** | 2.09x | 0.92x | 63.5MB → 4.2MB | 12.4MB → 1.0MB* |
-| S5 record+map+set | 68ms | 46ms | **31ms** | 2.23x | 1.50x | 50.9MB → 29.4MB | 21.7MB → **0** |
-| S6 tuple | 29ms | 16ms | **7ms** | 4.39x | 2.47x | 53.4MB → 1.5MB | 20.6MB → **0** |
-| S7 async transform (5k rows) | 16ms | (unsupported) | **5ms** | 3.23x | — | 14.5MB → 9.9MB | — |
-| validate fast path (per-account) | — | 13ms (`assertOnly` validator, per account) | **3ms** | — | 4.3x | — | — |
+| S1 pure objects | 75ms | 22ms | **20ms** | 3.67x | 1.08x | 63.5MB → 3.1MB | 12.4MB → **0** |
+| S2 dirty 10% (default inject) | 55ms | 21ms | **22ms** | 2.47x | 0.94x | 63.5MB → 4.2MB | 12.4MB → 1.0MB* |
+| S5 record+map+set | 69ms | 50ms | **28ms** | 2.43x | 1.76x | 50.8MB → 29.4MB | 21.7MB → **0** |
+| S6 tuple | 18ms | 12ms | **6ms** | 2.99x | 1.88x | 53.4MB → 1.5MB | 20.6MB → **0** |
+| S7 async transform (5k rows) | 11ms | (unsupported) | **4ms** | 2.67x | — | 14.0MB → 9.8MB | — |
+| S4 validate (whole array) | — | 14ms (`assertOnly` validator) | **14ms** | — | 0.99x | — | **0** |
 
 \* S2 retains 1.0MB because the output cannot alias the input everywhere: the top-level array is copied once (one changed element is enough) and the 10% of records that received the default are shallow-copied. The other 90% of records are the input's own objects, and the default value itself is the schema's literal `"viewer"`, so no per-record string is allocated.
 
-The deeper and heavier the containers, the more of stock's time goes into output construction, and the more CoW saves. Tuple was the biggest surprise (2.47x over the official parser): numeric tuples get a `new Array` on every parse yet almost never change.
+The deeper and heavier the containers, the more of stock's time goes into output construction, and the more CoW saves. Tuple was the biggest surprise (1.88x over the official parser): numeric tuples get a `new Array` on every parse yet almost never change.
 
 ### The internal surface we depend on
 

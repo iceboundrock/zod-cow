@@ -21,9 +21,9 @@
 import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
 
-const { z } = await import("zod4");
-const { compile } = await import("../src/index-z4.js");
-const { compileFn } = await import("zod4/v4/core");
+const { z } = await import("zod");
+const { compile } = await import("zod-cow-v4");
+const { compileFn } = await import("zod/v4/core");
 
 const N = Number(process.env.BENCH_N ?? 500_000);
 const PASSES = 3;

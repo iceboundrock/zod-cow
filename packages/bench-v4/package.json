@@ -1,0 +1,17 @@
+{
+  "name": "bench-v4",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Benchmark and demo for zod-cow-v4, run against the built package",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "bench": "node --expose-gc --import tsx bench.ts",
+    "demo": "tsx demo.ts"
+  },
+  "dependencies": {
+    "arktype": "^2.2.3",
+    "zod": "4.5.4",
+    "zod-cow-v4": "workspace:*"
+  }
+}

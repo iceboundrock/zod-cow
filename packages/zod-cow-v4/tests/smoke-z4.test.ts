@@ -50,6 +50,24 @@ import { compile } from "../src/index.js";
   assert.deepEqual(Object.keys(out).sort(), ["a", "b"]);
   assert.ok("extra" in input && "more" in input);
 
+  const extraSymbol = Symbol("extra");
+  const symbolInput = { a: "x", b: 1, [extraSymbol]: true };
+  const symbolOut = C.parse(symbolInput);
+  assert.notEqual(symbolOut, symbolInput);
+  assert.deepEqual(symbolOut, S.parse(symbolInput));
+  assert.ok(extraSymbol in symbolInput && !(extraSymbol in symbolOut));
+
+  const largeShape: Record<string, z.ZodString> = {};
+  const largeInput: Record<string, string> = {};
+  for (let i = 0; i < 17; i++) {
+    largeShape[`k${i}`] = z.string();
+    largeInput[`k${i}`] = "x";
+  }
+  const Large = compile(z.object(largeShape));
+  assert.equal(Large.parse(largeInput), largeInput);
+  const largeExtra = { ...largeInput, extra: "x" };
+  assert.deepEqual(Large.parse(largeExtra), largeInput);
+
   // strict: extra keys → failure
   const Strict = z.strictObject({ a: z.string() });
   const CS = compile(Strict);

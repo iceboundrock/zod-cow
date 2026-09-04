@@ -16,6 +16,7 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - Package management moved to pnpm 11 with a Node.js >= 22.13.0 floor (#11).
 - All code comments and test/bench output strings were translated to English (#6, #21, #22, #23, #24). The README, the architecture document and this changelog followed in #7; the Chinese README is `README.zh-CN.md` and the Chinese architecture text is kept as a frozen snapshot in `docs/ARCHITECTURE-z4.zh-CN.md`.
 - The benchmark tables in both READMEs, `docs/ARCHITECTURE-z4.md` §7 and the upstream issue draft now quote [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, median of 3 runs) instead of a local 500 000-record run. The superseded v0.5 table is kept below under 0.5.0.
+- The zod4 object skeleton specializes unknown-string-key probes at compile time: shapes up to 16 keys emit direct comparisons instead of a `Set.has()` call per enumerated property, while larger shapes retain the constant-time `Set` path. Shapes with no declared symbols test the symbol-array length directly, and the dirty deletion path reuses the probe's known-key `Set`.
 
 ### Added
 

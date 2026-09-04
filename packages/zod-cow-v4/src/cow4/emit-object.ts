@@ -124,27 +124,37 @@ export function emitCoWObject(
   }
 
   // Extra-key detection (official for...in template: inherited keys participate, matching the runtime)
+  let known: string | null = null;
   if (mode !== "loose" && (mode === "strict" || stringKeys.length > 0 || allKeys.length === 0)) {
-    const known = ctx.addConst(new Set(allKeys));
+    known = ctx.addConst(new Set(allKeys));
+    // Small fixed shapes are faster as comparisons on V8; cap the chain so large objects keep O(1) Set membership.
+    const unknownStringKey =
+      stringKeys.length <= 16
+        ? stringKeys.map((key) => `k !== ${escKey(key)}`).join(" && ") || "true"
+        : `!${known}.has(k)`;
     if (mode === "strict") {
       ctx.write(`for (const k in ${accessor}) {`);
       ctx.indented(() => {
-        ctx.write(`if (!${known}.has(k)) return INVALID;`);
+        ctx.write(`if (${unknownStringKey}) return INVALID;`);
       });
       ctx.write(`}`);
     } else {
       // strip: zero-allocation early-exit probe
       ctx.write(`for (const k in ${accessor}) {`);
       ctx.indented(() => {
-        ctx.write(`if (!${known}.has(k)) { ${extra} = true; break; }`);
+        ctx.write(`if (${unknownStringKey}) { ${extra} = true; break; }`);
       });
       ctx.write(`}`);
       // Official strip discards extra enumerable own symbol keys while {...input} keeps them → probe for them
-      ctx.write(`for (const s of Object.getOwnPropertySymbols(${accessor})) {`);
-      ctx.indented(() => {
-        ctx.write(`if (!${known}.has(s)) { ${extra} = true; break; }`);
-      });
-      ctx.write(`}`);
+      if (symbolKeys.length === 0) {
+        ctx.write(`if (Object.getOwnPropertySymbols(${accessor}).length !== 0) ${extra} = true;`);
+      } else {
+        ctx.write(`for (const s of Object.getOwnPropertySymbols(${accessor})) {`);
+        ctx.indented(() => {
+          ctx.write(`if (!${known}.has(s)) { ${extra} = true; break; }`);
+        });
+        ctx.write(`}`);
+      }
     }
   }
 
@@ -176,10 +186,10 @@ export function emitCoWObject(
   if (mode === "strip") {
     ctx.write(`if (${extra}) {`);
     ctx.indented(() => {
-      const known2 = ctx.addConst(new Set(allKeys));
-      ctx.write(`for (const k in ${accessor}) if (!${known2}.has(k)) delete out[k];`);
+      known ??= ctx.addConst(new Set(allKeys));
+      ctx.write(`for (const k in ${accessor}) if (!${known}.has(k)) delete out[k];`);
       ctx.write(
-        `for (const s of Object.getOwnPropertySymbols(${accessor})) if (!${known2}.has(s)) delete out[s];`,
+        `for (const s of Object.getOwnPropertySymbols(${accessor})) if (!${known}.has(s)) delete out[s];`,
       );
     });
     ctx.write(`}`);

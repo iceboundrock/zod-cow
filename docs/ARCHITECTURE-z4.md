@@ -189,17 +189,17 @@ const x6 = input["address"];
 const x7 = c3(x6);                                         // same as above (nested CoW)
 if (x7 === INVALID) return INVALID;
 if (x7 !== x6) x0 = true;
-for (const k in input) { if (!c4.has(k)) { x1 = true; break; } }   // the same for...in as the official code
-for (const s of Object.getOwnPropertySymbols(input)) {
-  if (!c4.has(s)) { x1 = true; break; }                    // strip drops extra symbol keys → probe for them
-}
+for (const k in input) {
+  if (k !== "id" && k !== "email" && k !== "tags" && k !== "address") { x1 = true; break; }
+}                                                           // fixed string keys are generated comparisons
+if (Object.getOwnPropertySymbols(input).length !== 0) x1 = true; // no declared symbols: any own symbol is extra
 if (!x0 && !x1) {
   return input;                                            // ═══ the one line the official template does not have ═══
 }
 const out = { ...input };                                  // copy only when forced: key presence and key order stay faithful
 if (x1) {
-  for (const k in input) if (!c5.has(k)) delete out[k];    // strip (official semantics)
-  for (const s of Object.getOwnPropertySymbols(input)) if (!c5.has(s)) delete out[s];
+  for (const k in input) if (!c4.has(k)) delete out[k];    // dirty path reuses one Set for deletion
+  for (const s of Object.getOwnPropertySymbols(input)) if (!c4.has(s)) delete out[s];
 }
 return out;
 ```
@@ -212,7 +212,7 @@ Point-by-point correspondence with the official dump:
 | `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
 | (output assembly handles key presence implicitly) | `{ ...input }` | Spread keeps presence and key order faithful naturally |
-| `for (const k in …)` unknown probe | same, copied line by line | strict/strip/loose semantics aligned |
+| `for (const k in …)` unknown probe | generated string comparisons for shapes up to 16 keys, then a `Set` fallback | Same inherited-enumerable semantics with faster monomorphic small-object membership; the cap avoids quadratic scans and excessive code on large shapes |
 
 ### 3.2 The container's own checks: the two-path timing
 
@@ -488,8 +488,8 @@ How to read it:
    1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the same short-lived leaf allocation as in S1).
    The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
-S1's +3.1MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
-and nothing is retained after GC: CoW itself copies nothing. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and
+S1's +3.1MB of short-lived allocation comes from the official leaf products (temporary values in the datetime/email format checks) and the own-symbol arrays required to prove that strip-mode objects can be returned by reference,
+and nothing is retained after GC: CoW itself copies no containers. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and
 a small amount of short-lived allocation was decided in favor of zc-z4 in a production context (where minor GC is cheap), which is also one of the reasons v1 was eventually removed.
 
 ## 8. Correctness evidence

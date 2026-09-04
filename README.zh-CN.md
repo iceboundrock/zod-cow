@@ -80,7 +80,7 @@ zod3 线不发布。它是 `packages/zod-cow-v3` 里的冻结参考实现，由�
 | union / discriminatedUnion | 命中分支返回其输入则永不 |
 | default | 仅当 `undefined` 实际被替换 |
 | transform / preprocess / pipe / catch | 仅当运行时实际产生新值 |
-| strip（对象默认模式） | 仅当输入确实存在多余键（零分配 `for...in` + `Set` 探测） |
+| strip（对象默认模式） | 仅当输入确实存在多余键（小型固定 shape 使用 `for...in` + 生成的比较，大型 shape 回退到 `Set`，并探测自有 symbol） |
 | strict / passthrough | 永不（strict 有多余键直接失败） |
 | `.trim()` / `.toLowerCase()` / `.toUpperCase()` | 仅当值实际变化（值比较） |
 
@@ -131,7 +131,7 @@ zod4 线，[Benchmarks workflow run 33837195401](https://github.com/iceboundrock
 - 对 stock：S5 2.43x、S2 2.47x、S6 2.99x、S1 3.67x（全场景最高），gc 后驻留从 12～22 MB 归零；async（S7）2.67x。
 - 对官方 JIT parser：object 场景持平（S1 1.08x、S2 0.94x，在这个记录数下相差 1～2 ms，属 runner 噪声；骨架省掉的输出构造恰好抵掉子骨架调用开销）。容器场景反超（S5 1.76x、S6 1.88x）：整树重建是 stock 语义的固定成本，CoW 只为真正变脏的路径付费。
 - validate 快路径：`validate()` 就是同一 array schema 的官方整树 `assertOnly` 产物，所以 S4 与基线按构造持平（0.99x）。它的意义在于纯校验成本：14 ms / 5 万 = 280 ns/账户，比同一份数据的 S1 parse 快 1.42x，gc 后零驻留。
-- S1 的 +3.1 MB 是官方叶子产物内部的短命分配（datetime/email 格式校验的临时值），CoW 本身零拷贝。
+- S1 的 +3.1 MB 是官方叶子产物（datetime/email 格式校验的临时值）和 strip 模式对象返回原引用前所需的自有 symbol 探测产生的短命分配；CoW 层不拷贝容器。
 
 zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4.4～4.8x（S1 4.36x、S2 4.77x）。早期本地 50 万条记录的表，包括 v0.5 的 zod4 表、已移除的 v0.2 前端和 v0.3 的表，都在 [CHANGELOG](CHANGELOG.md)。
 

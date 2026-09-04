@@ -33,7 +33,7 @@ function makeRng(seed: number): RNG {
   };
 }
 
-/* ─────────────────────────── 数据池 ─────────────────────────── */
+/* ─────────────────────────── data pool ─────────────────────────── */
 
 const ABSENT = Symbol("absent");
 
@@ -79,12 +79,12 @@ function repr(v: unknown): string {
   }
 }
 
-/* ─────────────────────────── schema 生成器 ─────────────────────────── */
+/* ─────────────────────────── schema generator ─────────────────────────── */
 
 interface Built {
   schema: z.ZodType;
   desc: string;
-  /** 返回值可能是 ABSENT（表示该键不出现） */
+  /** The return value may be ABSENT (meaning the key does not appear) */
   gen(rng: RNG): unknown;
 }
 
@@ -98,7 +98,7 @@ function bString(rng: RNG): Built {
     desc += `.min(${minN})`;
   }
   if (rng.chance(0.3)) {
-    // z4 用正则编码长度约束，min > max 会在 schema 构建期抛错 → 保证 max >= min
+    // z4 encodes length constraints as regexes, and min > max throws while building the schema → keep max >= min
     const n = Math.max(rng.pick([2, 4, 8, 16] as const), minN);
     s = s.max(n);
     desc += `.max(${n})`;
@@ -186,8 +186,8 @@ function bLeaf(rng: RNG): Built {
   }
 }
 
-/** z4：default 短路，默认值不校验 —— 但仍取合法值，保证与 z3 生成器行为一致。
- *  async schema 的 sync safeParse 抛 $ZodAsyncError → 放弃探测（default 包装同步放弃）。 */
+/** z4: default short-circuits and does not validate the default value — but still pick a valid one, to keep the generator behaving like z3.
+ *  A sync safeParse on an async schema throws $ZodAsyncError → give up probing (and give up the default wrapper with it). */
 function validValueFor(b: Built, rng: RNG): unknown {
   for (let i = 0; i < 50; i++) {
     const v = b.gen(rng);
@@ -223,10 +223,10 @@ function bWrap(rng: RNG, inner: Built): Built {
     try {
       absentOk = !inner.schema.safeParse(undefined).success;
     } catch {
-      return inner; // async schema：sync 探测不可用 → 放弃 default 包装
+      return inner; // async schema: sync probing is unavailable → give up the default wrapper
     }
     if (dv === undefined && absentOk) {
-      return inner; // 无合法默认值时放弃 default 包装
+      return inner; // no valid default value: give up the default wrapper
     }
     return {
       schema: inner.schema.default(dv as never),
@@ -244,7 +244,7 @@ function bWrap(rng: RNG, inner: Built): Built {
     };
   }
   if (which === 5) {
-    // Task 6：async refine（成败域与 sync 同构，但走 async 岛）
+    // Task 6: async refine (same success/failure domain as sync, but it goes through an async island)
     return {
       schema: inner.schema.refine(async (v: unknown) => v !== "forbidden", {
         error: "value is forbidden",
@@ -254,14 +254,14 @@ function bWrap(rng: RNG, inner: Built): Built {
     };
   }
   if (which === 6) {
-    // Task 6：async transform（string → string，与 sync transform 同构）
+    // Task 6: async transform (string → string, isomorphic to the sync transform)
     return {
       schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? `${v}!` : v)),
       desc: `${inner.desc}.transform(async +!)`,
       gen: inner.gen,
     };
   }
-  // transform：string → string（纯字符串变换，差分可对齐）
+  // transform: string → string (a pure string transform, so the differential stays alignable)
   return {
     schema: inner.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
     desc: `${inner.desc}.transform(+!)`,
@@ -298,7 +298,7 @@ function bObject(rng: RNG, depth: number): Built {
         const v = f.built.gen(r);
         if (v !== ABSENT) out[f.key] = v;
       }
-      if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // 多余键
+      if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
       return out;
     },
   };
@@ -408,10 +408,10 @@ function bSet(rng: RNG, depth: number): Built {
 }
 
 function bTuple(rng: RNG, depth: number): Built {
-  const nFixed = 2 + rng.int(2); // 2–3 必填槽
+  const nFixed = 2 + rng.int(2); // 2–3 required slots
   const items: Built[] = [];
   for (let i = 0; i < nFixed; i++) items.push(bChild(rng, depth));
-  // 尾部 optional 槽（触发 optoutStart 截断语义）
+  // Trailing optional slots (trigger the optoutStart truncation semantics)
   const nOpt = rng.chance(0.4) ? 1 + rng.int(2) : 0;
   for (let i = 0; i < nOpt; i++) {
     const inner = bChild(rng, depth);
@@ -423,11 +423,11 @@ function bTuple(rng: RNG, depth: number): Built {
   }
   const rest = rng.chance(0.18)
     ? (() => {
-        // rest 限定 sync（叶子 + nullable 包装）：
-        // stock zod4 runtime 对 async rest 槽的输出构造有确定性 quirk ——
-        // nullable(asyncRefine) 的 run 对任何输入返回 Promise，rest 槽异步写回
-        // 产生稀疏数组（如 ['a', hole, null]，null 值被丢成 hole）。
-        // 骨架输出稠密数组（更正确），不假性对齐此行为 → 差分规避 async rest。
+        // rest is restricted to sync (a leaf + a nullable wrapper):
+        // the stock zod4 runtime has a deterministic quirk when building output for an async rest slot —
+        // run on nullable(asyncRefine) returns a Promise for any input, and the async write-back of a
+        // rest slot produces a sparse array (e.g. ['a', hole, null], where the null value is dropped into a hole).
+        // The skeleton emits a dense array (more correct) and does not fake-align with that behavior → the differential avoids async rest.
         const leaf = bLeaf(rng);
         const useNullable = rng.chance(0.3);
         const schema = useNullable ? leaf.schema.nullable() : leaf.schema;
@@ -453,7 +453,7 @@ function bTuple(rng: RNG, depth: number): Built {
         const v = b.gen(r);
         if (v !== ABSENT) out.push(v);
       }
-      // 概率把输入裁短（触发 trailing absent / defaulted 槽区语义）
+      // Sometimes trim the input short (triggers the trailing absent / defaulted slot-range semantics)
       if (r.chance(0.15)) out.length = Math.max(0, out.length - 1 - r.int(2));
       if (rest) {
         const extra = r.int(3);
@@ -486,7 +486,7 @@ function bAny(rng: RNG, depth: number): Built {
   return bWrap(rng, bLeaf(rng));
 }
 
-/* ─────────────────────────── 差分主循环（z4） ─────────────────────────── */
+/* ─────────────────────────── differential main loop (z4) ─────────────────────────── */
 
 const SEEDS = Number(process.env.SEEDS ?? 200);
 const CASES_PER_SEED = Number(process.env.CASES ?? 100);
@@ -510,7 +510,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
 
     const compiled = compile(built.schema);
     if (compiled.stock) stockDowngraded++;
-    const useAsync = compiled.async; // async 骨架 → 双侧走 safeParseAsync
+    const useAsync = compiled.async; // async skeleton → both sides go through safeParseAsync
 
     if (REPRO) {
       console.log("=== REPRO ===");
@@ -631,17 +631,17 @@ function defRepr(schema: any, depth = 0): string {
   }
 }
 
-/* ─────────────────────────── 报告 ─────────────────────────── */
+/* ─────────────────────────── report ─────────────────────────── */
 
-console.log(`zc-z4 差分测试: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
+console.log(`zc-z4 differential test: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
 console.log(
-  `  成功一致: ${bothOk}   失败一致: ${bothFail}   顶层引用共享率: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}%（成功 case 中 ${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}%）`,
+  `  success-consistent: ${bothOk}   failure-consistent: ${bothFail}   top-level reference sharing: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}% (${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}% among successful cases)`,
 );
-console.log(`  stock 降级（compile 放弃编译）: ${stockDowngraded} 次`);
+console.log(`  stock degradations (compile gave up): ${stockDowngraded}`);
 if (failures.length > 0) {
-  console.log(`\n✗ ${failures.length} 个差异（前 10 个）:`);
+  console.log(`\n✗ ${failures.length} differences (first 10):`);
   for (const f of failures.slice(0, 10)) console.log(`\n${f}`);
   process.exit(1);
 } else {
-  console.log("  全部与 stock zod4 一致 ✓");
+  console.log("  all cases agree with stock zod4 ✓");
 }

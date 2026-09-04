@@ -1,17 +1,17 @@
 /**
- * 冒烟：record/map/set CoW 骨架行为。
+ * Smoke: CoW skeleton behavior for record/map/set.
  */
 import assert from "node:assert/strict";
 import { z } from "zod4";
 import { compile } from "../src/index-z4.js";
 
-/* ── record：bare-string 键 ── */
+/* ── record: bare-string keys ── */
 {
   const S = z.record(z.string(), z.number());
   const C = compile(S);
   const input = { a: 1, b: 2 };
   console.log("── record bare-string ──");
-  console.log("  干净 out === input:", C.parse(input) === input);
+  console.log("  clean out === input:", C.parse(input) === input);
   assert.equal(C.parse(input), input);
 
   const S2 = z.record(z.string(), z.object({ n: z.number(), flag: z.boolean() }));
@@ -20,7 +20,7 @@ import { compile } from "../src/index-z4.js";
   const input2 = { a: inner, b: { n: 2, flag: false } };
   const out2 = C2.parse(input2) as typeof input2;
   console.log(
-    "  嵌套 object 值: out === input:",
+    "  nested object value: out === input:",
     out2 === input2,
     " out.a === inner:",
     out2.a === inner,
@@ -28,74 +28,79 @@ import { compile } from "../src/index-z4.js";
   assert.equal(out2, input2);
   assert.equal(out2.a, inner);
 
-  // 值含 default → 脏
+  // Value contains a default → dirty
   const S3 = z.record(z.string(), z.object({ n: z.number(), tag: z.string().default("x") }));
   const C3 = compile(S3);
   const input3 = { a: { n: 1 } };
   const out3 = C3.parse(input3) as any;
-  console.log("  值 default 注入: out.a.tag =", out3.a.tag, " input 未失真:", !("tag" in input3.a));
+  console.log(
+    "  default injected into a value: out.a.tag =",
+    out3.a.tag,
+    " input undistorted:",
+    !("tag" in input3.a),
+  );
   assert.equal(out3.a.tag, "x");
   assert.ok(!("tag" in input3.a));
 }
 
-/* ── record：数值键重试（键名转换） ── */
+/* ── record: numeric-key retry (key-name conversion) ── */
 {
   const S = z.record(z.number(), z.string());
   const C = compile(S);
-  const input = { 1: "a", 2: "b" }; // JS 对象键恒为字符串 "1","2"
+  const input = { 1: "a", 2: "b" }; // JS object keys are always the strings "1","2"
   const out = C.parse(input) as Record<string, string>;
-  console.log("\n── record 数值键（键名转换） ──");
+  console.log("\n── record numeric keys (key-name conversion) ──");
   console.log(
     "  out:",
     JSON.stringify(out),
     " out === input:",
     out === input,
-    "（stock 键名也是数字→字符串化）",
+    "(stock stringifies numeric keys too)",
   );
   assert.deepEqual(out, input);
-  // stock 对照：stock 也输出字符串化键
+  // Stock comparison: stock also outputs stringified keys
   const stockOut = (S as any).parse(input);
   assert.deepEqual(out, stockOut);
 }
 
-/* ── record：enum 键声明驱动 ── */
+/* ── record: enum keys are declaration-driven ── */
 {
   const S = z.record(z.enum(["a", "b"]), z.number());
   const C = compile(S);
   const input = { a: 1, b: 2 };
   const out = C.parse(input) as typeof input;
-  console.log("\n── record enum 键（声明驱动） ──");
-  console.log("  干净 out === input:", out === input);
+  console.log("\n── record enum keys (declaration-driven) ──");
+  console.log("  clean out === input:", out === input);
   assert.equal(out, input);
 
-  const input2 = { a: 1, b: 2, extra: 3 }; // 未知键 → stock strict 拒绝
+  const input2 = { a: 1, b: 2, extra: 3 }; // unknown key → stock strict rejects it
   assert.equal(C.safeParse(input2).success, false);
-  const input3 = { a: 1 }; // 缺声明键 b → stock 拒绝（required）
+  const input3 = { a: 1 }; // declared key b missing → stock rejects (required)
   assert.equal(C.safeParse(input3).success, false);
-  // 缺失但值 optional → stock 物化 undefined → 脏
+  // Missing but the value is optional → stock materializes undefined → dirty
   const S2 = z.record(z.enum(["a", "b"]), z.number().optional());
   const C2 = compile(S2);
   const input4 = { a: 1 };
   const out4 = C2.parse(input4) as any;
   console.log(
-    "  缺 b + optional 值: out.b =",
+    "  b missing + optional value: out.b =",
     out4.b,
     " out === input:",
     out4 === input,
-    "（stock 物化 undefined → 必脏）",
+    "(stock materializes undefined → always dirty)",
   );
   assert.equal(out4.b, undefined);
   assert.notEqual(out4, input4);
   assert.ok(!("b" in input4));
 }
 
-/* ── record：string format 键（general path，键名不变） ── */
+/* ── record: string-format keys (general path, key names unchanged) ── */
 {
   const S = z.record(z.email(), z.number());
   const C = compile(S);
   const input = { "a@b.co": 1, "c@d.co": 2 };
   const out = C.parse(input) as typeof input;
-  console.log("\n── record email 键（general，键名不变） ──");
+  console.log("\n── record email keys (general, key names unchanged) ──");
   console.log("  out === input:", out === input);
   assert.equal(out, input);
 }
@@ -110,7 +115,7 @@ import { compile } from "../src/index-z4.js";
   ]);
   const out = C.parse(input) as Map<string, number>;
   console.log("\n── map ──");
-  console.log("  干净 out === input:", out === input);
+  console.log("  clean out === input:", out === input);
   assert.equal(out, input);
 
   const S2 = z.map(z.string(), z.object({ n: z.number(), tag: z.string().default("t") }));
@@ -118,16 +123,16 @@ import { compile } from "../src/index-z4.js";
   const input2 = new Map([["a", { n: 1 }]]);
   const out2 = C2.parse(input2) as Map<string, any>;
   console.log(
-    "  值 default 注入: out.get('a').tag =",
+    "  default injected into a value: out.get('a').tag =",
     out2.get("a")!.tag,
-    " input 未失真:",
+    " input undistorted:",
     !("tag" in input2.get("a")!),
   );
   assert.equal(out2.get("a")!.tag, "t");
   assert.notEqual(out2, input2);
   assert.ok(!("tag" in input2.get("a")!));
 
-  // Map 自身 checks
+  // Checks on the Map itself
   const S3 = z.map(z.string(), z.number()).min(1);
   const C3 = compile(S3);
   assert.equal(C3.parse(input) === input, true);
@@ -142,7 +147,7 @@ import { compile } from "../src/index-z4.js";
   const input = new Set([1, 2, 3]);
   const out = C.parse(input) as Set<number>;
   console.log("\n── set ──");
-  console.log("  干净 out === input:", out === input);
+  console.log("  clean out === input:", out === input);
   assert.equal(out, input);
 
   const S2 = z.set(z.object({ n: z.number(), tag: z.string().default("s") }));
@@ -150,7 +155,12 @@ import { compile } from "../src/index-z4.js";
   const item = { n: 1 };
   const input2 = new Set([item]);
   const out2 = C2.parse(input2) as Set<any>;
-  console.log("  成员 default 注入: out.size =", out2.size, " input 未失真:", !("tag" in item));
+  console.log(
+    "  default injected into a member: out.size =",
+    out2.size,
+    " input undistorted:",
+    !("tag" in item),
+  );
   assert.equal(out2.size, 1);
   assert.equal([...out2][0]!.tag, "s");
   assert.notEqual(out2, input2);
@@ -164,7 +174,7 @@ import { compile } from "../src/index-z4.js";
   console.log("  .max(2) size check ✓");
 }
 
-/* ── 顶层/键位/元素位的容器组合 ── */
+/* ── container combinations at the top level / key position / element position ── */
 {
   const S = z.object({
     dict: z.record(z.string(), z.number()).optional(),
@@ -178,7 +188,7 @@ import { compile } from "../src/index-z4.js";
     tags: new Set(["x"]),
   };
   const out = C.parse(input) as typeof input;
-  console.log("\n── 容器组合（optional record / nullable map / set） ──");
+  console.log("\n── container combinations (optional record / nullable map / set) ──");
   console.log("  out === input:", out === input);
   console.log("  out.dict === input.dict:", out.dict === input.dict);
   console.log("  out.lookup === input.lookup:", out.lookup === input.lookup);
@@ -187,4 +197,4 @@ import { compile } from "../src/index-z4.js";
   assert.equal(out.lookup, input.lookup);
 }
 
-console.log("\nrecord/map/set 冒烟断言全部通过 ✓");
+console.log("\nAll record/map/set smoke assertions passed ✓");

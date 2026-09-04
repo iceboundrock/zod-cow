@@ -1,12 +1,12 @@
-# Upstream Issue Draft — 给 zod 上游的 issue 草稿
+# Upstream issue draft for zod
 
-> **使用说明（给本项目维护者）**：以下英文正文可直接粘贴到 colinhacks/zod 的新 issue。
-> 标题建议：`[v4] Promote the internal JIT compiler (compileFn / assertOnly) to a public, supported API`
+> **Maintainer notes (not part of the issue).** The body below can be pasted as is into a new issue on colinhacks/zod.
+> Suggested title: `[v4] Promote the internal JIT compiler (compileFn / assertOnly) to a public, supported API`
 >
-> 素材来源：`docs/ARCHITECTURE-z4.md`（架构对比文档）、`bench/bench-z4.ts`（可复现基准）、
-> `tests/differential-z4.test.ts`（5 万 case 差分）。
-> 数据锚点：zod 4.5.4，node v24.19.0，`--expose-gc`，3 轮取中位，50 万条记录。
-> §7 的 runtime quirk 若上游更愿意先修 bug，可拆成独立 issue 提交。
+> Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `bench/bench-z4.ts` (reproducible benchmarks),
+> `tests/differential-z4.test.ts` (50 000-case differential suite).
+> Data anchor: zod 4.5.4, node v24.19.0, `--expose-gc`, median of 3 runs, 500 000 records.
+> If upstream would rather fix the bug first, the runtime quirk in the "Bonus" section can be filed as a separate issue.
 
 ---
 
@@ -129,10 +129,10 @@ Reproduction, differential suite, and benchmarks: `cow-zod-prototype` (local pro
 
 ---
 
-### 附：草稿要点自查（维护者用，不随 issue 提交）
+### Appendix: draft self-check (for the maintainer, not submitted with the issue)
 
-- [x] 每个基准数字都能在 `bench/bench-z4.ts` 中复现（S1–S7 全场景）
-- [x] 依赖表与 `docs/ARCHITECTURE-z4.md` §9 一致，新增 `getTupleOptStart`/`dropsWhenAbsent`（Task 6 tuple 骨架引入）
-- [x] §7 的 quirk 最小复现已在本项目 `node` REPL 验证（ownKeys 稳定 "0,2,length"，sync rest 正常）
-- [x] 语气：请求转正 + 附带 bug 报告（非需求清单）；API 形状刻意保持最小
-- [ ] 提交前建议：检查 colinhacks/zod 是否已有 `zod/compile` 相关 issue/PR，引用并补充而非重开
+- [x] Every benchmark number is reproducible from `bench/bench-z4.ts` (all scenarios S1 to S7)
+- [x] The dependency table matches `docs/ARCHITECTURE-z4.md` §9, including `getTupleOptStart` / `dropsWhenAbsent` introduced by the tuple skeleton (v0.5)
+- [x] The minimal reproduction of the quirk in the "Bonus" section was verified in a `node` REPL of this project (ownKeys is stably "0,2,length", sync rest parses correctly)
+- [x] Tone: a request to promote an existing surface plus an attached bug report, not a wish list; the proposed API shape is deliberately minimal
+- [ ] Before submitting: check whether colinhacks/zod already has an issue or PR about `zod/compile`, and reference and extend it rather than opening a duplicate

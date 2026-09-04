@@ -12,6 +12,8 @@
 
 ## TL;DR
 
+The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v24) taken while both front-ends still existed, so the two columns are comparable; the current CI numbers are in §7.
+
 | | v1 (self-written codegen) | zc-z4 (official codegen + CoW decoration) |
 |---|---|---|
 | Self-written code size | ~1100 lines of semantic codegen + official regexes copied verbatim | ~760 lines (purity analysis + 6 container skeletons + async channel) |
@@ -389,7 +391,7 @@ A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-137
    (the case where a trailing optional truncates to the input length can keep the original reference).
 
 The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
-(S6: 4.57x vs stock / 3.06x vs the official parser, the highest ratio of all scenarios).
+(S6: 4.39x vs stock / 2.47x vs the official parser, the highest ratio of all scenarios).
 
 ### 5.5 async channel (added in v0.5)
 
@@ -413,7 +415,7 @@ A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncEr
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
 
 In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
-(S7: an async transform scenario over 50 000 rows, 2.50x vs stock safeParseAsync, allocation -63%).
+(S7: an async transform scenario over 5 000 rows, 3.23x vs stock safeParseAsync, allocation -32%).
 
 ## 6. Degradation chain state machine
 
@@ -449,43 +451,43 @@ compiles as usual. The lazy subtree goes through the official parser product at 
 brings its own cache-parser black box that handles circular references correctly (smoke test #9: `stock: false` and the semantics are normal).
 What really degrades the whole tree is a top-level recursive schema (a circular reference in the def tree, which the official compileFn rejects).
 
-## 7. Benchmarks (500 000 accounts, node v24, --expose-gc, median of 3 runs)
+## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, median of 3 runs)
 
-The `zc-v1` column is the last measurement taken before that front-end was deleted, kept as a historical comparison; today's `bench:z4` no longer runs it.
+The numbers come from [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`. The earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, is kept in the CHANGELOG under v0.5; today's `bench:z4` no longer runs v1.
 
-| Scenario | stock | official compileFn parser | zc-z4 | zc-v1 | arktype |
-|---|---|---|---|---|---|
-| S1 pure validation | 654ms | 263ms | **283ms** | 521ms | 144ms |
-| S1 allocation pressure | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
-| S1 retained after GC | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
-| S2 dirty load (10% default) | 619ms | 363ms | **247ms** | 504ms | — |
-| S3 sweep 0% / 25% / 50% / 100% dirty | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
-| S3 zc-z4 retained | +123.3MB constant | — | **0 / 20 / 36 / 68.7MB** | — | — |
-| S4 validate | — | 219ms (per account) | **50ms** | — | 144ms |
-| S5 record/map/set | 922ms | 681ms | **353ms** | not supported | — |
-| S5 allocation pressure | +256.1MB | +245.3MB | **+38.1MB** | — | — |
-| S5 retained after GC | +217.4MB | +217.4MB | **0.0MB** | — | — |
-| S6 tuple | 508ms | 340ms | **111ms** | not supported | — |
-| S6 allocation pressure / retained | +214.0MB / +206MB | +202.2MB / +202MB | **+15.3MB / 0MB** | — | — |
-| S7 async transform (50 000 rows) | 262ms (safeParseAsync) | compile rejected | **105ms (safeParseAsync)** | not supported | — |
-| S7 allocation pressure | +95.6MB | — | **+34.9MB** | — | — |
+| Scenario | stock | official compileFn parser | zc-z4 | arktype |
+|---|---|---|---|---|
+| S1 pure validation | 65ms | 21ms | **23ms** | 9ms |
+| S1 allocation pressure | +63.5MB | +11.0MB | **+3.1MB** | +2.7MB |
+| S1 retained after GC | +12.4MB | +10.8MB | **0.0MB** | 0.0MB |
+| S2 dirty load (10% default) | 51ms | 23ms | **25ms** | — |
+| S3 sweep 0% / 25% / 50% / 100% dirty | 45/49/49/45ms | 22/28/23/29ms | **24/29/27/29ms** | — |
+| S3 zc-z4 retained | +12.3MB constant | — | **0.0 / 2.0 / 3.6 / 6.9MB** | — |
+| S4 validate | — | 13ms (per account) | **3ms** | 9ms |
+| S5 record/map/set | 68ms | 46ms | **31ms** | — |
+| S5 allocation pressure | +50.9MB | +60.7MB | **+29.4MB** | — |
+| S5 retained after GC | +21.7MB | +21.7MB | **0.0MB** | — |
+| S6 tuple | 29ms | 16ms | **7ms** | — |
+| S6 allocation pressure / retained | +53.4MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | — |
+| S7 async transform (5 000 rows) | 16ms (safeParseAsync) | compile rejected | **5ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.5MB | — | **+9.9MB** | — |
 
 How to read it:
 
-1. Against stock: 2.31x (S1) ~ 2.50x (S2) ~ 2.61x (S5) ~ **4.57x (S6 tuple, the highest of all scenarios)**,
-   with retained memory going from 123~217MB to zero; the async scenario (S7) is 2.50x.
-2. Against the official JIT parser: level in clean scenarios (S1 0.93~1.00x, within batch-to-batch noise; the output
-   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in dirty scenarios (S2 1.47x, S5 1.93x, S6 3.06x),
-   because the default shallowClone and whole-tree rebuild of the official stock semantics are a fixed cost, while CoW only pays for the paths
-   that actually got dirty. The 3.06x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
+1. Against stock: 2.09x (S2) ~ 2.23x (S5) ~ 2.86x (S1) ~ 4.39x (S6 tuple, the highest of all scenarios),
+   with retained memory going from 12~22MB to zero; the async scenario (S7) is 3.23x.
+2. Against the official JIT parser: level in the object scenarios (S1 and S2 both 0.92x, a 2ms gap at this record count and within runner noise; the output
+   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in the container scenarios (S5 1.50x, S6 2.47x),
+   because the whole-tree rebuild of the official stock semantics is a fixed cost, while CoW only pays for the paths
+   that actually got dirty. The 2.47x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
    while the slots barely change), so CoW decoration gains the most there.
 3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
-   skeleton; an all-dirty async transform scenario is still 2.50x, with allocation -63% (95.6→34.9MB).
-4. validate fast path: the official assertOnly whole-tree product, 50ms / 500 000 = 100ns per account,
-   4.4x faster than the official per-account call (219ms, including payload wrapping), with zero allocation.
+   skeleton; an all-dirty async transform scenario is still 3.23x, with allocation -32% (14.5→9.9MB).
+4. validate fast path: the official assertOnly whole-tree product, 3ms / 50 000 = 60ns per account,
+   4.3x faster than the official per-account call (13ms, including payload wrapping), with zero allocation.
 
-S1's +30.5MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
-and nothing is retained after GC: CoW itself copies nothing. v1's 12.1MB is lower, but it is twice as slow; the trade-off between speed and
+S1's +3.1MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
+and nothing is retained after GC: CoW itself copies nothing. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and
 a small amount of short-lived allocation was decided in favor of zc-z4 in a production context (where minor GC is cheap), which is also one of the reasons v1 was eventually removed.
 
 ## 8. Correctness evidence
@@ -535,8 +537,8 @@ which would remove the largest single internal dependency.
   not two options still being maintained.
 - zc-z4 (official codegen + CoW decoration) is the right answer for the zod4 era: semantic correctness is outsourced to the official
   compiler and runtime, the self-written surface shrinks to "purity analysis + 6 container skeletons + async channel", and upstream
-  optimizations benefit it automatically; speed is level with the official JIT and ahead in dirty scenarios by 1.5~1.9x, tuple 3.1x, async 2.5x
-  (2.3~4.6x against stock), with GC-retained memory down to zero.
+  optimizations benefit it automatically; speed is level with the official JIT on objects and ahead on containers (record/map/set 1.5x, tuple 2.5x), async 3.2x vs stock
+  (2.1~4.4x against stock overall), with GC-retained memory down to zero.
 - Both routes share the same CoW mental model: reference comparison is the dirty signal, path-copying is the copy strategy.
   The only difference is who implements the validation and transformation layer.
 

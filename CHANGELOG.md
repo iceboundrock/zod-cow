@@ -13,6 +13,7 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - The zod4 engine was split from one file into cohesive modules under `src/cow4/` (product contract, code context, copied predicates, purity analysis, official-product wrappers, codegen core, one skeleton module per container). Section 11 of `docs/ARCHITECTURE-z4.md` maps modules to document sections (#5, #20).
 - Package management moved to pnpm 11 with a Node.js >= 22.13.0 floor (#11).
 - All code comments and test/bench output strings were translated to English (#6, #21, #22, #23, #24). The README, the architecture document and this changelog followed in #7; the Chinese README is `README.zh-CN.md` and the Chinese architecture text is kept as a frozen snapshot in `docs/ARCHITECTURE-z4.zh-CN.md`.
+- The benchmark tables in both READMEs, `docs/ARCHITECTURE-z4.md` §7 and the upstream issue draft now quote [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, median of 3 runs) instead of a local 500 000-record run. The superseded v0.5 table is kept below under 0.5.0.
 
 ### Added
 
@@ -49,7 +50,24 @@ Tuple CoW skeleton, async schema support, upstream issue draft.
 - S6 tuple: 4.57x vs stock, 3.06x vs the official parser (the highest ratio of all scenarios; tuple is the container with the largest share of reconstruction cost).
 - S7 async (50 000 rows): 2.50x vs stock `safeParseAsync`, allocation -63%.
 
-The full v0.5 table (S1 to S7) is the current table in the [README](README.md#benchmarks) and in `docs/ARCHITECTURE-z4.md` §7.
+The full v0.5 table (S1 to S7), superseded by the CI-run table in the [README](README.md#benchmarks). The `zc-v1` column is the last measurement of the front-end removed in #4.
+
+| Scenario | stock | official compileFn parser | zc-z4 | zc-v1 | arktype |
+|---|---|---|---|---|---|
+| S1 pure validation | 654ms | 263ms | **283ms** | 521ms | 144ms |
+| S1 allocation pressure | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
+| S1 retained after GC | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
+| S2 dirty load (10% default) | 619ms | 363ms | **247ms** | 504ms | — |
+| S3 sweep 0% / 25% / 50% / 100% dirty | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
+| S3 zc-z4 retained | +123.3MB constant | — | **0 / 20 / 36 / 68.7MB** | — | — |
+| S4 validate | — | 219ms (per account) | **50ms** | — | 144ms |
+| S5 record/map/set | 922ms | 681ms | **353ms** | not supported | — |
+| S5 allocation pressure | +256.1MB | +245.3MB | **+38.1MB** | — | — |
+| S5 retained after GC | +217.4MB | +217.4MB | **0.0MB** | — | — |
+| S6 tuple | 508ms | 340ms | **111ms** | not supported | — |
+| S6 allocation pressure / retained | +214.0MB / +206MB | +202.2MB / +202MB | **+15.3MB / 0MB** | — | — |
+| S7 async transform (50 000 rows) | 262ms (safeParseAsync) | compile rejected | **105ms (safeParseAsync)** | not supported | — |
+| S7 allocation pressure | +95.6MB | — | **+34.9MB** | — | — |
 
 ## [0.4.0]
 

@@ -41,13 +41,15 @@ pnpm exec tsx examples/demo.ts   # 60-second demo of the three CoW promises (zod
 
 Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200 × 100). `REPRO=seed:case` re-runs one failing zod4 differential case and dumps the schema, input and generated code. `BENCH_N` sets the benchmark record count.
 
-> CI benchmark runs are smoke results, not reference numbers. The
-> [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
-> runs `bench:z4` and `bench` manually (or weekly) with a reduced `BENCH_N`
-> (default 50 000) and prints the tables in the job summary. It exists to catch
-> broken bench scripts and to show a rough shape without cloning; GitHub-hosted
-> runners are too noisy for the numbers to be compared across runs. All numbers
-> in this README and in `docs/` come from local runs (node v24, 500 000 records).
+> The benchmark tables in this README and in `docs/` come from the
+> [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml),
+> [run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881):
+> a GitHub-hosted `ubuntu-latest` runner, node v24, `BENCH_N=50 000`, median of
+> 3 runs. The workflow runs `bench:z4` and `bench` manually or weekly and prints
+> the tables in the job summary. Runner noise is a few milliseconds at this
+> record count, so ratios close to 1.0x (S1 and S2 against the official parser)
+> should be read as level. A local `pnpm run bench:z4` uses the script default
+> of 500 000 records.
 
 ## Usage
 
@@ -138,32 +140,32 @@ The full design, with generated code dumped side by side against the official pr
 
 ## Benchmarks
 
-zod4 line, v0.5 measurement: 500 000 accounts, node v24.19, `--expose-gc`, median of 3 runs (`pnpm run bench:z4`). "official parser" is zod4's own `compileFn` parser product.
+zod4 line, [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs (`pnpm run bench:z4` with `BENCH_N=50000`). "official parser" is zod4's own `compileFn` parser product.
 
 | Scenario | stock zod4 | official parser | **zc-z4 (CoW)** | arktype |
 |---|---|---|---|---|
-| S1 pure validation | 654 ms | 263 ms | **283 ms** | 144 ms |
-| S1 allocation pressure | +160.5 MB | +111.0 MB | **+30.5 MB** | +26.7 MB |
-| S1 retained after GC | +123.4 MB | +108.1 MB | **0.0 MB** | 0.0 MB |
-| S2 dirty load (10% default injection) | 619 ms | 363 ms | **247 ms** | — |
-| S3 sweep, 0% / 25% / 50% / 100% dirty | 622 / 647 / 679 / 660 ms | 391 / 415 / 452 / 449 ms | **245 / 268 / 311 / 404 ms** | — |
-| S3 retained after GC | +123.3 MB constant | — | **0 / 20 / 36 / 68.7 MB** | — |
-| S4 validate | — | 219 ms (per account) | **50 ms** | 144 ms |
-| S5 record / map / set | 922 ms | 681 ms | **353 ms** | — |
-| S5 allocation pressure / retained | +256.1 MB / +217.4 MB | +245.3 MB / +217.4 MB | **+38.1 MB / 0.0 MB** | — |
-| S6 tuple | 508 ms | 340 ms | **111 ms** | — |
-| S6 allocation pressure / retained | +214.0 MB / +206 MB | +202.2 MB / +202 MB | **+15.3 MB / 0 MB** | — |
-| S7 async transform (50 000 rows) | 262 ms (safeParseAsync) | compile refused | **105 ms (safeParseAsync)** | — |
-| S7 allocation pressure | +95.6 MB | — | **+34.9 MB** | — |
+| S1 pure validation | 65 ms | 21 ms | **23 ms** | 9 ms |
+| S1 allocation pressure | +63.5 MB | +11.0 MB | **+3.1 MB** | +2.7 MB |
+| S1 retained after GC | +12.4 MB | +10.8 MB | **0.0 MB** | 0.0 MB |
+| S2 dirty load (10% default injection) | 51 ms | 23 ms | **25 ms** | — |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 45 / 49 / 49 / 45 ms | 22 / 28 / 23 / 29 ms | **24 / 29 / 27 / 29 ms** | — |
+| S3 retained after GC | +12.3 MB constant | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
+| S4 validate | — | 13 ms (per account) | **3 ms** | 9 ms |
+| S5 record / map / set | 68 ms | 46 ms | **31 ms** | — |
+| S5 allocation pressure / retained | +50.9 MB / +21.7 MB | +60.7 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
+| S6 tuple | 29 ms | 16 ms | **7 ms** | — |
+| S6 allocation pressure / retained | +53.4 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | — |
+| S7 async transform (5 000 rows) | 16 ms (safeParseAsync) | compile refused | **5 ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.5 MB | — | **+9.9 MB** | — |
 
 How to read it:
 
-- Against stock: 2.31x on S1, 2.61x on S5 and 4.57x on S6 (tuple, the highest), and the 123 to 217 MB retained after GC drops to zero. Async (S7) is 2.50x.
-- Against the official JIT parser: level on clean input (S1 0.93x to 1.00x, within run-to-run noise, since the output construction the skeleton skips pays for the sub-skeleton calls). Ahead on dirty input (S2 1.47x, S5 1.93x, S6 3.06x): the default `shallowClone` and the whole-tree rebuild are fixed costs of stock semantics, while CoW pays only for the paths that changed.
-- validate fast path: the official whole-tree `assertOnly` product does 50 ms / 500 000 = 100 ns per account with zero allocation.
-- The +30.5 MB in S1 is short-lived allocation inside the official leaf products (datetime/email format temporaries); the CoW layer itself copies nothing.
+- Against stock: 2.09x on S2, 2.23x on S5, 2.86x on S1 and 4.39x on S6 (tuple, the highest), and the 12 to 22 MB retained after GC drops to zero. Async (S7) is 3.23x.
+- Against the official JIT parser: level on the object scenarios (S1 and S2 both 0.92x, a 2 ms gap at this record count and within runner noise, since the output construction the skeleton skips pays for the sub-skeleton calls). Ahead on the container scenarios (S5 1.50x, S6 2.47x): the whole-tree rebuild is a fixed cost of stock semantics, while CoW pays only for the paths that changed.
+- validate fast path: the official whole-tree `assertOnly` product does 3 ms / 50 000 = 60 ns per account with zero allocation.
+- The +3.1 MB in S1 is short-lived allocation inside the official leaf products (datetime/email format temporaries); the CoW layer itself copies nothing.
 
-The zod3 line measured 4.3 to 5.0x against stock zod 3.24.1 (which still pays the interpreter tax). That table, and the tables of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
+The zod3 line measured about 4.4x against stock zod 3.24.1 in the same run (S1 4.37x, S2 4.43x; stock zod3 still pays the interpreter tax). The earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 
 ## Correctness evidence
 

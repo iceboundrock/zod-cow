@@ -1,10 +1,10 @@
 name: Benchmarks
 
-# Manual and weekly only. GitHub-hosted runners are too noisy for the numbers
-# to be comparable across runs; this workflow exists to (a) prove the bench
-# scripts still run after refactors and (b) show a rough result in the job
-# summary without cloning the repo. Reference numbers in README/docs come
-# from local runs.
+# Manual and weekly only. The benchmark tables in the README and docs quote
+# one run of this workflow by run id (GitHub-hosted runner, node 24,
+# BENCH_N=50 000). Runner noise is a few milliseconds at that record count, so
+# ratios close to 1.0x should be read as level. The workflow also proves the
+# bench scripts still run after refactors.
 on:
   workflow_dispatch:
     inputs:
@@ -83,7 +83,7 @@ jobs:
             echo "## Benchmark smoke run"
             echo
             echo "> Smoke results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
-            echo "> Runner noise makes these numbers non-comparable across runs; reference numbers live in the README and come from local runs."
+            echo "> The README tables quote one run of this workflow by run id; runner noise is a few milliseconds at this record count."
             echo
             section "zod 4 (bench:z4)" bench-z4.txt
             section "zod 3 (bench)" bench-z3.txt

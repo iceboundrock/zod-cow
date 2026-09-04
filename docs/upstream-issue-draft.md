@@ -5,7 +5,7 @@
 >
 > Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `bench/bench-z4.ts` (reproducible benchmarks),
 > `tests/differential-z4.test.ts` (50 000-case differential suite).
-> Data anchor: zod 4.5.4, node v24.19.0, `--expose-gc`, median of 3 runs, 500 000 records.
+> Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)).
 > If upstream would rather fix the bug first, the runtime quirk in the "Bonus" section can be filed as a separate issue.
 
 ---
@@ -22,7 +22,7 @@ The interpreter (`schema.safeParse`) always rebuilds the entire output tree, eve
 
 1. Structural-sharing (CoW) parse layers. The compiler emits unconditional new containers (`const out = {...}`, `new Array(n)`). A thin layer that rewrites container emission into "compare child outputs by reference and copy only when something changed" gets the gains shown in the benchmarks below, and it cannot be built without access to the compiled artifacts.
 2. Validation-only paths. The `assertOnly` artifact validates the full tree and skips output construction. That suits request validation, form validation and column-level checks in table UIs, where the input object is usually reused as is.
-3. Async trees. Stock async parse walks the schema interpretively and allocates a promise per node. A compiled skeleton that `await`s black-box islands only where the async code lives, and keeps synchronous reference comparison everywhere else, measured 2.43x on 50k rows with 74% less allocation pressure.
+3. Async trees. Stock async parse walks the schema interpretively and allocates a promise per node. A compiled skeleton that `await`s black-box islands only where the async code lives, and keeps synchronous reference comparison everywhere else, measured 3.23x on 5k rows with 32% less allocation pressure.
 
 ### What exists today
 
@@ -56,20 +56,20 @@ Three artifact contracts we rely on:
 
 zc-z4 is a CoW post-processor over the official compiler. A purity analysis picks an official artifact for each subtree. The layer itself only emits container skeletons (object, array, tuple, record, map, set) in which the unconditional new container is replaced by a reference comparison that acts as the dirty signal, with a copy made on the first forced write. Any `INVALID` falls back to stock `safeParse`, so issues, paths and `ZodError` behave as in stock. A randomized differential run of 50k cases against stock found 0 divergences.
 
-Node v24, `--expose-gc`, median of 3 passes, 500k records (`BENCH_N` adjustable):
+GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 passes, 50k records (`BENCH_N` adjustable; [Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)):
 
 | Scenario | stock zod4 | official parser (JIT) | **zc-z4 (CoW)** | stock/z4 | JIT/z4 | allocation (stock → z4) | retained after GC |
 |---|---|---|---|---|---|---|---|
-| S1 pure objects | 654ms | 263ms | **283ms** | 2.31x | 0.93x | 162MB → 30.5MB | 123MB → **0** |
-| S2 dirty 10% (default inject) | 619ms | 363ms | **247ms** | 2.50x | 1.47x | 149MB → 41.6MB | 123MB → 10.3MB* |
-| S5 record+map+set | 922ms | 681ms | **353ms** | 2.61x | 1.93x | 256MB → 38MB | 217MB → **0** |
-| S6 tuple | 508ms | 340ms | **111ms** | 4.57x | 3.06x | 214MB → 15.3MB | 206MB → **0** |
-| S7 async transform (50k rows) | 262ms | (unsupported) | **105ms** | 2.50x | — | 95.6MB → 34.9MB | — |
-| validate fast path (per-account) | 219ms | — | **50ms** | 4.4x | — | — | — |
+| S1 pure objects | 65ms | 21ms | **23ms** | 2.86x | 0.92x | 63.5MB → 3.1MB | 12.4MB → **0** |
+| S2 dirty 10% (default inject) | 51ms | 23ms | **25ms** | 2.09x | 0.92x | 63.5MB → 4.2MB | 12.4MB → 1.0MB* |
+| S5 record+map+set | 68ms | 46ms | **31ms** | 2.23x | 1.50x | 50.9MB → 29.4MB | 21.7MB → **0** |
+| S6 tuple | 29ms | 16ms | **7ms** | 4.39x | 2.47x | 53.4MB → 1.5MB | 20.6MB → **0** |
+| S7 async transform (5k rows) | 16ms | (unsupported) | **5ms** | 3.23x | — | 14.5MB → 9.9MB | — |
+| validate fast path (per-account) | 13ms | — | **3ms** | 4.3x | — | — | — |
 
-\* S2 retains 10.3MB because the injected `default("viewer")` values are genuinely new strings the caller didn't have.
+\* S2 retains 1.0MB because the injected `default("viewer")` values are genuinely new strings the caller didn't have.
 
-The deeper and heavier the containers, the more of stock's time goes into output construction, and the more CoW saves. Tuple was the biggest surprise (3.06x over the official parser): numeric tuples get a `new Array` on every parse yet almost never change.
+The deeper and heavier the containers, the more of stock's time goes into output construction, and the more CoW saves. Tuple was the biggest surprise (2.47x over the official parser): numeric tuples get a `new Array` on every parse yet almost never change.
 
 ### The internal surface we depend on
 

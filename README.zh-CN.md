@@ -43,11 +43,12 @@ pnpm exec tsx examples/demo.ts   # 60 秒 demo：CoW 的三个承诺（zod3 线�
 
 环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码；`BENCH_N` 设定基准记录数。
 
-> CI 里的基准跑的是冒烟结果，不是参考数字。
+> 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
-> 只在手动触发（或每周）时用缩小的 `BENCH_N`（默认 50 000）跑 `bench:z4` 和 `bench`，把表格打印到 job summary。
-> 它的作用是发现跑坏的 bench 脚本、不用 clone 就能看到大致形状；GitHub 托管 runner 噪声太大，跨次数字不可比。
-> 本 README 和 `docs/` 中的所有数字都来自本地运行（node v24，50 万条记录）。
+> 的 [run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)：GitHub 托管的 `ubuntu-latest` runner，node v24，`BENCH_N=50 000`，3 轮取中位。
+> 该 workflow 在手动触发（或每周）时跑 `bench:z4` 和 `bench`，把表格打印到 job summary。
+> 在这个记录数下 runner 噪声有几毫秒，接近 1.0x 的比值（S1、S2 对官方 parser）应视为持平。
+> 本地 `pnpm run bench:z4` 使用脚本默认的 50 万条记录。
 
 ## 使用
 
@@ -138,32 +139,32 @@ zod3 线则靠探针对齐（`src/probe.ts` 在运行时实测 stock zod3 的边
 
 ## 基准
 
-zod4 线，v0.5 测量：50 万账户，node v24.19，`--expose-gc`，3 轮取中位（`pnpm run bench:z4`）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物。
+zod4 线，[Benchmarks workflow run 33831110881](https://github.com/iceboundrock/zod-cow/actions/runs/33831110881)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，3 轮取中位（`pnpm run bench:z4`，`BENCH_N=50000`）。"官方 parser"指 zod4 自己的 `compileFn` parser 产物。
 
 | 场景 | stock zod4 | 官方 parser | **zc-z4（CoW）** | arktype |
 |---|---|---|---|---|
-| S1 纯校验 | 654 ms | 263 ms | **283 ms** | 144 ms |
-| S1 分配压力 | +160.5 MB | +111.0 MB | **+30.5 MB** | +26.7 MB |
-| S1 gc 后驻留 | +123.4 MB | +108.1 MB | **0.0 MB** | 0.0 MB |
-| S2 脏负载（10% default 注入） | 619 ms | 363 ms | **247 ms** | — |
-| S3 扫描 0% / 25% / 50% / 100% 脏 | 622 / 647 / 679 / 660 ms | 391 / 415 / 452 / 449 ms | **245 / 268 / 311 / 404 ms** | — |
-| S3 gc 后驻留 | +123.3 MB 恒定 | — | **0 / 20 / 36 / 68.7 MB** | — |
-| S4 validate | — | 219 ms（逐账户） | **50 ms** | 144 ms |
-| S5 record / map / set | 922 ms | 681 ms | **353 ms** | — |
-| S5 分配压力 / 驻留 | +256.1 MB / +217.4 MB | +245.3 MB / +217.4 MB | **+38.1 MB / 0.0 MB** | — |
-| S6 tuple | 508 ms | 340 ms | **111 ms** | — |
-| S6 分配压力 / 驻留 | +214.0 MB / +206 MB | +202.2 MB / +202 MB | **+15.3 MB / 0 MB** | — |
-| S7 async transform（5 万条） | 262 ms（safeParseAsync） | 编译拒绝 | **105 ms（safeParseAsync）** | — |
-| S7 分配压力 | +95.6 MB | — | **+34.9 MB** | — |
+| S1 纯校验 | 65 ms | 21 ms | **23 ms** | 9 ms |
+| S1 分配压力 | +63.5 MB | +11.0 MB | **+3.1 MB** | +2.7 MB |
+| S1 gc 后驻留 | +12.4 MB | +10.8 MB | **0.0 MB** | 0.0 MB |
+| S2 脏负载（10% default 注入） | 51 ms | 23 ms | **25 ms** | — |
+| S3 扫描 0% / 25% / 50% / 100% 脏 | 45 / 49 / 49 / 45 ms | 22 / 28 / 23 / 29 ms | **24 / 29 / 27 / 29 ms** | — |
+| S3 gc 后驻留 | +12.3 MB 恒定 | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
+| S4 validate | — | 13 ms（逐账户） | **3 ms** | 9 ms |
+| S5 record / map / set | 68 ms | 46 ms | **31 ms** | — |
+| S5 分配压力 / 驻留 | +50.9 MB / +21.7 MB | +60.7 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
+| S6 tuple | 29 ms | 16 ms | **7 ms** | — |
+| S6 分配压力 / 驻留 | +53.4 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | — |
+| S7 async transform（5 千条） | 16 ms（safeParseAsync） | 编译拒绝 | **5 ms（safeParseAsync）** | — |
+| S7 分配压力 | +14.5 MB | — | **+9.9 MB** | — |
 
 解读：
 
-- 对 stock：S1 2.31x、S5 2.61x、S6 4.57x（tuple，全场景最高），gc 后驻留从 123～217 MB 归零；async（S7）2.50x。
-- 对官方 JIT parser：干净场景持平（S1 0.93～1.00x，批间噪声内，骨架省掉的输出构造恰好抵掉子骨架调用开销）。脏场景反超（S2 1.47x、S5 1.93x、S6 3.06x）：default 的 `shallowClone` 与整树重建是 stock 语义的固定成本，CoW 只为真正变脏的路径付费。
-- validate 快路径：官方整树 `assertOnly` 产物 50 ms / 50 万 = 100 ns/账户，零分配。
-- S1 的 +30.5 MB 是官方叶子产物内部的短命分配（datetime/email 格式校验的临时值），CoW 本身零拷贝。
+- 对 stock：S2 2.09x、S5 2.23x、S1 2.86x、S6 4.39x（tuple，全场景最高），gc 后驻留从 12～22 MB 归零；async（S7）3.23x。
+- 对官方 JIT parser：object 场景持平（S1、S2 均为 0.92x，在这个记录数下相差 2 ms，属 runner 噪声；骨架省掉的输出构造恰好抵掉子骨架调用开销）。容器场景反超（S5 1.50x、S6 2.47x）：整树重建是 stock 语义的固定成本，CoW 只为真正变脏的路径付费。
+- validate 快路径：官方整树 `assertOnly` 产物 3 ms / 5 万 = 60 ns/账户，零分配。
+- S1 的 +3.1 MB 是官方叶子产物内部的短命分配（datetime/email 格式校验的临时值），CoW 本身零拷贝。
 
-zod3 线对 stock zod 3.24.1（仍付解释器税）测得 4.3～5.0x。那张表，以及已移除的 v0.2 前端和 v0.3 的表，都在 [CHANGELOG](CHANGELOG.md)。
+zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得约 4.4x（S1 4.37x、S2 4.43x）。早期本地 50 万条记录的表，包括 v0.5 的 zod4 表、已移除的 v0.2 前端和 v0.3 的表，都在 [CHANGELOG](CHANGELOG.md)。
 
 ## 正确性证据
 

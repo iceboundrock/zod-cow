@@ -1,9 +1,9 @@
 /**
- * 差分模糊测试（zc-v2：官方 codegen + CoW 修饰 vs stock zod4）。
- * 生成器框架与 differential-z4.test.ts 相同；对比项：
- *   1. 成败奇偶  2. 输出 deepStrictEqual  3. 输入零失真
- * 附加：顶层引用共享率（CoW 命中率）、stock 降级率统计。
- * 失败打印 seed/case 可复现（REPRO=seed:case）。
+ * Differential fuzz test (zc-v2: official codegen + CoW skeletons vs stock zod4).
+ * Compares against stock zod4 on:
+ *   1. success/failure parity  2. deepStrictEqual output  3. zero input distortion
+ * Also reports top-level reference-sharing rate (CoW hit rate) and stock degradation rate.
+ * Failures print seed/case for replay (REPRO=seed:case).
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod4";

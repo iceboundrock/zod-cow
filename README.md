@@ -4,9 +4,10 @@
 
 Zod 兼容的 **CoW（Copy-on-Write）编译层** 原型 —— 源自对 [Numeric fork](https://numeric.substack.com/p/how-we-doubled-zod-performance-to) 思路的延伸。
 
-> **v0.2：已适配 zod 4**。双前端共享同一 CoW 核心（`internal.ts`）：
-> zod3 前端（`compile.ts` + `src/index.ts`）与 zod4 前端（`compile-z4.ts` + `src/index-z4.ts`）。
-> zod4 的适配要点与基准结论见下文 [zod4 适配（v0.2）](#zod4-适配v02)。
+> **当前在仓库里的两条编译线**：zod3 前端（`src/compile.ts` + `src/index.ts`，自研闭包树，冻结参考实现）
+> 与 zod4 **v2** 前端（`src/cow4-v2.ts` + `src/index-z4-v2.ts`，复用官方 codegen，活跃开发线）。
+> 早期的 zod4 自研前端（`compile-z4.ts` + `index-z4.ts`）已被 v2 完全取代并移除，
+> 其适配结论与实测数字作为历史记录保留在 [zod4 适配（v0.2）](#zod4-适配v02历史) 一节。
 
 **核心差异**：Numeric 为了让 `parse` 返回原始对象，直接删除了 `default / transform / coerce / catch / pipe / preprocess / intersection` 七个特性；本原型用 **引用比较作为脏信号 + 按需路径拷贝**，让这些特性全部保留，且只在"运行时真的产生了新值"的那一点才拷贝。
 
@@ -110,13 +111,18 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 无包装对象 / 惰性 path / 编译期 shape 解析。与 arktype 剩余 ~2.7x 差距 =
 逐节点函数分发（解释器残差），下一步可用 `new Function` 单体 codegen 消除（ArkType 路线）。
 
-## zod4 适配（v0.2）
+## zod4 适配（v0.2，历史）
 
-### 使用
+> **该编译线已移除**。本节记录的是自研 zod4 前端（`src/compile-z4.ts` + `src/index-z4.ts`）
+> 的适配结论与当时实测的基准数字；代码本身已在 v2 落地后删除（issue #4），
+> 下面的命令与文件路径均不再存在。**结构差异表仍然有效**——那是 stock zod3/zod4 的差异，
+> v2 同样受其约束；基准表则是一次带日期的历史测量，不是当前性能。
+
+### 使用（历史）
 
 ```ts
 import { z } from "zod4";                          // zod@4.5.4（npm 别名，与 zod3 共存）
-import { compile } from "./src/index-z4.js";       // API 与 zod3 版完全同构
+import { compile } from "./src/index-z4.js";       // 已移除；API 与 zod3 版完全同构
 
 const fast = compile(User);
 fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
@@ -140,7 +146,7 @@ fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
 | record 键 | 仅 string | 支持 number 键（数值字符串回退重试）；**enum/literal 键是声明键驱动**（声明键全部必填 + 多余键报 unrecognized_keys） |
 | NaN | `invalid_type received nan` | 同左（z.number() 拒绝 NaN） |
 
-### zod4 基准（50 万账户，node v24.19，--expose-gc，3 轮取中位）
+### zod4 基准（历史；50 万账户，node v24.19，--expose-gc，3 轮取中位）
 
 | 变体 | 耗时（中位） | 分配压力（gc 前） | gc 后驻留 |
 |---|---|---|---|
@@ -160,11 +166,14 @@ fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
 4. `zod4/compile` JIT 在本场景与 stock 持平（其收益场景不同）；arktype 仍最快（158ms）。
 5. 若要追平速度，路线仍是 worklog v0.1 提出的 `new Function` 单体 codegen（把 CoW 语义编译进单个函数体），消除逐闭包分发 —— zc 的语义层已经就绪，缺的只是代码生成层。
 
-### zod4 验证
+### zod4 验证（历史）
 
-- `pnpm run test:z4`：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
-- `pnpm run bench:z4`：本基准
-- `pnpm run probe:z4`：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
+- `pnpm run test:z4`（**已移除**）：单元测试 39 项（含探针金丝断言 + optional/default 组合回归）+ 差分模糊测试 20000 case 全部与 stock zod4 一致，成功 case 顶层引用共享率 91.2%
+- `pnpm run bench:z4`（**已移除**）：本基准
+- `pnpm run probe:z4`（仍在）：z4 def 结构/行为勘察（含 `REPRO=seed:case` 精确复现差分失败的调试钩子）
+
+其中的**探针金丝断言**（stock zod4 行为 ↔ 编译器假设）已迁到 `tests/canary-z4.test.ts`，
+作为 `pnpm run test:v2` 的第一步运行——zod 升级改变隐式契约时，测试仍会先红。
 
 ## 已知限制（原型范围）
 
@@ -183,22 +192,23 @@ fast.parse(data); fast.validate(data); fast.safeParse(data); fast.pure;
 ## 目录
 
 ```
-src/internal.ts         协议（双版本共享）：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
+src/internal.ts         协议（z3 前端）：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
 src/probe.ts            stock zod3 行为探针
 src/probe-z4.ts         zod4 def 结构 + 行为勘察（一次性诊断，含 REPRO 钩子）
 src/probe-z4-flags.ts   zod4 语义金丝 flag（版本升级自动报警）
 src/regexes.ts          zod 3.24.1 内部格式正则的逐字拷贝（z3 前端用）
 src/compile.ts          zod3 前端编译器
-src/compile-z4.ts       zod4 前端编译器（含 z4 特有语义：optin/optout、default 短路、
-                        catch 不吞异常、generic check 通道、record 声明键驱动）
 src/index.ts            zod3 compile() API
-src/index-z4.ts         zod4 compile() API
+src/cow4-v2.ts          zod4 v2 引擎（官方 codegen + CoW 容器骨架 + async 通道）
+src/index-z4-v2.ts      zod4 v2 compileV2() API
+tests/harness.ts            零依赖测试框架（test/summary/deepEqual）
 tests/unit.test.ts          z3 单元测试（27 项）
 tests/differential.test.ts  z3 差分模糊（20000 case）
-tests/unit-z4.test.ts       z4 单元测试（39 项，含金丝 + 回归）
-tests/differential-z4.test.ts z4 差分模糊（20000 case，REPRO 钩子）
+tests/canary-z4.test.ts     zod 版本金丝（stock z4 行为 ↔ 编译器假设）
+tests/smoke-v2*.ts          v2 行为断言（容器 / tuple / async）
+tests/differential-z4-v2.test.ts v2 差分模糊（20000 case，REPRO 钩子）
 bench/bench.ts          z3 基准（50 万账户）
-bench/bench-z4.ts       z4 基准（S1 纯校验 + JIT 线 + S2 脏负载 + S3 脏比例扫描）
+bench/bench-z4-v2.ts    v2 基准（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5-S7 容器·tuple·async）
 examples/demo.ts        60 秒上手
 ```
 
@@ -254,6 +264,9 @@ CoW 容器骨架
 | S2 脏负载（10% default 注入） | 641ms | 383ms | **238ms** | 537ms | — |
 | S3 100% 脏 | 662ms | 439ms | **420ms** | 668ms | — |
 | S4 validate（整树产物） | — | 174ms(逐账户) | **27ms** | — | 120ms |
+
+（`zc-v1` 列是 v0.3 当时对自研前端的一次测量；该前端此后已移除，见上文
+[zod4 适配（v0.2，历史）](#zod4-适配v02历史)。）
 
 要点：
 

@@ -1,7 +1,12 @@
 # zc-v2 架构对比：自研 codegen vs 复用 zod4 官方 codegen
 
 > 版本锚点：zod 4.5.4 · 本文所有生成代码均为真实产物 dump（`compileFn(schema, {debug:true})` 与 `compileCowDebug(schema)`）。
-> 配套代码：`src/compile-z4.ts`（v1，自研） / `src/cow4-v2.ts`（v2，复用官方）。
+> 配套代码：`src/cow4-v2.ts`（v2，复用官方）。
+>
+> **v1 已不在仓库里**：自研 zod4 前端（`src/compile-z4.ts` + `src/index-z4.ts`）在 v2
+> 落地后被删除（issue #4）。本文对 v1 的全部描述、代码引用与基准数字都是**历史对照**，
+> 记录"为什么从自研 codegen 走到复用官方 codegen"这条决策路径；对应源码需回溯到
+> 删除前的提交。当前仓库里的 zod4 编译线只有 v2。
 
 ## TL;DR
 
@@ -24,7 +29,7 @@
 
 ---
 
-## 1. 背景：为什么会有两条路线
+## 1. 背景：为什么曾有两条路线
 
 Numeric 文章的 fork 思路是"砍特性换性能"（删掉 default/transform/catch 等 7 个特性，
 消除深拷贝）。CoW 层（本仓库）证明这 7 个特性可以保留——引用比较就是天然的脏信号：
@@ -439,6 +444,8 @@ async 骨架（ctx.async = true）的顶层契约：
 
 ## 7. 基准（50 万账户，node v24，--expose-gc，3 轮中位）
 
+`zc-v1` 列是该前端删除前的最后一次测量，保留为历史对照；今天的 `bench:v2` 不再跑这一列。
+
 | 场景 | stock | 官方 compileFn parser | zc-v2 | zc-v1 | arktype |
 |---|---|---|---|---|---|
 | S1 纯校验 | 654ms | 263ms | **283ms** | 521ms | 144ms |
@@ -472,7 +479,7 @@ async 骨架（ctx.async = true）的顶层契约：
 
 S1 的 +30.5MB 短命分配来自官方叶子产物内部（datetime/email 格式校验的临时值），
 gc 后驻留 0——CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍；速度与微量短命
-分配之间的取舍，在生产语境（minor GC 便宜）下应选 v2。
+分配之间的取舍，在生产语境（minor GC 便宜）下选了 v2——这也是 v1 最终被移除的原因之一。
 
 ## 8. 正确性证据
 
@@ -515,8 +522,10 @@ async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器�
 
 ## 10. 结论：两条路线的适用域
 
-- **v1（自研 codegen）** 仍有一席之地：零内部 API 依赖（只读 `_zod.def`）、
-  分配更低、可以锁定旧版 zod。适合强受控环境 / 长支持窗口。
+- **v1（自研 codegen）** 的适用域是强受控环境 / 长支持窗口：零内部 API 依赖
+  （只读 `_zod.def`）、分配更低、可以锁定旧版 zod。本仓库不再需要这个域——
+  它只维护一条 zod4 线，v1 已随 issue #4 移除；下面的对比因此是决策记录，
+  而不是仍在维护的两个选项。
 - **v2（官方 codegen + CoW 修饰）** 是 zod4 时代的正解：语义正确性外包给官方
   编译器与 runtime，自研面缩到"纯度分析 + 6 个容器骨架 + async 通道"，跟随上游
   优化自动受益；速度与官方 JIT 持平，脏场景反超 1.5~1.9x、tuple 3.1x、async 2.5x

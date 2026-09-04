@@ -1,17 +1,17 @@
 /**
- * 差分模糊测试 —— 随机生成 schema + 数据，对比编译层与 stock zod：
- *   1. 成败奇偶（success parity）
- *   2. 成功时输出值 deepStrictEqual（键集语义对齐：缺席 optional 键、present-undefined 等）
- *   3. 输入零失真（parse 前后 deepStrictEqual 快照）—— 永不原地修改
- * 附加统计：顶层引用共享率（CoW 命中率）。
+ * Differential fuzz test — random schema + data, comparing the compiled layer against stock zod:
+ *   1. Success/failure parity
+ *   2. On success, output values are deepStrictEqual (key-set semantics aligned: absent optional keys, present-undefined, etc.)
+ *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place
+ * Extra statistic: top-level reference sharing rate (CoW hit rate).
  *
- * 生成器是确定性的：失败时打印 seed/case/desc/input，可直接复现。
+ * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro.
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
 import { compile } from "../src/index.js";
 
-/* ─────────────────────────── 确定性 RNG ─────────────────────────── */
+/* ─────────────────────────── deterministic RNG ─────────────────────────── */
 
 interface RNG {
   next(): number;
@@ -37,7 +37,7 @@ function makeRng(seed: number): RNG {
   };
 }
 
-/* ─────────────────────────── 数据池 ─────────────────────────── */
+/* ─────────────────────────── data pool ─────────────────────────── */
 
 const ABSENT = Symbol("absent");
 
@@ -83,12 +83,12 @@ function repr(v: unknown): string {
   }
 }
 
-/* ─────────────────────────── schema 生成器 ─────────────────────────── */
+/* ─────────────────────────── schema generator ─────────────────────────── */
 
 interface Built {
   schema: z.ZodTypeAny;
   desc: string;
-  /** 返回值可能是 ABSENT（表示该键不出现） */
+  /** The return value may be ABSENT (meaning the key does not appear) */
   gen(rng: RNG): unknown;
 }
 
@@ -188,7 +188,7 @@ function bLeaf(rng: RNG): Built {
   }
 }
 
-/** 构造 default 包装时，默认值必须能通过内层校验（stock 会用内层 re-validate 默认值） */
+/** When building a default wrapper the default value must pass the inner validation (stock re-validates the default with the inner schema) */
 function validValueFor(b: Built, rng: RNG): unknown {
   for (let i = 0; i < 50; i++) {
     const v = b.gen(rng);
@@ -215,7 +215,7 @@ function bWrap(rng: RNG, inner: Built): Built {
   }
   if (which === 2) {
     const dv = validValueFor(inner, rng);
-    // 无合法默认值（约束不可满足）时放弃 default 包装，避免生成退化 schema
+    // No valid default (constraints unsatisfiable): give up on the default wrapper to avoid a degenerate schema
     if (dv === undefined && !inner.schema.safeParse(undefined).success) {
       return inner;
     }
@@ -232,7 +232,7 @@ function bWrap(rng: RNG, inner: Built): Built {
       gen: inner.gen,
     };
   }
-  // transform：string → string（限制为纯字符串变换，保证差分可对齐）
+  // transform: string → string (restricted to a pure string transform so the differential stays alignable)
   return {
     schema: inner.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
     desc: `${inner.desc}.transform(+!)`,
@@ -269,7 +269,7 @@ function bObject(rng: RNG, depth: number): Built {
         const v = f.built.gen(r);
         if (v !== ABSENT) out[f.key] = v;
       }
-      if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // 多余键
+      if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
       return out;
     },
   };
@@ -358,10 +358,10 @@ function bAny(rng: RNG, depth: number): Built {
   return bWrap(rng, bLeaf(rng));
 }
 
-/* ─────────────────────────── 差分主循环 ─────────────────────────── */
+/* ─────────────────────────── differential main loop ─────────────────────────── */
 
 const SEEDS = Number(process.env.SEEDS ?? 200);
-const CASES_PER_SEED = Number(process.env.CASES ?? 100); // 共 2 万 case
+const CASES_PER_SEED = Number(process.env.CASES ?? 100); // 20 000 cases in total
 let total = 0;
 let bothOk = 0;
 let bothFail = 0;
@@ -374,7 +374,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
   for (let i = 0; i < CASES_PER_SEED; i++) {
     const built = bAny(rng, 3);
     let input = built.gen(rng);
-    if (input === ABSENT) input = undefined; // 顶层包装可能缺席
+    if (input === ABSENT) input = undefined; // the top-level wrapper may be absent
     const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
     total++;
 
@@ -405,14 +405,14 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       oursThrew = e as Error;
     }
 
-    // 输入零失真（无论成败）—— 永不原地修改
+    // Zero input distortion (regardless of success) — never mutate in place
     if (!assertDeepEqual(input, snapshot)) {
       failures.push(`INPUT MUTATED → ${caseId}`);
       continue;
     }
 
     if (stockThrew !== null || oursThrew !== null) {
-      // 用户回调抛异常：只要求“都抛或都不抛”
+      // A user callback threw: only require "both throw or neither throws"
       if ((stockThrew === null) !== (oursThrew === null)) {
         failures.push(
           `THROW MISMATCH (stock=${stockThrew?.message} ours=${oursThrew?.message}) → ${caseId}`,
@@ -450,8 +450,8 @@ for (let seed = 1; seed <= SEEDS; seed++) {
 console.log(`differential: ${total} cases | success=${bothOk} fail=${bothFail}`);
 if (refSharedSuccess > 0) {
   console.log(
-    `CoW 顶层引用共享率: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +
-      `(${refShared}/${refSharedSuccess} 成功 case 返回输入原引用)`,
+    `CoW top-level reference sharing: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +
+      `(${refShared}/${refSharedSuccess} successful cases returned the original input reference)`,
   );
 }
 if (failures.length > 0) {

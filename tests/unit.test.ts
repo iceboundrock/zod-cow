@@ -1,15 +1,15 @@
 /**
- * 单元测试 —— 显式验证 CoW 语义的每一条承诺。
- * 引用共享 / 按需拷贝 / 输入无损 / 与 stock zod 的键集语义对齐 / 边界情况。
+ * Unit tests — explicitly verify every promise of the CoW semantics.
+ * Reference sharing / copy on demand / lossless input / key-set semantics aligned with stock zod / edge cases.
  */
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { compile, ZcError, ZcNotSupportedError } from "../src/index.js";
 import { test, summary } from "./harness.js";
 
-console.log("── CoW 语义 ──");
+console.log("── CoW semantics ──");
 
-test("纯 schema：parse 恒等返回输入引用（零拷贝）", () => {
+test("pure schema: parse returns the input reference itself (zero copy)", () => {
   const C = compile(z.object({ a: z.string(), b: z.number().int(), c: z.array(z.string()) }));
   const input = { a: "x", b: 1, c: ["p", "q"] };
   assert.equal(C.parse(input), input);
@@ -17,25 +17,25 @@ test("纯 schema：parse 恒等返回输入引用（零拷贝）", () => {
   assert.equal(C.pure, true);
 });
 
-test("纯 schema：两次 parse 同一输入返回同一引用（结构共享，文档化行为）", () => {
+test("pure schema: parsing the same input twice returns the same reference (structural sharing, documented behavior)", () => {
   const C = compile(z.object({ a: z.string() }));
   const input = { a: "x" };
   assert.equal(C.parse(input), C.parse(input));
 });
 
-test("default 注入：只在缺失时触发一次浅拷贝，兄弟字段继续共享", () => {
+test("default injection: one shallow copy only when the key is missing, sibling fields stay shared", () => {
   const C = compile(z.object({ a: z.string(), role: z.string().default("viewer") }));
   const input = { a: "x" };
   const out = C.parse(input);
-  assert.notEqual(out, input); // 有注入 → 新对象
+  assert.notEqual(out, input); // something was injected → new object
   assert.equal(out.role, "viewer");
-  assert.equal("role" in input, false); // 输入无损
-  // 已有 role 时零拷贝
+  assert.equal("role" in input, false); // input is lossless
+  // zero copy when role is already present
   const input2 = { a: "x", role: "admin" };
   assert.equal(C.parse(input2), input2);
 });
 
-test("transform：返回新值 → 父层自动判脏", () => {
+test("transform: returning a new value → the parent is marked dirty automatically", () => {
   const C = compile(z.object({ name: z.string().transform((s) => s.toUpperCase()) }));
   const input = { name: "ab" };
   const out = C.parse(input);
@@ -43,16 +43,16 @@ test("transform：返回新值 → 父层自动判脏", () => {
   assert.notEqual(out, input);
 });
 
-test("trim 仅在值实际变化时判脏（原始类型值比较的威力）", () => {
+test("trim marks dirty only when the value actually changes (the power of primitive value comparison)", () => {
   const C = compile(z.object({ v: z.string().trim() }));
   const dirtyIn = { v: "  ab  " };
   const cleanIn = { v: "ab" };
   assert.notEqual(C.parse(dirtyIn), dirtyIn);
-  assert.equal(C.parse(cleanIn), cleanIn); // trim 后值相同 → 不脏 → 零拷贝
+  assert.equal(C.parse(cleanIn), cleanIn); // same value after trim → not dirty → zero copy
   assert.deepEqual(C.parse(dirtyIn), { v: "ab" });
 });
 
-test("深路径拷贝：叶子 default → 祖先链新建、兄弟子树共享、输入无损", () => {
+test("deep path copy: leaf default → ancestor chain rebuilt, sibling subtrees shared, input lossless", () => {
   const C = compile(
     z.object({
       meta: z.object({
@@ -70,11 +70,11 @@ test("深路径拷贝：叶子 default → 祖先链新建、兄弟子树共享�
   assert.equal(out.meta.deep.v, 7);
   assert.equal(out.meta.deep.keep, "kk");
   assert.equal(out.meta.keep, "k");
-  assert.equal(out.sib, input.sib); // 兄弟子树共享
-  assert.equal("v" in input.meta.deep, false); // 输入无损
+  assert.equal(out.sib, input.sib); // sibling subtree is shared
+  assert.equal("v" in input.meta.deep, false); // input is lossless
 });
 
-test("strip：无多余键零拷贝；有多余键才建干净副本，且绝不原地删除（Numeric footgun 修复）", () => {
+test("strip: zero copy without extra keys; a clean copy only when extra keys exist, and never an in-place delete (Numeric footgun fix)", () => {
   const C = compile(z.object({ a: z.string() }));
   const clean = { a: "x" };
   assert.equal(C.parse(clean), clean);
@@ -82,15 +82,15 @@ test("strip：无多余键零拷贝；有多余键才建干净副本，且绝不
   const dirty = { a: "x", extra: 1 } as Record<string, unknown>;
   const snapshot = JSON.stringify(dirty);
   const out = C.parse(dirty) as Record<string, unknown>;
-  assert.equal("extra" in out, false); // 输出干净
-  assert.equal(JSON.stringify(dirty), snapshot); // 输入原封不动
+  assert.equal("extra" in out, false); // output is clean
+  assert.equal(JSON.stringify(dirty), snapshot); // input is untouched
   assert.equal(dirty.extra, 1);
 });
 
-test("strict：多余键 → unrecognized_keys 失败", () => {
+test("strict: extra keys → unrecognized_keys failure", () => {
   const C = compile(z.object({ a: z.string() }).strict());
   const okIn = { a: "x" };
-  assert.equal(C.parse(okIn), okIn); // 无多余键 → 零拷贝
+  assert.equal(C.parse(okIn), okIn); // no extra keys → zero copy
   const r = C.safeParse({ a: "x", b: 1 } as never);
   assert.equal(r.success, false);
   if (!r.success) {
@@ -99,16 +99,16 @@ test("strict：多余键 → unrecognized_keys 失败", () => {
   }
 });
 
-test("passthrough：多余键保留，无脏时零拷贝", () => {
+test("passthrough: extra keys are kept, zero copy when nothing is dirty", () => {
   const C = compile(z.object({ a: z.string() }).passthrough());
   const input = { a: "x", extra: 1 };
-  assert.equal(C.parse(input), input); // 透传原引用
+  assert.equal(C.parse(input), input); // the original reference is passed through
 });
 
-test("与 stock 对齐：optional 缺席键不物化、present-undefined 保留", () => {
+test("aligned with stock: an absent optional key is not materialized, present-undefined is kept", () => {
   const S = z.object({ a: z.string().optional(), b: z.string() });
   const C = compile(S);
-  // 与 stock 直接对比（行为探针已确认 3.24.1 的行为）
+  // Direct comparison against stock (the behavior probe confirmed 3.24.1's behavior)
   const stockAbsent = S.parse({ b: "x" }) as Record<string, unknown>;
   const stockPresent = S.parse({ b: "x", a: undefined }) as Record<string, unknown>;
 
@@ -119,17 +119,17 @@ test("与 stock 对齐：optional 缺席键不物化、present-undefined 保留"
   assert.equal("a" in cowPresent, "a" in stockPresent);
 });
 
-test("数组：元素脏时 slice 一次，其余元素共享", () => {
+test("array: slice once when an element is dirty, the other elements stay shared", () => {
   const C = compile(z.array(z.object({ v: z.number().default(1), n: z.string() })));
   const input = [{ n: "a" }, { n: "b", v: 2 }] as any[];
   const out = C.parse(input) as any[];
   assert.notEqual(out, input);
   assert.notEqual(out[0], input[0]);
   assert.equal(out[0].v, 1);
-  assert.equal(out[1], input[1]); // 未脏元素共享
+  assert.equal(out[1], input[1]); // clean element is shared
 });
 
-test("数组长度检查：min/max/exact", () => {
+test("array length checks: min/max/exact", () => {
   const C = compile(z.array(z.string()).min(1).max(2));
   assert.equal(C.parse(["a"])[0], "a");
   assert.equal(C.safeParse([]).success, false);
@@ -139,9 +139,9 @@ test("数组长度检查：min/max/exact", () => {
   assert.equal(E.safeParse(["a", "b", "c"]).success, false);
 });
 
-console.log("── 校验语义（与 stock 对齐抽查）──");
+console.log("── validation semantics (spot check against stock) ──");
 
-test("string checks：min/max/regex/email/uuid/datetime/startsWith/endsWith", () => {
+test("string checks: min/max/regex/email/uuid/datetime/startsWith/endsWith", () => {
   const C = compile(
     z
       .string()
@@ -174,7 +174,7 @@ test("string checks：min/max/regex/email/uuid/datetime/startsWith/endsWith", ()
   assert.equal(D.safeParse("2025-03-14").success, false);
 });
 
-test("number checks：int/min/max/multipleOf/finite/NaN", () => {
+test("number checks: int/min/max/multipleOf/finite/NaN", () => {
   const C = compile(z.number().int().min(2).max(10));
   assert.equal(C.parse(4), 4);
   assert.equal(C.safeParse(4.5).success, false);
@@ -223,34 +223,34 @@ test("literal/enum/nativeEnum/date/bigint/boolean/null", () => {
   assert.equal(compile(z.null()).safeParse(0).success, false);
 });
 
-test("record/map/set：CoW 行为", () => {
+test("record/map/set: CoW behavior", () => {
   const R = compile(z.record(z.string(), z.object({ v: z.number().default(1) })));
   const rin = { a: { v: 5 }, b: {} } as any;
   const rout = R.parse(rin) as any;
   assert.notEqual(rout, rin);
-  assert.equal(rout.a, rin.a); // 值未变 → 共享
-  assert.notEqual(rout.b, rin.b); // default 注入 → 新
+  assert.equal(rout.a, rin.a); // value unchanged → shared
+  assert.notEqual(rout.b, rin.b); // default injected → new
   assert.equal(rout.b.v, 1);
   assert.equal("v" in rin.b, false);
 
   const M = compile(z.map(z.string(), z.number()));
   const min = new Map([["a", 1]]);
-  assert.equal(M.parse(min), min); // 纯 → 零拷贝
+  assert.equal(M.parse(min), min); // pure → zero copy
   const MD = compile(z.map(z.string(), z.object({ v: z.number().default(1) })));
   const mIn = new Map<string, any>([["a", {}]]);
   const mOut = MD.parse(mIn);
-  assert.notEqual(mOut, mIn); // 值被 default 注入 → 新 Map
+  assert.notEqual(mOut, mIn); // a default was injected into the value → new Map
   assert.equal(mOut.get("a")!.v, 1);
-  assert.equal(mIn.get("a")!.v, undefined); // 输入无损
+  assert.equal(mIn.get("a")!.v, undefined); // input is lossless
 
   const S = compile(z.set(z.number()));
   const sin = new Set([1, 2]);
   assert.equal(S.parse(sin), sin);
 });
 
-console.log("── 包装与组合 ──");
+console.log("── wrappers and composition ──");
 
-test("union：首中即返回；脏分支传播", () => {
+test("union: returns on the first match; dirty branches propagate", () => {
   const C = compile(z.union([z.string(), z.number().int()]));
   assert.equal(C.parse("hi"), "hi");
   assert.equal(C.parse(3), 3);
@@ -262,20 +262,20 @@ test("union：首中即返回；脏分支传播", () => {
   assert.equal(out.v, 1);
 });
 
-test("discriminated union：快速分派 + 缺失判别值报错", () => {
+test("discriminated union: fast dispatch + error on a missing discriminator value", () => {
   const S = z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("a"), x: z.number() }),
     z.object({ kind: z.literal("b"), y: z.string() }),
   ]);
   const C = compile(S);
   const input = { kind: "a" as const, x: 1 };
-  assert.equal(C.parse(input), input); // 分支纯 → 零拷贝
+  assert.equal(C.parse(input), input); // branch is pure → zero copy
   const r = C.safeParse({ kind: "c" } as never);
   assert.equal(r.success, false);
   assert.equal(r.success ? "" : r.error.issues[0]!.code, "invalid_union_discriminator");
 });
 
-test("z.lazy 递归 schema", () => {
+test("z.lazy recursive schema", () => {
   const Cat: z.ZodType<any> = z.object({
     name: z.string(),
     kittens: z.array(z.lazy(() => Cat)),
@@ -283,11 +283,11 @@ test("z.lazy 递归 schema", () => {
   const C = compile(Cat);
   const input = { name: "a", kittens: [{ name: "b", kittens: [] }] };
   const out = C.parse(input) as any;
-  assert.equal(out, input); // 纯递归 → 零拷贝
+  assert.equal(out, input); // pure recursion → zero copy
   assert.equal(out.kittens[0], input.kittens[0]);
 });
 
-test("catch：失败落默认值，成功透传", () => {
+test("catch: falls back to the default on failure, passes through on success", () => {
   const C = compile(z.object({ v: z.number().catch(-1) }));
   const okIn = { v: 5 };
   assert.equal(C.parse(okIn), okIn);
@@ -297,7 +297,7 @@ test("catch：失败落默认值，成功透传", () => {
   assert.notEqual(out, badIn);
 });
 
-test("refine/superRefine：纯谓词不破坏零拷贝；失败带路径", () => {
+test("refine/superRefine: pure predicates do not break zero copy; failures carry a path", () => {
   const C = compile(z.object({ a: z.string().refine((s) => s.length > 2, "too short!") }));
   const ok = { a: "xyz" };
   assert.equal(C.parse(ok), ok);
@@ -341,7 +341,7 @@ test("preprocess / pipe / readonly / branded / optional / nullable / tuple", () 
   const RO = compile(z.object({ a: z.string() }).readonly());
   const roIn = { a: "x" };
   const roOut = RO.parse(roIn) as any;
-  assert.equal(Object.isFrozen(roOut), true); // 与 stock readonly 一致：浅冻结
+  assert.equal(Object.isFrozen(roOut), true); // same as stock readonly: shallow freeze
 
   const BR = compile(z.object({ a: z.string() }).brand<"B">());
   const brIn = { a: "x" };
@@ -350,7 +350,7 @@ test("preprocess / pipe / readonly / branded / optional / nullable / tuple", () 
   const O = compile(z.object({ a: z.string().optional(), b: z.string().nullable() }));
   const mixed = { a: undefined, b: null };
   const outO = O.parse(mixed) as any;
-  assert.equal("a" in outO, true); // 与 stock 一致：present-undefined 保留
+  assert.equal("a" in outO, true); // same as stock: present-undefined is kept
   assert.equal(outO.b, null);
 
   const T = compile(z.tuple([z.string(), z.number()]));
@@ -360,18 +360,18 @@ test("preprocess / pipe / readonly / branded / optional / nullable / tuple", () 
   assert.equal(T.safeParse(["a", 1, 2]).success, false);
 });
 
-console.log("── 安全与边界 ──");
+console.log("── safety and edge cases ──");
 
-test("__proto__ 多余键：不产生原型污染，输入无损", () => {
+test("__proto__ as an extra key: no prototype pollution, input lossless", () => {
   const C = compile(z.object({ a: z.string() }));
   const evil = JSON.parse('{"a":"x","__proto__":{"polluted":1}}');
   const out = C.parse(evil) as any;
   assert.equal("polluted" in out, false);
   assert.equal(({} as any).polluted, undefined);
-  assert.equal("__proto__" in evil, true); // 输入无损（仍含该 own property）
+  assert.equal("__proto__" in evil, true); // input is lossless (it still carries that own property)
 });
 
-test("失败路径：嵌套 issue path 正确", () => {
+test("failure path: nested issue paths are correct", () => {
   const C = compile(
     z.object({
       list: z.array(z.object({ v: z.number() })),
@@ -386,7 +386,7 @@ test("失败路径：嵌套 issue path 正确", () => {
   }
 });
 
-test("不支持特性：编译期明确报错（而非运行时静默漂移）", () => {
+test("unsupported features: an explicit compile-time error (rather than a silent runtime drift)", () => {
   assert.throws(
     () => compile(z.intersection(z.object({ a: z.string() }), z.object({ b: z.string() }))),
     ZcNotSupportedError,
@@ -397,12 +397,12 @@ test("不支持特性：编译期明确报错（而非运行时静默漂移）",
   );
 });
 
-test("async refine → 运行时明确报错", () => {
+test("async refine → explicit runtime error", () => {
   const C = compile(z.string().refine(async () => true));
   assert.throws(() => C.parse("x" as never), ZcNotSupportedError);
 });
 
-test("ZcError 携带 issues", () => {
+test("ZcError carries issues", () => {
   const C = compile(z.object({ a: z.string() }));
   try {
     C.parse({ a: 1 } as never);

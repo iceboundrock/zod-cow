@@ -1,19 +1,22 @@
 /**
- * 基准测试（zc-v2：官方 codegen + CoW 修饰）—— 复现 Numeric 文章的 50 万账户场景。
+ * Benchmark (zc-v2: official codegen + CoW skeletons) — reproduces the 500k-account
+ * scenario from the Numeric article.
  *
- * 对照组：
- *   stock zod4 safeParse          解释器基线（每 parse 重建整棵输出树）
- *   官方 compileFn parser          官方 JIT 产物、stock 语义（无条件新容器）——「只复用不修饰」对照
- *   官方 compileFn validator       官方 assertOnly 纯校验下限（validate 语义参照）
- *   zc-v2 CoW parse                本次主角：官方 codegen + CoW 容器修饰
- *   arktype                        参照线
+ * Baselines:
+ *   stock zod4 safeParse           interpreter baseline (rebuilds the whole output tree on every parse)
+ *   official compileFn parser      official JIT product, stock semantics (always allocates new
+ *                                  containers) — the "reuse only, no skeleton" control
+ *   official compileFn validator   official assertOnly pure-validation floor (reference for validate)
+ *   zc-v2 CoW parse                the subject: official codegen + CoW container skeletons
+ *   arktype                        external reference line
  *
- *   S1（主赛道）: 纯校验 schema（干净输入 → CoW 应零拷贝原引用返回）
- *   S2（CoW 展示）: role 带 default，10% 数据缺 role
- *   S3（脏比例扫描）: role 缺失比例 0% / 25% / 50% / 100%
+ *   S1 (main track):    pure-validation schema (clean input → CoW should return the input reference
+ *                       with zero copies)
+ *   S2 (CoW showcase):  role carries a default, 10% of the data is missing role
+ *   S3 (dirty sweep):   missing-role ratio 0% / 25% / 50% / 100%
  *
- * 每变体：2 轮预热 + 3 轮计时（gc() 后开始），报告中位耗时、
- * 运行后 heapUsed 增量（分配压力，gc 前）与 gc 后驻留增量。
+ * Per variant: 2 warmup rounds + 3 timed rounds (started after gc()), reporting the median time,
+ * the heapUsed delta after the run (allocation pressure, before gc) and the retained delta after gc.
  */
 import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
@@ -25,7 +28,7 @@ const { compileFn } = await import("zod4/v4/core");
 const N = Number(process.env.BENCH_N ?? 500_000);
 const PASSES = 3;
 
-/* ─────────────────────────── 数据生成 ─────────────────────────── */
+/* ─────────────────────────── Data generation ─────────────────────────── */
 
 const first = ["Ana", "Bob", "Cid", "Dee", "Eve", "Fay", "Gus", "Hal"];
 const cities = ["NYC", "SFO", "SEA", "ATX", "CHI"];
@@ -199,7 +202,7 @@ const medianOf = (samples: Sample[]): number =>
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
 console.log(`\n═══ S1 纯校验 · ${N.toLocaleString()} 账户 · 每变体 ${PASSES} 轮取中位 ═══`);
-console.log(`  zc-v2 stock 降级: ${V2Stock.stock ? "是（异常！）" : "否"}`);
+console.log(`  zc-v2 stock degradation: ${V2Stock.stock ? "yes (unexpected!)" : "no"}`);
 const data = makeAccounts();
 
 {
@@ -253,14 +256,14 @@ report("官方 compileFn parser（JIT·default）", s2Official);
 const s2V2 = measure(() => V2Cow.safeParse(dataCow));
 report("zc-v2 CoW parse（90% 零拷贝）", s2V2);
 console.log(
-  `\n  比值（中位）: stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   官方parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x`,
+  `\n  Ratios (median): stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   official parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x`,
 );
 
 /* ─────────────────────────── S3: 脏比例扫描 ─────────────────────────── */
 
 console.log(`\n═══ S3 脏比例扫描 · role 缺失比例 → default 注入 ═══`);
 console.log(
-  `  ${"缺失比例".padEnd(8)} ${"stock".padStart(8)} ${"官方JIT".padStart(8)} ${"zc-v2".padStart(8)} ${"stock/v2".padStart(8)}   ${"v2驻留".padStart(8)} ${"stock驻留".padStart(9)}`,
+  `  ${"missing".padEnd(8)} ${"stock".padStart(9)} ${"off.JIT".padStart(9)} ${"zc-v2".padStart(9)} ${"stock/v2".padStart(9)}   ${"v2 retain".padStart(9)} ${"stock ret".padStart(10)}`,
 );
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);

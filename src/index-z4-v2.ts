@@ -1,16 +1,18 @@
 /**
- * zc-v2 公开 API —— 引擎为「zod4 官方 codegen + CoW 容器修饰」
- * （Task 6 起支持 tuple 骨架 + async schema）。
+ * zc-v2 public API — the engine is "zod4 official codegen + CoW container skeletons"
+ * (tuple skeletons and async schemas supported since Task 6).
  *
- *   compile(schema) 返回：
- *     .parse(data)      CoW 语义：成功返回输出（干净输入 === 输入原引用）
- *     .safeParse(data)  不抛错版本；失败路径 = stock safeParse（官方 issues/ZodError）
- *     .parseAsync(data)       async 版（骨架含 async 子树时唯一可用入口）
- *     .safeParseAsync(data)   async 版
- *     .validate(data)   纯校验：官方整树 assertOnly 产物；通过返回输入原引用，失败 null
- *     .code             生成的 CoW 骨架源码（debug 用）
- *     .stock            stock 降级标志（true = 本层放弃，全部走 stock）
- *     .async            true = 骨架含 async 子树 → sync API 抛 $ZodAsyncError（官方同款语义）
+ *   compile(schema) returns:
+ *     .parse(data)      CoW semantics: returns the output on success (clean input === the input reference)
+ *     .safeParse(data)  non-throwing variant; the failure path is stock safeParse (official issues/ZodError)
+ *     .parseAsync(data)       async variant (the only usable entry when the skeleton holds an async subtree)
+ *     .safeParseAsync(data)   async variant
+ *     .validate(data)   pure validation: official whole-tree assertOnly product; returns the input
+ *                       reference when it passes, null when it fails
+ *     .code             generated CoW skeleton source (for debugging)
+ *     .stock            stock degradation flag (true = this layer gave up, everything goes through stock)
+ *     .async            true = the skeleton holds an async subtree, so the sync API throws
+ *                       $ZodAsyncError (same semantics as stock)
  */
 import type { z } from "zod4";
 import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";

@@ -22,7 +22,7 @@ The interpreter (`schema.safeParse`) always rebuilds the entire output tree, eve
 
 1. Structural-sharing (CoW) parse layers. The compiler emits unconditional new containers (`const out = {...}`, `new Array(n)`). A thin layer that rewrites container emission into "compare child outputs by reference and copy only when something changed" gets the gains shown in the benchmarks below, and it cannot be built without access to the compiled artifacts.
 2. Validation-only paths. The `assertOnly` artifact validates the full tree and skips output construction. That suits request validation, form validation and column-level checks in table UIs, where the input object is usually reused as is.
-3. Async trees. Stock async parse walks the schema interpretively and allocates a promise per node. A compiled skeleton that `await`s black-box islands only where the async code lives, and keeps synchronous reference comparison everywhere else, measured 3.23x on 5k rows with 32% less allocation pressure.
+3. Async trees. Stock async parse walks the schema interpretively and allocates a promise per node. A compiled skeleton that `await`s black-box islands only where the async code lives, and keeps synchronous reference comparison everywhere else, measured 2.67x on 5k rows with 30% less allocation pressure.
 
 ### What exists today
 

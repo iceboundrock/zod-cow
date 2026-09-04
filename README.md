@@ -107,7 +107,8 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 
 | Feature | Copies when |
 |---|---|
-| string / number / boolean / bigint / date / literal / enum / instanceof, refine (pure predicate), optional / nullable / readonly / any / unknown | Never |
+| string / number / boolean / bigint / date / literal / enum / instanceof, refine (pure predicate), optional / nullable / any / unknown | Never |
+| readonly | Always in the zod4 line: the purity analysis treats `Object.freeze` as a side effect, so the subtree goes through the official parser, which builds a new container and freezes the copy. The input stays unfrozen and unshared. The zod3 line freezes the input in place and returns it |
 | object / array / tuple / record / map / set | Never while every child is unchanged: the input reference is returned |
 | union / discriminatedUnion | Never while the matching branch returns its input |
 | default | Only when `undefined` is actually replaced |
@@ -119,7 +120,7 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 Consequences that constrain every change:
 
 - Never mutate the input. Strip must never `delete` on the input object.
-- Output may alias input, so refines must not mutate, and `readonly` freezing is applied to shared structure.
+- Output may alias input, so refines must not mutate. Where a line freezes in place (the zod3 line's `readonly`), the freeze lands on the shared input.
 - Failure paths return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`.
 
 ## How the zod4 line stays aligned with stock

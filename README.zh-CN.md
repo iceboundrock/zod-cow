@@ -106,7 +106,8 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 
 | 特性 | 何时拷贝 |
 |---|---|
-| string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / readonly / any / unknown | 永不 |
+| string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / any / unknown | 永不 |
+| readonly | zod4 线总是拷贝：纯度分析把 `Object.freeze` 视为副作用，子树走官方 parser，它构造新容器并冻结该副本；输入既不被冻结也不被共享。zod3 线则原地冻结输入并返回原引用 |
 | object / array / tuple / record / map / set | 所有子值未变则永不：返回输入原引用 |
 | union / discriminatedUnion | 命中分支返回其输入则永不 |
 | default | 仅当 `undefined` 实际被替换 |
@@ -118,7 +119,7 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 由此约束每一处改动：
 
 - 绝不修改输入。strip 绝不能在输入对象上 `delete`。
-- 输出可能与输入别名，所以 refine 不得修改值，`readonly` 的冻结会作用到共享结构上。
+- 输出可能与输入别名，所以 refine 不得修改值。凡是原地冻结的线（zod3 线的 `readonly`），冻结会落在共享的输入上。
 - 失败路径只返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。
 
 ## zod4 线如何与 stock 保持一致

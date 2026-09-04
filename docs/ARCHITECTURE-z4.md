@@ -163,7 +163,7 @@ zc-z4's compile-time dispatch (`emitNode`):
 
 ```
 needsValue && cowSafeContainerForChild(schema)?
-  ├─ yes → emitBoxedContainer (unwrap optional/nullable) → one of the five container skeletons
+  ├─ yes → emitBoxedContainer (unwrap optional/nullable) → one of the six container skeletons
   └─ no  → isPure(schema)?
         ├─ yes → official assertOnly product + return accessor (output === input)
         └─ no  → official parser product (dirty check by reference comparison, performed by the host skeleton)
@@ -391,7 +391,7 @@ A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-137
    (the case where a trailing optional truncates to the input length can keep the original reference).
 
 The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
-(S6: 4.39x vs stock / 2.47x vs the official parser, the highest ratio of all scenarios).
+(S6 in run 33837195401: 2.99x vs stock / 1.88x vs the official parser, the widest margin over the official parser of all scenarios).
 
 ### 5.5 async channel (added in v0.5)
 
@@ -415,7 +415,7 @@ A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncEr
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
 
 In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
-(S7: an async transform scenario over 5 000 rows, 3.23x vs stock safeParseAsync, allocation -32%).
+(S7 in run 33837195401: an async transform scenario over 5 000 rows, 2.67x vs stock safeParseAsync, allocation -30%).
 
 ## 6. Degradation chain state machine
 
@@ -496,7 +496,7 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 
 - `tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `tests/smoke-z4-tuple-async.test.ts`
-  (tuple truncate/fill/rest/refine + the async channel across the five containers / lazy(async) / union async branches) all pass.
+  (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine / async transform wrappers), fully consistent with stock zod4:
@@ -539,8 +539,8 @@ which would remove the largest single internal dependency.
   not two options still being maintained.
 - zc-z4 (official codegen + CoW decoration) is the right answer for the zod4 era: semantic correctness is outsourced to the official
   compiler and runtime, the self-written surface shrinks to "purity analysis + 6 container skeletons + async channel", and upstream
-  optimizations benefit it automatically; speed is level with the official JIT on objects and ahead on containers (record/map/set 1.5x, tuple 2.5x), async 3.2x vs stock
-  (2.1~4.4x against stock overall), with GC-retained memory down to zero.
+  optimizations benefit it automatically; speed is level with the official JIT on objects and ahead on containers (record/map/set 1.76x, tuple 1.88x), async 2.67x vs stock
+  (2.4~3.7x against stock overall; run 33837195401, see §7), with GC-retained memory down to zero.
 - Both routes share the same CoW mental model: reference comparison is the dirty signal, path-copying is the copy strategy.
   The only difference is who implements the validation and transformation layer.
 

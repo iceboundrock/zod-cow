@@ -9,21 +9,21 @@
 import { z } from "zod";
 
 export interface ProbeResult {
-  /** strip 模式下，optional 键在输入中缺席时，输出是否保留显式 `key: undefined` */
+  /** In strip mode, whether the output keeps an explicit `key: undefined` when an optional key is absent from the input */
   absentOptionalKeptStrip: boolean;
-  /** passthrough 模式下同上 */
+  /** Same as above, in passthrough mode */
   absentOptionalKeptPassthrough: boolean;
-  /** strip 模式下，键存在但值为 undefined（schema 接受 undefined）时，输出是否保留该键 */
+  /** In strip mode, whether the output keeps a key that is present with value undefined (the schema accepts undefined) */
   presentUndefKeptStrip: boolean;
-  /** passthrough 模式下同上 */
+  /** Same as above, in passthrough mode */
   presentUndefKeptPassthrough: boolean;
-  /** strip 模式下，键存在但值为 undefined（schema 是 z.any()，必接受）时，输出是否保留该键 */
+  /** In strip mode, whether the output keeps a key that is present with value undefined (the schema is z.any(), which must accept) */
   presentUndefKeptAnyStrip: boolean;
-  /** 输出对象键序：是否按 shape 声明序重排（true）还是保留输入序（false） */
+  /** Output object key order: reordered to the shape declaration order (true) or the input order kept (false) */
   outputFollowsShapeOrder: boolean;
-  /** strict 模式 extras 是否也会让 alwaysValid 键被物化（仅信息性） */
+  /** Whether strict-mode extras also cause alwaysValid keys to be materialized (informational only) */
   strictExtraIssuePath: string;
-  /** zod record：值未变时输出是否为原引用（仅信息性） */
+  /** zod record: whether the output is the original reference when no value changed (informational only) */
   recordRebuilds: boolean;
   zodVersion: string;
 }
@@ -42,7 +42,7 @@ function computeProbe(): ProbeResult {
   const orderSchema = z.object({ x: z.string(), y: z.string() });
   const ordered = orderSchema.parse({ y: "1", x: "2" }) as Record<string, unknown>;
 
-  // strict 模式下 unrecognized_keys 的 path（信息性）
+  // The path of unrecognized_keys in strict mode (informational)
   let strictPath = "";
   {
     const r = z
@@ -52,13 +52,13 @@ function computeProbe(): ProbeResult {
     if (!r.success) strictPath = JSON.stringify(r.error.issues[0]?.path ?? []);
   }
 
-  // record 是否重建（信息性）
+  // Whether record rebuilds (informational)
   const recIn = { k: 1 };
   const recOut = z.record(z.string(), z.number()).parse(recIn) as Record<string, unknown>;
 
   const version = (() => {
     try {
-      // zod 未导出 version，从其 package.json 读
+      // zod does not export a version, so read it from its package.json
       // biome-ignore lint/security/noGlobalEval: probe script; borrows CJS require from an ESM entry to read zod/package.json
       const req = eval("require") as NodeRequire;
       return req("zod/package.json").version as string;

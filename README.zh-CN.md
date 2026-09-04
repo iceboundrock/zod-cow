@@ -28,7 +28,7 @@ zod 3 与 zod 4 并排安装：`import { z } from "zod"` 是 3.24.1，`import { 
 
 ## 快速开始
 
-Requires Node.js >= 22.13.0 and pnpm 11.24.0.
+需要 Node.js >= 22.13.0 与 pnpm 11.24.0。
 
 ```bash
 pnpm install
@@ -37,6 +37,7 @@ pnpm test            # zod3 线：27 个单元测试 + 20000 case 差分模糊�
 pnpm run bench:z4    # zod4 基准，50 万条记录（需 node --expose-gc，脚本已配置）
 pnpm run bench       # zod3 基准
 pnpm run probe:z4    # 勘察 stock zod4 的 def 结构与行为
+pnpm run probe       # 实测 stock zod3 的边界语义（zod3 线）
 pnpm exec tsx examples/demo.ts   # 60 秒 demo：CoW 的三个承诺（zod3 线）
 ```
 

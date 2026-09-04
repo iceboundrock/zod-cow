@@ -35,6 +35,7 @@ pnpm test            # zod3 line: 27 unit tests + 20 000-case differential fuzz 
 pnpm run bench:z4    # zod4 benchmark, 500 000 records (needs node --expose-gc, already in the script)
 pnpm run bench       # zod3 benchmark
 pnpm run probe:z4    # survey stock zod4 def structure and behavior
+pnpm run probe       # probe stock zod3 edge semantics (zod3 line)
 pnpm exec tsx examples/demo.ts   # 60-second demo of the three CoW promises (zod3 line)
 ```
 

@@ -3,10 +3,10 @@
 > Version anchor: zod 4.5.4 · every piece of generated code in this document is a real product dump (`compileFn(schema, {debug:true})` and `compileCowDebug(schema)`).
 > Companion code: `src/cow4/` (the current zod4 line, reusing the official compiler; module layout in §11).
 >
-> **v1 is no longer in the repository**: the self-written zod4 front-end (at the time `src/compile-z4.ts` + `src/index-z4.ts`) was deleted
+> v1 is no longer in the repository: the self-written zod4 front-end (at the time `src/compile-z4.ts` + `src/index-z4.ts`) was deleted
 > after zc-z4 landed (issue #4). The path `src/index-z4.ts` today refers to the zc-z4 entry.
-> Every description of v1 in this document, together with its code references and benchmark numbers, is a **historical
-> comparison**, recording the decision path of "why we went from self-written codegen to reusing the official codegen";
+> Every description of v1 in this document, together with its code references and benchmark numbers, is a historical
+> comparison, recording the decision path of "why we went from self-written codegen to reusing the official codegen";
 > the corresponding source has to be traced back to commits from before the deletion. The only zod4 compile line in the
 > current repository is zc-z4.
 
@@ -25,22 +25,22 @@
 | following upstream upgrades | a manual semantic sync every time | automatic benefit (official compiler optimizations) |
 | risk | semantic drift (regexes / issue format) | dependence on internal APIs (the `zod4/v4/core` export surface) |
 
-**Conclusion first**: zod4's JIT compiler (`src/v4/core/compile.ts`) is a ready-made semantic backend.
-The right layering is not "write another compiler", it is: **official products serve as the leaves and subtrees,
-the CoW skeleton only takes over the containers, and any failure falls back to the stock runtime**.
+The conclusion: zod4's JIT compiler (`src/v4/core/compile.ts`) is a ready-made semantic backend.
+Rather than writing another compiler, the layer uses official products as the leaves and subtrees,
+takes over only the containers with the CoW skeleton, and falls back to the stock runtime on any failure.
 
 ---
 
 ## 1. Background: why there were once two routes
 
-The fork approach in the Numeric article is "cut features to buy performance" (drop 7 features such as default/transform/catch,
-eliminating the deep copy). The CoW layer (this repository) proves that those 7 features can be kept: reference comparison is
+The fork approach in the Numeric article is "cut features to buy performance" (drop 7 features such as default/transform/catch
+so the deep copy disappears). The CoW layer (this repository) proves that those 7 features can be kept: reference comparison is
 a natural dirty signal. A child returning the original reference means unchanged, returning a new value means changed, and only
 at that moment does the parent make its first shallow copy (path-copying).
 
 In the zod3 era this required writing an entire compile layer ourselves (the v1 route). Since zod 4.1 the official project
 also shipped a JIT (`import "zod/compile"` or `z.compile()`) and exposed a programmable internal API. That is where the zc-z4
-route comes from: **do not write a semantic codegen of our own, use the official compiler as a "leaf-level / expression-level" backend**.
+route comes from: do not write a semantic codegen of our own, use the official compiler as a "leaf-level / expression-level" backend.
 
 ## 2. The reusable surface of the official codegen (evidence from the source)
 
@@ -67,7 +67,7 @@ Three key product contracts:
 
 Another official mount point is `globalConfig.postProcessor` (the side-effect entry of `zod/compile` installs its shim
 there). This layer does not use it (that is the "clone every instance and replace run" route, incompatible with CoW's
-"whole-tree product"), but note that the two **can coexist**: zc-z4's failure fallback calls
+"whole-tree product"), but note that the two can coexist: zc-z4's failure fallback calls
 `schema.safeParse`, so if the user also enables `zod/compile`, the fallback path automatically enjoys the official JIT.
 
 ### 2.1 The real code the official compiler generates for an object (parser mode)
@@ -99,8 +99,8 @@ return v8;
 ```
 
 Three things to note: (1) the getter is read exactly once (`const v0 = input["a"]`; the checks and the output assembly do not
-trigger it a second time); (2) leaf optimization is extremely fine-grained (`.max(4)` only counts code points for long strings);
-(3) **output construction is unconditional**: even when every child value passes through unchanged, there is still a `new Array`
+trigger it a second time); (2) leaf optimization is fine-grained (`.max(4)` only counts code points for long strings);
+(3) output construction is unconditional: even when every child value passes through unchanged, there is still a `new Array`
 plus a new object literal. That is the source of stock's allocation pressure (500 000 accounts, +112MB), and it is the only
 place CoW needs to "decorate".
 
@@ -118,7 +118,7 @@ return true;                                      // <- constructs no output at 
 
 `assertOnly` cuts output construction away entirely and keeps the validation semantics untouched, which is exactly the product
 that a "pure subtree" needs in CoW. Measured (500 000 accounts, assertOnly in a per-account loop): **265ms / +13MB**, against
-the parser product's 332ms / +112MB. **The net cost of output construction = 67ms + 99MB of allocation**.
+the parser product's 332ms / +112MB. The net cost of output construction is 67ms plus 99MB of allocation.
 
 ### 2.3 The product shape of transform/default/optional
 
@@ -152,10 +152,8 @@ if (v2 !== undefined || "role" in input) v9["role"] = v2;   // the mayOutputUnde
 
 These are exactly the semantics v1 kept tripping over in the differential tests (default short-circuit, absent keys not
 materialized, exactOptional, catch constant values, record numeric-key retry, for...in inherited keys, and so on).
-**zc-z4 lets the official compiler digest all of these details, and the self-written layer only does purity dispatch**.
+zc-z4 lets the official compiler digest all of these details, and the self-written layer only does purity dispatch.
 That is why the code went from 1100 to 600 lines while correctness moved ahead.
-
-(To be continued; next section: the zc-z4 skeleton dump side by side)
 
 ## 3. zc-z4's generated code: how the official product gets decorated by CoW
 
@@ -238,7 +236,7 @@ Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
 
 ## 4. Purity analysis: the whitelist and the three traps
 
-**Definition**: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.
+Definition: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.
 A pure subtree goes through the official validator (value = input); anything uncertain is treated as impure (parser product + reference comparison).
 
 | def.type | Verdict | Reason |
@@ -253,7 +251,7 @@ A pure subtree goes through the official validator (value = input); anything unc
 
 ### Trap one: `overwrite` rewrites values (proved by differential seed=51)
 
-In zod4 `z.string().max(16).toLowerCase()` is not a schema wrapper but an **`overwrite` check** inside def.checks.
+In zod4 `z.string().max(16).toLowerCase()` is an `overwrite` check inside def.checks, not a schema wrapper.
 The whitelist judged string pure → the validator passed → `return input` →
 stock output "ab1" vs ours "AB1". Fix: leaf purity must inspect the node's own checks.
 `overwrite` is always impure; a `custom` check with no `fn` (superRefine can rewrite `ctx.value`) is always impure.
@@ -270,22 +268,22 @@ as a "custom when" → an array with `.max(8)` was misjudged impure → it went 
 ### Trap three: `nullable(object)` must be unwrapped (proved by differential seed=104/133/137)
 
 If container recognition only looks at `def.type === "object"`, `nullable(object)` falls into the "pure leaf key" branch
-and goes through the official assertOnly. But the official validator **skips stripping extra keys** (strip is an
+and goes through the official assertOnly. But the official validator skips stripping extra keys (strip is an
 output-construction behavior and does not affect whether validation succeeds) → the input's extra keys pass straight through →
 divergence from stock. Fix:
 `cowSafeContainerForChild` unwraps along the optional/nullable chain, `emitBoxedContainer`
 emits the wrapper checks (null→null, undefined→undefined), and once at the container the CoW skeleton takes over.
 
 > Methodology: not one of these four bugs was found by reading code; all of them were caught by differential testing
-> with random schemas (`REPRO=seed:case` reproduces one in a single command). **The completeness of purity analysis can only be
-> verified by fuzzing**: the whitelist's conservatism of "rather misjudge as impure" plus 50 000 differential cases is the
+> with random schemas (`REPRO=seed:case` reproduces one in a single command). The completeness of purity analysis can only be
+> verified by fuzzing: the whitelist's conservatism of "rather misjudge as impure" plus 50 000 differential cases is the
 > safety boundary of this route.
 
 ## 5. record/map/set skeletons (added in v0.4, aggressive full coverage)
 
 These three official generators are equally "unconditional new container": record `const v0 = {}`, map
 `new Map()` (plus a destructuring allocation per entry), set `new Set()`. The skeleton strategy matches object,
-with two extra CoW-specific problems: **key names can change** (numeric-key retry / key transformation) and **key order** (declaration-driven).
+with two extra CoW-specific problems: key names can change (numeric-key retry / key transformation) and key order is declaration-driven.
 
 ### 5.1 record: three compile-time paths
 
@@ -297,7 +295,7 @@ keyType._zod.values exists and is not partial?
         └─ no  → Path B: keyFast product + numeric-key retry + key-name reference comparison
 ```
 
-**Path C** (the most common) generates this skeleton:
+Path C (the most common) generates this skeleton:
 
 ```js
 if (!c0(input)) return INVALID;                            // util.isPlainObject (the official function of the same name)
@@ -317,12 +315,12 @@ for (const k of Reflect.ownKeys(input)) {
 return x0;                                                 // clean → the original reference
 ```
 
-**Path B** (numeric-key retry, key names can change): reuses the official `keyFast + regexes.number retry`
-template and additionally performs a **key-name reference comparison**: `outKey !== k` also counts as dirty, and the copy branch does
+Path B (numeric-key retry, key names can change): reuses the official `keyFast + regexes.number retry`
+template and additionally performs a key-name reference comparison: `outKey !== k` also counts as dirty, and the copy branch does
 `delete out[k]; out[outKey] = t;`. In the sub-case where key names do not change (string-format keys such as
 `z.record(z.email(), v)`), `outKey === k` always holds and the key-name comparison costs nothing.
 
-**Path A** (enum, declaration-driven): the official output = **unconditionally materialize every declared key** in declaration order
+Path A (enum, declaration-driven): the official output unconditionally materializes every declared key in declaration order
 (a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
 
 - a missing declared key is dirty (`!(k in input)` → stock materializes that key);
@@ -354,13 +352,13 @@ return out;
 // set: reference comparison on members, new Set(input) on the first dirt, delete(vIn) + add(vo)
 ```
 
-- **Zero cost when the key is pure**: for a key schema (string/number) the official product passes the original key through →
+- No cost when the key is pure: for a key schema (string/number) the official product passes the original key through →
   `keyExpr === kIn` always holds, and V8 optimizes the key-name comparison away.
-- **Correctness of key transformation**: when the key is a container or a transform (rare), the CoW/parser product returns a new key, and
+- Key transformation stays correct: when the key is a container or a transform (rare), the CoW/parser product returns a new key, and
   `delete(kIn) + set(newKey)` matches stock (stock also sets the transformed key on a Map).
-- **NaN**: `vo !== vIn` is always true for NaN → a false dirty verdict → an over-copy, but the result is correct
+- NaN: `vo !== vIn` is always true for NaN → a false dirty verdict → an over-copy, but the result is correct
   (under SameValueZero `delete/add` is equivalent). This matches the NaN note already in the README.
-- **Map/Set deepStrictEqual**: Node's assert compares Map/Set as **entry sets**
+- Map/Set deepStrictEqual: Node's assert compares Map/Set as entry sets
   (order-independent), so the ordering difference of `delete+set/add` does not affect the differential.
 
 ### 5.3 Wiring
@@ -375,19 +373,19 @@ return out;
 
 A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-1374) plus CoW decoration. Three key semantic mechanisms:
 
-1. **optinStart / optoutStart** (the official `getTupleOptStart`, copied verbatim): scan from the tail toward the head for the first
+1. optinStart / optoutStart (the official `getTupleOptStart`, copied verbatim): scan from the tail toward the head for the first
    slot that cannot be omitted. The optin ladder has three rungs (`optin !== undefined` is enough to be omissible, covering optional/defaulted),
    optout has two (only `optout === "optional"`). Length guard: `[optinStart, N]` when there is no rest,
    `>= optinStart` when there is.
-2. **The fillLen variable** (invented in this layer): the official code uses the dynamic `out.length` for trailing-slot gating (`if (out.length === i)`),
+2. The fillLen variable (invented in this layer): the official code uses the dynamic `out.length` for trailing-slot gating (`if (out.length === i)`),
    but under CoW the output may still be the original input reference (its `.length` must not be read or written), so the logical length
    has to be tracked explicitly.
    Invariant: `out === input ⟹ fillLen === input.length` (the truncate/fill paths always copy first).
-3. **Three segments**: segment 1, `[0, optoutStart)`, the unconditional slots (the official code materializes absent slots all the same: a validator slot writes
+3. Three segments: segment 1, `[0, optoutStart)`, the unconditional slots (the official code materializes absent slots all the same: a validator slot writes
    `undefined`, a value slot writes the produced value); segment 2, trailing-slot gating plus three absence branches (`dropsWhenAbsent` → truncate
    / validator → truncate / IIFE → INVALID or undefined truncates, a value fills); segment 3, rest, slot by slot with no gating.
    Truncation has three states: already copied → truncate for real; the original reference and the target length ≠ the input length → copy then truncate;
-   **target === the input length → output === input, zero operations**
+   target === the input length → output === input, zero operations
    (the case where a trailing optional truncates to the input length can keep the original reference).
 
 The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
@@ -395,26 +393,26 @@ The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new
 
 ### 5.5 async channel (added in v0.5)
 
-**Design premise**: the official compileFn always throws `ZodCompileAsyncError` for async (refine/transform/custom/superRefine/pipe, 6
+Design premise: the official compileFn always throws `ZodCompileAsyncError` for async (refine/transform/custom/superRefine/pipe, 6
 `isAsyncFunction` detection points in total), which is exactly a ready-made "subtree async detector".
 This layer turns "async detected → degrade the whole tree" into "convert in place to an async island + a local await in the skeleton":
 
-1. **async island**: `makeAsyncIsland(schema)` = an async black box returning `Promise<output | INVALID>`,
+1. async island: `makeAsyncIsland(schema)` = an async black box returning `Promise<output | INVALID>`,
    and the product carries the `ZC_ASYNC` symbol marker.
-2. **await emission**: every product call site (object keys / array elements / tuple slots / record values / map keys and values / set members /
+2. await emission: every product call site (object keys / array elements / tuple slots / record values / map keys and values / set members /
    the async refine predicate of container checks) checks `isAsyncProduct(fn)` → emits `await` and sets `ctx.async = true`.
-3. **making the skeleton async**: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
+3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
-4. **public API**: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
+4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
    under an async skeleton the sync API throws `$ZodAsyncError` (the same semantics as the official code; measured, a sync parse on an async tree does throw).
-5. **plugging the lazy(async) hole**: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
+5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
 
-**A key semantic preserved**: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
+A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
 
-**Mixed result**: within one tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
+In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
 (S7: an async transform scenario over 50 000 rows, 2.50x vs stock safeParseAsync, allocation -63%).
 
 ## 6. Degradation chain state machine
@@ -472,18 +470,18 @@ The `zc-v1` column is the last measurement taken before that front-end was delet
 | S7 async transform (50 000 rows) | 262ms (safeParseAsync) | compile rejected | **105ms (safeParseAsync)** | not supported | — |
 | S7 allocation pressure | +95.6MB | — | **+34.9MB** | — | — |
 
-Three levels of reading:
+How to read it:
 
-1. **Against stock**: 2.31x (S1) ~ 2.50x (S2) ~ 2.61x (S5) ~ **4.57x (S6 tuple, the highest of all scenarios)**,
+1. Against stock: 2.31x (S1) ~ 2.50x (S2) ~ 2.61x (S5) ~ **4.57x (S6 tuple, the highest of all scenarios)**,
    with retained memory going from 123~217MB to zero; the async scenario (S7) is 2.50x.
-2. **Against the official JIT parser**: essentially level in clean scenarios (S1 0.93~1.00x, within batch-to-batch noise; the output
-   construction the skeleton saves exactly offsets the call overhead of the sub-skeleton functions); **ahead in dirty scenarios** (S2 1.47x, S5 1.93x, S6 3.06x),
+2. Against the official JIT parser: level in clean scenarios (S1 0.93~1.00x, within batch-to-batch noise; the output
+   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in dirty scenarios (S2 1.47x, S5 1.93x, S6 3.06x),
    because the default shallowClone and whole-tree rebuild of the official stock semantics are a fixed cost, while CoW only pays for the paths
    that actually got dirty. The 3.06x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
    while the slots barely change), so CoW decoration gains the most there.
-3. **async channel** (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
+3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
    skeleton; an all-dirty async transform scenario is still 2.50x, with allocation -63% (95.6→34.9MB).
-4. **validate fast path**: the official assertOnly whole-tree product, 50ms / 500 000 = 100ns per account,
+4. validate fast path: the official assertOnly whole-tree product, 50ms / 500 000 = 100ns per account,
    4.4x faster than the official per-account call (219ms, including payload wrapping), with zero allocation.
 
 S1's +30.5MB of short-lived allocation comes from inside the official leaf products (temporary values in the datetime/email format checks),
@@ -495,13 +493,13 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 - `tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel across the five containers / lazy(async) / union async branches) all pass.
-- `tests/differential-z4.test.ts`: **50000 cases** (seeds=500×100, randomly nested
+- `tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
-  + **async refine / async transform** wrappers), fully consistent with stock zod4:
+  + async refine / async transform wrappers), fully consistent with stock zod4:
   - success/failure parity identical (20813 successes / 29187 failures)
   - outputs identical under `deepStrictEqual` (Map/Set compared as entry sets)
   - zero input distortion (compared against a structuredClone snapshot)
-  - top-level reference-sharing rate **89.1%** (over successful cases), 0 degradations to stock
+  - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
 - Known misalignment (deliberately kept): with an async rest slot and a nullable null input, the stock runtime produces
   a sparse array and loses the null (deterministic repro: `z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length", slot 1 becomes a hole).
@@ -511,7 +509,7 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 
 ## 9. Version anchor and risks
 
-**The official internal surface we depend on** (all publicly exported through `zod4/v4/core`, but positioned as internal by the official comments):
+The official internal surface we depend on (all publicly exported through `zod4/v4/core`, but positioned as internal by the official comments):
 
 | API | Purpose | Drift risk |
 |---|---|---|
@@ -523,7 +521,7 @@ a small amount of short-lived allocation was decided in favor of zc-z4 in a prod
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | **medium**: must be synced when zod changes the `when` semantics |
 | `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | **medium**: must be synced when zod changes the optin/optout ladder |
 
-**Mitigations**: the degradation chain guarantees that any drift shows up at worst as "degrading to stock" (correctness is never lost);
+Mitigations: the degradation chain guarantees that any drift shows up at worst as "degrading to stock" (correctness is never lost);
 the async channel uses `ZodCompileAsyncError` as an async detector maintained by the official project (when the official code adds async detection points,
 this layer follows automatically); the 50 000-case differential test (including the tuple/async generators) is a mandatory regression gate when upgrading zod;
 an upstream issue has been drafted to push `compileFn`/assertOnly toward becoming public (docs/upstream-issue-draft.md),
@@ -531,15 +529,15 @@ which would remove the largest single internal dependency.
 
 ## 10. Conclusion: where each of the two routes applies
 
-- **v1 (self-written codegen)** applies to strongly controlled environments and long support windows: zero dependence on internal APIs
+- v1 (self-written codegen) applies to strongly controlled environments and long support windows: zero dependence on internal APIs
   (it only reads `_zod.def`), lower allocation, and the ability to pin an old zod version. This repository no longer needs that domain:
   it maintains a single zod4 line, and v1 was removed with issue #4; the comparison below is therefore a decision record,
   not two options still being maintained.
-- **zc-z4 (official codegen + CoW decoration)** is the right answer for the zod4 era: semantic correctness is outsourced to the official
+- zc-z4 (official codegen + CoW decoration) is the right answer for the zod4 era: semantic correctness is outsourced to the official
   compiler and runtime, the self-written surface shrinks to "purity analysis + 6 container skeletons + async channel", and upstream
   optimizations benefit it automatically; speed is level with the official JIT and ahead in dirty scenarios by 1.5~1.9x, tuple 3.1x, async 2.5x
   (2.3~4.6x against stock), with GC-retained memory down to zero.
-- Both routes share the same CoW mental model: **reference comparison is the dirty signal, path-copying is the copy strategy**.
+- Both routes share the same CoW mental model: reference comparison is the dirty signal, path-copying is the copy strategy.
   The only difference is who implements the validation and transformation layer.
 
 ## 11. Source layout (issue #5)

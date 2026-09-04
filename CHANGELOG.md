@@ -26,18 +26,18 @@ Tuple CoW skeleton, async schema support, upstream issue draft.
 
 ### Added
 
-- **Tuple skeleton**, completing the six containers. A line-by-line mirror of the official `generateTupleCheck` with the CoW rewrite applied.
+- Tuple skeleton, completing the six containers: a line-by-line mirror of the official `generateTupleCheck` with the CoW rewrite applied.
   - `optinStart` / `optoutStart` (official `getTupleOptStart`, copied verbatim) plus the official length guard (`[optinStart, N]` when there is no rest element).
   - A `fillLen` variable: the official template gates trailing slots on the dynamic `out.length`, but under CoW the output may still be the input reference, whose `.length` must not be read or written, so the logical length is tracked explicitly. Invariant: `out === input ⟹ fillLen === input.length`.
   - Three segments: unconditional slots (absent slots keep the official materialization semantics), gated trailing slots with three absent-branches (`dropsWhenAbsent` truncation, validator truncation, IIFE INVALID/undefined truncation, value fill), and ungated rest slots.
-  - Three truncation states: already copied, truncate in place; still the input reference and target length differs from the input length, copy then truncate; target length equals the input length, output is the input, no operation. Short inputs with trailing optionals keep the original reference.
-- **Async channel** (no more whole-tree degradation for async schemas).
+  - Three truncation states. If the output is already a copy, truncate in place. If it is still the input reference and the target length differs from the input length, copy, then truncate. If the target length equals the input length, the output stays the input and nothing happens, so short inputs with trailing optionals keep the original reference.
+- Async channel: async schemas no longer degrade the whole tree.
   - The six `isAsyncFunction` throw sites in the official `compileFn` are a ready-made async detector: a `ZodCompileAsyncError` turns the subtree into an async island (returns `Promise<out | INVALID>`, product tagged with the `ZC_ASYNC` marker).
   - Every product call site (object keys, array elements, tuple slots, record values, map keys and values, set members, container check predicates) is async-aware, emitting `await` and setting `ctx.async`, so the skeleton becomes an async function and parent skeletons pick it up automatically.
   - `lazy(async …)` gap: the official compiler treats lazy products as runtime islands and reports no async error at compile time, so `subtreeHasAsync` probes the def tree statically (recursion, getter expansion, cycle guard).
   - A sync island that meets a Promise throws `$ZodAsyncError` (same semantics as the official `throwAsync`: returning INVALID would be misread by a union as a rejected branch).
   - Public API: `Compiled.async` flag plus `parseAsync` / `safeParseAsync`; the sync API on an async skeleton throws `$ZodAsyncError`, as stock does.
-- **Upstream issue draft**: [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) asks zod to promote `compileFn` / `assertOnly` / `INVALID` and the error classes to a public API, and attaches a zod4 runtime quirk found while fuzzing (async rest slots on a tuple produce a sparse array and lose a `null`, deterministic reproduction).
+- Upstream issue draft: [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) asks zod to promote `compileFn` / `assertOnly` / `INVALID` and the error classes to a public API, and attaches a zod4 runtime quirk found while fuzzing (async rest slots on a tuple produce a sparse array and lose a `null`, deterministic reproduction).
 
 ### Verification
 
@@ -46,8 +46,8 @@ Tuple CoW skeleton, async schema support, upstream issue draft.
 
 ### Benchmarks (500 000 records, node v24.19, `--expose-gc`, median of 3 runs)
 
-- S6 tuple: **4.57x** vs stock, **3.06x** vs the official parser (the highest ratio of all scenarios; tuple is the container with the largest share of reconstruction cost).
-- S7 async (50 000 rows): **2.50x** vs stock `safeParseAsync`, allocation -63%.
+- S6 tuple: 4.57x vs stock, 3.06x vs the official parser (the highest ratio of all scenarios; tuple is the container with the largest share of reconstruction cost).
+- S7 async (50 000 rows): 2.50x vs stock `safeParseAsync`, allocation -63%.
 
 The full v0.5 table (S1 to S7) is the current table in the [README](README.md#benchmarks) and in `docs/ARCHITECTURE-z4.md` §7.
 
@@ -57,11 +57,11 @@ record/map/set CoW skeletons and the architecture comparison document.
 
 ### Added
 
-- **Record skeleton** with three compile-time paths.
+- Record skeleton with three compile-time paths.
   - Path A, declaration-driven keys (enum keys): a missing declared key is dirty (stock materializes it unconditionally), unknown keys are rejected in strict mode, the copy branch writes every declared key back.
-  - Path B, general keys (string formats, numeric-key retry, `partialRecord`): the official `keyFast` product plus the numeric-key retry template, plus a **key-name reference comparison** (`outKey !== k` deletes the old key and writes the new one).
+  - Path B, general keys (string formats, numeric-key retry, `partialRecord`): the official `keyFast` product plus the numeric-key retry template, plus a key-name reference comparison (`outKey !== k` deletes the old key and writes the new one).
   - Path C, bare-string keys: key names never change, values compared by reference only.
-- **Map and set skeletons**: keys, values and members compared by reference, first dirt does `new Map(input)` / `new Set(input)`, pure keys cost nothing (key identity holds). Map/Set `.min()` / `.max()` size checks are supported.
+- Map and set skeletons: keys, values and members compared by reference, first dirt does `new Map(input)` / `new Set(input)`, pure keys cost nothing (key identity holds). Map/Set `.min()` / `.max()` size checks are supported.
 - Wiring: `cowSafeContainerForChild` / `emitBoxedContainer` / `childProduct()` extended uniformly, so `nullable(record)`, `optional(map)` and records whose values are nested objects are all CoW.
 - Architecture deep dive: [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md), the full comparison of the self-written v1 codegen with the official-codegen reuse (side-by-side generated code, purity whitelist, the three traps, the degradation-chain state machine, benchmark interpretation).
 
@@ -86,11 +86,11 @@ zod4 (>= 4.1) ships a JIT compiler, `src/v4/core/compile.ts`, reachable through 
 
 The earlier self-written zod4 front-end (v0.2) contained about 1100 lines of semantic codegen. The self-written part of v0.3 shrank to:
 
-1. **Purity analysis** (about 120 lines, a conservative whitelist) deciding "validation passes ⇒ output must be `===` input". Traps found by fuzzing: `overwrite` checks (`.trim()` / `.toLowerCase()`) rewrite values and are impure; length/size checks carry a default `when` function (the official `WHEN_DEFAULTED_CHECKS` whitelist) and must not be rejected as custom `when`; containers wrapped in `optional` / `nullable` must be unwrapped before classification (checking `def.type` alone sends `nullable(object)` to the official `assertOnly` product and loses strip semantics).
-2. **Container CoW skeleton codegen** (object and array templates, about 200 lines): the official "unconditional new container" (`const out = {...}` / `new Array(n)`) is rewritten into "reference comparison as dirty check plus conditional shallow copy". Clean input does `return input` (the one line the official template lacks); a forced copy does `out = { ...input }`, so key presence and key order are preserved by the spread, and strip detects extra keys with the official `for...in` plus `Set` probe and deletes them on the copy.
-3. **Container-level checks subroutine** (refine/min/max): an independent validation function called on both paths, matching stock semantics (checks run on the final output: the input when clean, the rebuilt `out` when dirty).
+1. Purity analysis (about 120 lines, a conservative whitelist) deciding "validation passes ⇒ output must be `===` input". Traps found by fuzzing: `overwrite` checks (`.trim()` / `.toLowerCase()`) rewrite values and are impure; length/size checks carry a default `when` function (the official `WHEN_DEFAULTED_CHECKS` whitelist) and must not be rejected as custom `when`; containers wrapped in `optional` / `nullable` must be unwrapped before classification (checking `def.type` alone sends `nullable(object)` to the official `assertOnly` product and loses strip semantics).
+2. Container CoW skeleton codegen (object and array templates, about 200 lines): the official "unconditional new container" (`const out = {...}` / `new Array(n)`) is rewritten into "reference comparison as dirty check plus conditional shallow copy". Clean input does `return input` (the one line the official template lacks); a forced copy does `out = { ...input }`, so key presence and key order are preserved by the spread, and strip detects extra keys with the official `for...in` plus `Set` probe and deletes them on the copy.
+3. Container-level checks subroutine (refine/min/max): an independent validation function called on both paths, matching stock semantics (checks run on the final output: the input when clean, the rebuilt `out` when dirty).
 
-### Degradation chain (per subtree, never trading correctness)
+### Degradation chain (per subtree, never giving up correctness)
 
 ```
 CoW container skeleton
@@ -119,8 +119,8 @@ The `zc-v1` column is the v0.3 measurement of the self-written zod4 front-end, w
 
 Takeaways at the time:
 
-- Reusing the official codegen made zc-z4 **2.0x faster than v1** (S1 566 → 280 ms), level with the official parser product (1.00x), with 73% less allocation (30.5 vs 111 MB) and 0 MB retained.
-- Under dirty load zc-z4 beat the official parser by **1.61x**: the default `shallowClone` and the output rebuild are fixed costs of stock semantics, CoW skips the rebuild of the clean part.
+- Reusing the official codegen made zc-z4 2.0x faster than v1 (S1 566 → 280 ms), level with the official parser product (1.00x), with 73% less allocation (30.5 vs 111 MB) and 0 MB retained.
+- Under dirty load zc-z4 beat the official parser by 1.61x: the default `shallowClone` and the output rebuild are fixed costs of stock semantics, CoW skips the rebuild of the clean part.
 - `validate()` is the official whole-tree `assertOnly` product: 27 ms / 500 000 accounts = 54 ns per account, 4.4x faster than arktype (120 ms), zero allocation.
 - The remaining 30.5 MB of short-lived allocation comes from inside the official leaf products (temporaries of datetime/email format checks); 0 MB retained after GC, the CoW layer itself copies nothing.
 
@@ -135,7 +135,7 @@ The layer reads zod4 internals: `compileFn` / `INVALID` / `ZodCompileUnsupported
 
 ## [0.2.0]
 
-Self-written zod4 front-end. **This compiler line was removed in #4**; the record below is the adaptation findings and the benchmark measured at the time. The script names `test:z4` / `bench:z4` and the path `src/index-z4.ts` have since been reused by the current zod4 line and mean something different today.
+Self-written zod4 front-end. This compiler line was removed in #4; the record below is the adaptation findings and the benchmark measured at the time. The script names `test:z4` / `bench:z4` and the path `src/index-z4.ts` have since been reused by the current zod4 line and mean something different today.
 
 ### Added
 

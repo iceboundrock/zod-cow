@@ -235,4 +235,45 @@ import { compile } from "../src/index-z4.js";
   );
 }
 
+/* ── readonly: the zod4 line freezes exactly what stock freezes (#28) ── */
+{
+  console.log("\n── readonly ──");
+  // Container: the official parser builds a new object and freezes the copy; the input stays unfrozen.
+  const RO = compile(z.object({ a: z.string() }).readonly());
+  const roIn = { a: "x" };
+  const roOut = RO.parse(roIn);
+  assert.notEqual(roOut, roIn);
+  assert.equal(Object.isFrozen(roIn), false);
+  assert.equal(Object.isFrozen(roOut), true);
+  console.log("  object().readonly(): output is a frozen copy, input stays unfrozen ✓");
+
+  // Pass-through leaf: stock readonly freezes whatever the inner parser hands back, which for any/unknown
+  // is the input itself. The zod4 line hands the subtree to the official parser and so does the same.
+  for (const [name, S] of [
+    ["any", z.any().readonly()],
+    ["unknown", z.unknown().readonly()],
+  ] as const) {
+    const stockIn = { a: "x" };
+    const stockOut = S.parse(stockIn);
+    assert.equal(stockOut, stockIn);
+    assert.equal(Object.isFrozen(stockIn), true);
+    const cowIn = { a: "x" };
+    const cowOut = compile(S).parse(cowIn);
+    assert.equal(cowOut, cowIn);
+    assert.equal(Object.isFrozen(cowIn), true);
+    console.log(`  ${name}().readonly(): input frozen in place, same as stock ✓`);
+  }
+
+  // Nested: the pass-through leaf freezes only its own value; the clean parent is still returned by reference.
+  const Nested = compile(z.object({ n: z.unknown().readonly() }));
+  const nIn = { n: { b: 1 } };
+  const nOut = Nested.parse(nIn);
+  assert.equal(nOut, nIn);
+  assert.equal(Object.isFrozen(nIn), false);
+  assert.equal(Object.isFrozen(nIn.n), true);
+  console.log(
+    "  object({ n: unknown().readonly() }): parent shared, nested value frozen in place ✓",
+  );
+}
+
 console.log("\nAll smoke assertions passed ✓");

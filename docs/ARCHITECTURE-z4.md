@@ -16,7 +16,7 @@ The S1 to S7 rows below are the v0.5 local measurement (500 000 accounts, node v
 
 | | v1 (self-written codegen) | zc-z4 (official codegen + CoW decoration) |
 |---|---|---|
-| Self-written code size | ~1100 lines of semantic codegen + official regexes copied verbatim | ~760 lines (purity analysis + 6 container skeletons + async channel) |
+| Self-written code (physical lines at commit c0453dd, the v0.5 import) | 1271 lines in `src/compile-z4.ts`, reimplementing zod's checks, issues and formats, plus official regexes copied verbatim | 1521 lines in `src/cow4-v2.ts`: purity analysis, 6 container skeletons, async channel, official-product wrappers and predicates copied from zod. After the #20 split, `src/cow4/` is 1667 lines across 13 modules |
 | Source of semantic correctness | reimplementing zod semantics ourselves (issue/format/check, the whole set) | official compiler + official runtime fallback |
 | S1 pure validation (500 000 accounts) | 521ms | **283ms** (~1.0x vs the official parser) |
 | S2 dirty load (10% default) | 504ms | **247ms** (1.47x vs the official parser) |
@@ -155,7 +155,7 @@ if (v2 !== undefined || "role" in input) v9["role"] = v2;   // the mayOutputUnde
 These are exactly the semantics v1 kept tripping over in the differential tests (default short-circuit, absent keys not
 materialized, exactOptional, catch constant values, record numeric-key retry, for...in inherited keys, and so on).
 zc-z4 lets the official compiler digest all of these details, and the self-written layer only does purity dispatch.
-That is why the code went from 1100 to 600 lines while correctness moved ahead.
+That is why correctness moved ahead while the self-written layer shrank in scope, not in size: measured as physical lines at commit c0453dd the two front-ends were comparable (v1 1271 lines, zc-z4 1521 lines, see §1), but v1's lines reimplement zod semantics and zc-z4's are purity dispatch, skeletons and predicates copied from zod.
 
 ## 3. zc-z4's generated code: how the official product gets decorated by CoW
 
@@ -248,7 +248,7 @@ A pure subtree goes through the official validator (value = input); anything unc
 | object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
 | record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
 | union | all branches pure | branches pass through |
-| readonly | **false** | the `Object.freeze` side effect (the risk of freezing the input) |
+| readonly | **false** | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | **false** | value producer / black box / new container |
 
 ### Trap one: `overwrite` rewrites values (proved by differential seed=51)
@@ -276,7 +276,7 @@ divergence from stock. Fix:
 `cowSafeContainerForChild` unwraps along the optional/nullable chain, `emitBoxedContainer`
 emits the wrapper checks (null→null, undefined→undefined), and once at the container the CoW skeleton takes over.
 
-> Methodology: not one of these four bugs was found by reading code; all of them were caught by differential testing
+> Methodology: not one of these three traps was found by reading code; all of them were caught by differential testing
 > with random schemas (`REPRO=seed:case` reproduces one in a single command). The completeness of purity analysis can only be
 > verified by fuzzing: the whitelist's conservatism of "rather misjudge as impure" plus 50 000 differential cases is the
 > safety boundary of this route.

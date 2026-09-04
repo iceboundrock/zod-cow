@@ -14,7 +14,7 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 - 不 fork zod、不改 Zod API：zod schema 原样消费（读取 `.def` 树），类型推断继续用 `z.infer`
 - 编译期一次性解析 shape / keys / checks，生成特化校验代码
-- zod4 线绝不改动输入：不做任何原地修改。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。冻结的 zod3 线有一个已知例外：`readonly` 会原地冻结输入（见[何时被迫拷贝](#何时被迫拷贝)与 #27）
+- 本层自身绝不改动输入：不在输入上原地删除或改写任何东西。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。唯一能落到输入上的原地写入是 `readonly` 的 `Object.freeze`：zod4 线只在 stock zod 4 自己也会冻结输入的位置冻结，即 `any` / `unknown` 这类透传叶子（见[何时被迫拷贝](#何时被迫拷贝)与 #28）；冻结的 zod3 线则在每个 `readonly` 节点上原地冻结（#27）
 - 失败路径不自带 issue 数据：编译产物返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`
 
 ## 两条编译线
@@ -107,7 +107,7 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 | 特性 | 何时拷贝 |
 |---|---|
 | string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / any / unknown | 永不 |
-| readonly | zod4 线总是拷贝：纯度分析把 `Object.freeze` 视为副作用，子树走官方 parser，它构造新容器并冻结该副本；输入既不被冻结也不被共享。zod3 线则原地冻结输入并返回原引用 |
+| readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线在每个 `readonly` 节点上原地冻结输入并返回原引用（#27） |
 | object / array / tuple / record / map / set | 所有子值未变则永不：返回输入原引用 |
 | union / discriminatedUnion | 命中分支返回其输入则永不 |
 | default | 仅当 `undefined` 实际被替换 |
@@ -118,7 +118,7 @@ fast.pure;            // 静态纯度：true 表示成功时恒等返回输入�
 
 由此约束每一处改动：
 
-- 绝不修改输入。strip 绝不能在输入对象上 `delete`。zod3 线的 `readonly` 原地冻结输入并返回原引用，是唯一已知例外（#27）；zod4 线先拷贝再冻结。
+- 绝不修改输入。strip 绝不能在输入对象上 `delete`。唯一的原地写入是 `readonly` 的 `Object.freeze`：zod4 线对容器冻结副本，对透传叶子则与 stock 一样原地冻结（#28）；zod3 线在每个 `readonly` 节点上原地冻结输入（#27）。
 - 输出可能与输入别名，所以 refine 不得修改值。
 - 失败路径只返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。
 
@@ -177,7 +177,7 @@ zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4
 
 ## 已知限制（原型范围）
 
-- 结构共享可观察：两次 parse 同一输入返回同一引用；修改输出会影响输入。类型层用 `DeepReadonly` 提示；需要独立副本时用 stock `schema.parse`。
+- 结构共享可观察：两次 parse 同一输入返回同一引用；修改输出会影响输入。只有 zod3 线的 `validate()` 在类型层用 `DeepReadonly` 提示这一点；zod4 线的 `validate()` 返回 `unknown`，`parse` / `safeParse` 用普通的 zod 输出类型。需要独立副本时用 stock `schema.parse`。
 - refine 不得修改输入（CoW 前提）；开发期可 deep-freeze 输入抓违规。
 - 失败时的 refine 副作用：parse 失败时 refine 回调先在骨架里跑一次，再在 stock 回退里跑一次，共两次。官方 `zod/compile` shim 语义相同。
 - 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。

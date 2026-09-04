@@ -63,7 +63,7 @@ zod 3 and zod 4 are installed side by side: `import { z } from "zod"` is 3.24.1,
 
 Every compiled node is `(input) => output | FAILED-sentinel`. Dirtiness needs no protocol: a child returning the same reference means "unchanged"; a parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)`) only at the first changed child, then writes further dirty children into that copy. Primitives compare by value (`'x'.trim() === 'x'` is clean). Consequences that constrain every change:
 
-- Never mutate input. Strip must never `delete` on the input object. The one known exception is the zod3 line's `readonly`, which freezes the input in place and returns it (#27); do not carry that pattern into the zod4 line, where `readonly` is impure and freezes a copy.
+- Never mutate input. Strip must never `delete` on the input object. The only in-place write is the `Object.freeze` of `readonly`. In the zod4 line `readonly` is impure and goes to the official parser, so it freezes exactly what stock freezes: a copy for containers, the input itself for a pass-through leaf such as `any` / `unknown` (#28). The zod3 line freezes the input in place on every `readonly` node (#27); do not carry that pattern into the zod4 line.
 - Output may alias input, so refines must not mutate.
 - Failure paths carry no issue data of their own: they return the sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 

@@ -30,6 +30,16 @@ test(`PROBE4: stock zod4 semantics match the compiler's assumptions (zod ${PROBE
   assert.equal(PROBE4.defaultShortCircuits, true, "z4 default must short-circuit (no inner check)");
   assert.equal(PROBE4.catchThrowsPropagate, true, "z4 catch must not swallow thrown errors");
   assert.equal(PROBE4.cleanParseClones, true, "a clean stock parse must produce a new object");
+  assert.equal(
+    PROBE4.readonlyFreezesPassThroughInput,
+    true,
+    "stock readonly over a pass-through leaf must freeze the input in place (#28)",
+  );
+  assert.equal(
+    PROBE4.readonlyContainerFreezesCopy,
+    true,
+    "stock readonly over a container must freeze a copy and leave the input unfrozen",
+  );
 });
 
 summary("canary-z4");

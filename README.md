@@ -12,7 +12,7 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 - No fork of zod and no change to the Zod API: schemas are consumed as they are (the `.def` tree is read), type inference stays `z.infer`.
 - Shape, keys and checks are resolved once at compile time into specialized validation code.
-- The zod4 line never alters the input: nothing is mutated in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The frozen zod3 line has one known exception, `readonly`, which freezes the input in place (see [When a copy is forced](#when-a-copy-is-forced) and #27).
+- The layer never mutates the input on its own: nothing is deleted or rewritten in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The one in-place write that can reach the input is the `Object.freeze` of `readonly`. The zod4 line performs it exactly where stock zod 4 does, on a pass-through leaf such as `any` / `unknown` (see [When a copy is forced](#when-a-copy-is-forced) and #28); the frozen zod3 line performs it on every `readonly` node (#27).
 - Failure paths carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 
 ## Two compiler lines
@@ -108,7 +108,7 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 | Feature | Copies when |
 |---|---|
 | string / number / boolean / bigint / date / literal / enum / instanceof, refine (pure predicate), optional / nullable / any / unknown | Never |
-| readonly | Always in the zod4 line: the purity analysis treats `Object.freeze` as a side effect, so the subtree goes through the official parser, which builds a new container and freezes the copy. The input stays unfrozen and unshared. The zod3 line freezes the input in place and returns it |
+| readonly | The zod4 line hands the subtree to the official parser (the purity analysis treats `Object.freeze` as a side effect), so it freezes exactly what stock zod 4 freezes. Over a container (`object` / `array` / `tuple` / `record` / `map` / `set`) that is a new container: the copy is frozen, the input stays unfrozen and unshared. Over a pass-through leaf (`any` / `unknown` / `custom`, or a wrapper of one) stock returns the input itself and freezes it in place, and so does this line (#28). The zod3 line freezes the input in place on every `readonly` node and returns it (#27) |
 | object / array / tuple / record / map / set | Never while every child is unchanged: the input reference is returned |
 | union / discriminatedUnion | Never while the matching branch returns its input |
 | default | Only when `undefined` is actually replaced |
@@ -119,7 +119,7 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 
 Consequences that constrain every change:
 
-- Never mutate the input. Strip must never `delete` on the input object. The zod3 line's `readonly`, which freezes the input in place and returns it, is the one known exception (#27); the zod4 line copies before freezing.
+- Never mutate the input. Strip must never `delete` on the input object. The only in-place write is the `Object.freeze` of `readonly`: the zod4 line freezes a copy for containers and freezes a pass-through leaf in place exactly as stock does (#28); the zod3 line freezes the input in place on every `readonly` node (#27).
 - Output may alias input, so refines must not mutate.
 - Failure paths return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`.
 
@@ -178,7 +178,7 @@ The zod3 line measured 4.4x to 4.8x against stock zod 3.24.1 in the same run (S1
 
 ## Known limitations (prototype scope)
 
-- Structural sharing is observable: parsing the same input twice returns the same reference, and modifying the output modifies the input. The type layer hints at this with `DeepReadonly`; use stock `schema.parse` when an independent copy is needed.
+- Structural sharing is observable: parsing the same input twice returns the same reference, and modifying the output modifies the input. Only the zod3 line's `validate()` hints at this in the types, with `DeepReadonly`; the zod4 line's `validate()` returns `unknown` and its `parse` / `safeParse` use the ordinary zod output types. Use stock `schema.parse` when an independent copy is needed.
 - Refines must not mutate the input (the CoW premise); deep-freeze inputs during development to catch violations.
 - Refine side effects on failure: a failing parse runs the refine callback in the skeleton and again in the stock fallback, so it runs twice. The official `zod/compile` shim has the same semantics.
 - Key order: pass-through preserves the input's key order; stock rebuilds in shape order (`deepStrictEqual` does not notice, snapshot tools might).

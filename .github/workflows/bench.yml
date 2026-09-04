@@ -84,7 +84,12 @@ jobs:
             echo "## Benchmark run"
             echo
             echo "> Results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N})."
-            echo "> The README and docs tables quote one run of this workflow by run id. Other runs (weekly schedule, manual re-runs) check that the bench scripts still work and can be compared against that cited run; runner noise is a few milliseconds at this record count."
+            echo "> The README and docs tables quote one run of this workflow by run id (node 24, BENCH_N=50000)."
+            if [ "${BENCH_N}" = "50000" ]; then
+              echo "> This run uses the same configuration, so it can be compared against the cited run; runner noise is a few milliseconds at this record count."
+            else
+              echo "> This run uses BENCH_N=${BENCH_N}, so its numbers are not comparable with the cited run; it only checks that the bench scripts still work."
+            fi
             echo
             section "zod 4 (bench:z4)" bench-z4.txt
             section "zod 3 (bench)" bench-z3.txt

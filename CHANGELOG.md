@@ -18,8 +18,9 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 ### Added
 
 - GitHub Actions CI: typecheck plus both test lines on a Node 22/24/26 matrix, and a separate Biome lint job (`.github/workflows/ci.yml`).
-- A manual/weekly benchmark workflow (`.github/workflows/bench.yml`) that runs `bench:z4` and `bench` on a GitHub-hosted runner (node 24, `BENCH_N=50 000`) and writes the tables to the job summary. The published benchmark tables quote one run of it by run id (see Changed above); the other runs check that the bench scripts still work and can be compared against the cited run.
+- A manual/weekly benchmark workflow (`.github/workflows/bench.yml`) that runs `bench:z4` and `bench` on a GitHub-hosted runner (node 24, `BENCH_N=50 000`) and writes the tables to the job summary. The published benchmark tables quote one run of it by run id (see Changed above); the other runs check that the bench scripts still work, and only a run at the same configuration (node 24, `BENCH_N=50 000`) can be compared against the cited run, which the job summary states per run.
 - Biome for linting and formatting (`biome.json`).
+- Two version-canary flags (`readonlyFreezesPassThroughInput`, `readonlyContainerFreezesCopy` in `src/probe-z4-flags.ts`, asserted by `tests/canary-z4.test.ts`) and a `readonly` block in `tests/smoke-z4.test.ts` pin the `readonly` freeze semantics of the zod4 line: a copy for containers, the input itself for a pass-through leaf, both exactly as stock zod 4.5.4 (#28).
 
 ### Fixed
 

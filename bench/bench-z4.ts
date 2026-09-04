@@ -6,7 +6,7 @@
  *   stock zod4 safeParse           interpreter baseline (rebuilds the whole output tree on every parse)
  *   official compileFn parser      official JIT product, stock semantics (always allocates new
  *                                  containers) — the "reuse only, no skeleton" control
- *   official compileFn validator   official assertOnly pure-validation floor (reference for validate)
+ *   official compileFn validator   official assertOnly pure-validation floor, whole array (reference for S4 validate)
  *   zc-z4 CoW parse                the subject: official codegen + CoW container skeletons
  *   arktype                        external reference line
  *
@@ -119,7 +119,8 @@ const stockCowParser = AccountsCow.safeParse.bind(AccountsCow);
 // Official JIT parser product (stock semantics) and assertOnly validator product (the pure-validation floor)
 const officialParser = compileFn(AccountsStock) as (i: unknown) => unknown;
 const officialParserCow = compileFn(AccountsCow) as (i: unknown) => unknown;
-const officialValidator = compileFn(AccountStock, { assertOnly: true }) as (i: unknown) => unknown;
+// Whole-array validator, so S4 feeds it the same input as Z4Stock.validate (both take `data`)
+const officialValidator = compileFn(AccountsStock, { assertOnly: true }) as (i: unknown) => unknown;
 
 const Z4Stock = compile(AccountsStock);
 const Z4Cow = compile(AccountsCow);
@@ -422,22 +423,38 @@ console.log(
   );
 }
 
-/* ─────────────────────────── validate fast path ─────────────────────────── */
+/* ─────────────────────────── S4: validate fast path ─────────────────────────── */
 
-console.log(`\n═══ S4 validate pure validation (returns-the-input-reference semantics) ═══`);
+console.log(
+  `\n═══ S4 validate pure validation · ${N.toLocaleString()} accounts · whole-array validators on the S1 data ═══`,
+);
 {
-  const mVal = measure(() => {
-    let ok = 0;
-    for (let i = 0; i < N; i++) if (officialValidator(data[i]) !== true) ok++;
-    return ok;
+  // Both validators see the same input, the whole S1 array. `validate()` is the official
+  // assertOnly product of the same schema, so the two rows should read level; the row puts the
+  // validation-only cost next to the S1 parse cost and the arktype line. Every call is checked,
+  // so a schema/input mismatch fails the run instead of timing a rejection.
+  assert.equal(officialValidator(data), true, "S4: official validator rejected the S1 data");
+  assert.equal(
+    Z4Stock.validate(data),
+    data,
+    "S4: zc-z4 validate did not return the input reference",
+  );
+  console.log("  correctness: official validator === true ✓   zc-z4 validate === input ref ✓");
+
+  const s4Official = measure(() => {
+    if (officialValidator(data) !== true)
+      throw new Error("S4: official validator rejected the input");
+    return N;
   });
-  report("official assertOnly validator (per account)", mVal);
-  const mZ4Val = measure(() => {
-    let ok = 0;
-    for (let i = 0; i < N; i++) if (Z4Stock.validate(data[i]) !== null) ok++;
-    return ok;
+  report("official assertOnly validator (whole array)", s4Official);
+  const s4Z4 = measure(() => {
+    if (Z4Stock.validate(data) !== data) throw new Error("S4: zc-z4 validate rejected the input");
+    return N;
   });
-  report("zc-z4 validate (whole-tree assertOnly fn)", mZ4Val);
+  report("zc-z4 validate (whole-tree assertOnly fn)", s4Z4);
+  console.log(
+    `  Ratios (median): S1 zc-z4 parse / validate = ${(medianOf(s1Z4) / medianOf(s4Z4)).toFixed(2)}x   official validator / zc-z4 validate = ${(medianOf(s4Official) / medianOf(s4Z4)).toFixed(2)}x`,
+  );
 }
 
 /* ─────────────────────────── arktype reference ─────────────────────────── */

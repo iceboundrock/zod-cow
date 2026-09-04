@@ -1,5 +1,5 @@
 /**
- * Benchmark (zc-v2: official codegen + CoW skeletons) — reproduces the 500k-account
+ * Benchmark (zc-z4: official codegen + CoW skeletons) — reproduces the 500k-account
  * scenario from the Numeric article.
  *
  * Baselines:
@@ -7,7 +7,7 @@
  *   official compileFn parser      official JIT product, stock semantics (always allocates new
  *                                  containers) — the "reuse only, no skeleton" control
  *   official compileFn validator   official assertOnly pure-validation floor (reference for validate)
- *   zc-v2 CoW parse                the subject: official codegen + CoW container skeletons
+ *   zc-z4 CoW parse                the subject: official codegen + CoW container skeletons
  *   arktype                        external reference line
  *
  *   S1 (main track):    pure-validation schema (clean input → CoW should return the input reference
@@ -22,7 +22,7 @@ import { performance } from "node:perf_hooks";
 import assert from "node:assert/strict";
 
 const { z } = await import("zod4");
-const { compileV2 } = await import("../src/index-z4-v2.js");
+const { compile } = await import("../src/index-z4.js");
 const { compileFn } = await import("zod4/v4/core");
 
 const N = Number(process.env.BENCH_N ?? 500_000);
@@ -121,8 +121,8 @@ const officialParser = compileFn(AccountsStock) as (i: unknown) => unknown;
 const officialParserCow = compileFn(AccountsCow) as (i: unknown) => unknown;
 const officialValidator = compileFn(AccountStock, { assertOnly: true }) as (i: unknown) => unknown;
 
-const V2Stock = compileV2(AccountsStock);
-const V2Cow = compileV2(AccountsCow);
+const Z4Stock = compile(AccountsStock);
+const Z4Cow = compile(AccountsCow);
 
 /* ─────────────────────────── 测量工具 ─────────────────────────── */
 
@@ -202,17 +202,17 @@ const medianOf = (samples: Sample[]): number =>
 /* ─────────────────────────── S1: 纯校验主赛道 ─────────────────────────── */
 
 console.log(`\n═══ S1 纯校验 · ${N.toLocaleString()} 账户 · 每变体 ${PASSES} 轮取中位 ═══`);
-console.log(`  zc-v2 stock degradation: ${V2Stock.stock ? "yes (unexpected!)" : "no"}`);
+console.log(`  zc-z4 stock degradation: ${Z4Stock.stock ? "yes (unexpected!)" : "no"}`);
 const data = makeAccounts();
 
 {
   const stockOut = stockParser(data);
   assert.ok(stockOut.success);
-  const v2Out = V2Stock.safeParse(data);
-  assert.ok(v2Out.success);
-  assert.deepStrictEqual(v2Out.data, (stockOut as any).data);
+  const z4Out = Z4Stock.safeParse(data);
+  assert.ok(z4Out.success);
+  assert.deepStrictEqual(z4Out.data, (stockOut as any).data);
   console.log(
-    `  正确性: deepStrictEqual ✓   v2 输出 === 输入引用: ${v2Out.data === data ? "是（零拷贝）" : "否"}`,
+    `  正确性: deepStrictEqual ✓   z4 输出 === 输入引用: ${z4Out.data === data ? "是（零拷贝）" : "否"}`,
   );
 }
 
@@ -220,18 +220,18 @@ const s1Stock = measure(() => stockParser(data));
 report("stock zod4 safeParse（解释器）", s1Stock);
 const s1Official = measure(() => officialParser(data));
 report("官方 compileFn parser（JIT·stock 语义）", s1Official);
-const s1V2 = measure(() => V2Stock.safeParse(data));
-report("zc-v2 CoW parse（官方 codegen+修饰）", s1V2);
+const s1Z4 = measure(() => Z4Stock.safeParse(data));
+report("zc-z4 CoW parse（官方 codegen+修饰）", s1Z4);
 
 console.log(`\n  比值（中位）:`);
 console.log(
   `    stock / 官方parser = ${(medianOf(s1Stock) / medianOf(s1Official)).toFixed(2)}x   ← 官方 JIT 本身的收益`,
 );
 console.log(
-  `    stock / zc-v2      = ${(medianOf(s1Stock) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰总收益`,
+  `    stock / zc-z4      = ${(medianOf(s1Stock) / medianOf(s1Z4)).toFixed(2)}x   ← CoW 修饰总收益`,
 );
 console.log(
-  `    官方parser / zc-v2 = ${(medianOf(s1Official) / medianOf(s1V2)).toFixed(2)}x   ← CoW 修饰在 JIT 之上的净收益`,
+  `    官方parser / zc-z4 = ${(medianOf(s1Official) / medianOf(s1Z4)).toFixed(2)}x   ← CoW 修饰在 JIT 之上的净收益`,
 );
 
 /* ─────────────────────────── S2: CoW 脏负载 ─────────────────────────── */
@@ -241,9 +241,9 @@ const dataCow = deriveMissingRole(data, 10, 5);
 {
   const stockOut = stockCowParser(dataCow);
   assert.ok(stockOut.success);
-  const v2Out = V2Cow.safeParse(dataCow);
-  assert.ok(v2Out.success);
-  assert.deepStrictEqual(v2Out.data, (stockOut as any).data);
+  const z4Out = Z4Cow.safeParse(dataCow);
+  assert.ok(z4Out.success);
+  assert.deepStrictEqual(z4Out.data, (stockOut as any).data);
   let injected = 0;
   for (let i = 0; i < N; i++) if (!("role" in dataCow[i]!)) injected++;
   console.log(`  正确性: deepStrictEqual ✓   缺 role 占比 ${((injected / N) * 100).toFixed(1)}%`);
@@ -253,29 +253,29 @@ const s2Stock = measure(() => stockCowParser(dataCow));
 report("stock zod4 safeParse（default 场景）", s2Stock);
 const s2Official = measure(() => officialParserCow(dataCow));
 report("官方 compileFn parser（JIT·default）", s2Official);
-const s2V2 = measure(() => V2Cow.safeParse(dataCow));
-report("zc-v2 CoW parse（90% 零拷贝）", s2V2);
+const s2Z4 = measure(() => Z4Cow.safeParse(dataCow));
+report("zc-z4 CoW parse（90% 零拷贝）", s2Z4);
 console.log(
-  `\n  Ratios (median): stock/v2 = ${(medianOf(s2Stock) / medianOf(s2V2)).toFixed(2)}x   official parser/v2 = ${(medianOf(s2Official) / medianOf(s2V2)).toFixed(2)}x`,
+  `\n  Ratios (median): stock/z4 = ${(medianOf(s2Stock) / medianOf(s2Z4)).toFixed(2)}x   official parser/z4 = ${(medianOf(s2Official) / medianOf(s2Z4)).toFixed(2)}x`,
 );
 
 /* ─────────────────────────── S3: 脏比例扫描 ─────────────────────────── */
 
 console.log(`\n═══ S3 脏比例扫描 · role 缺失比例 → default 注入 ═══`);
 console.log(
-  `  ${"missing".padEnd(8)} ${"stock".padStart(9)} ${"off.JIT".padStart(9)} ${"zc-v2".padStart(9)} ${"stock/v2".padStart(9)}   ${"v2 retain".padStart(9)} ${"stock ret".padStart(10)}`,
+  `  ${"missing".padEnd(8)} ${"stock".padStart(9)} ${"off.JIT".padStart(9)} ${"zc-z4".padStart(9)} ${"stock/z4".padStart(9)}   ${"z4 retain".padStart(9)} ${"stock ret".padStart(10)}`,
 );
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const mStock = medianOf(measure(() => stockCowParser(ds)));
   const mOfficial = medianOf(measure(() => officialParserCow(ds)));
-  const mV2 = medianOf(measure(() => V2Cow.safeParse(ds)));
+  const mZ4 = medianOf(measure(() => Z4Cow.safeParse(ds)));
   const rs =
     measure(() => stockCowParser(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   const rv =
-    measure(() => V2Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
+    measure(() => Z4Cow.safeParse(ds)).reduce((m, s) => Math.max(m, s.retainedDelta), 0) / 1048576;
   console.log(
-    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mV2.toFixed(0).padStart(7)}ms ${(mStock / mV2).toFixed(2).padStart(8)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
+    `  ${(ratio * 100).toFixed(0).padEnd(7)}% ${mStock.toFixed(0).padStart(7)}ms ${mOfficial.toFixed(0).padStart(7)}ms ${mZ4.toFixed(0).padStart(7)}ms ${(mStock / mZ4).toFixed(2).padStart(8)}x   ${rv.toFixed(1).padStart(7)}MB ${rs.toFixed(1).padStart(8)}MB`,
   );
 }
 
@@ -314,10 +314,10 @@ console.log(
     };
   }
   const Rows = z.array(Row);
-  const RowsV2 = compileV2(Rows);
+  const RowsZ4 = compile(Rows);
   const rowsParser = compileFn(Rows) as (i: unknown) => unknown;
 
-  const probe = RowsV2.safeParse(rows);
+  const probe = RowsZ4.safeParse(rows);
   assert.ok(probe.success);
   assert.deepStrictEqual(probe.data, (Rows.safeParse(rows) as any).data);
   console.log(
@@ -328,10 +328,10 @@ console.log(
   report("S5 stock（record+map+set 每条重建）", rs);
   const ro = measure(() => rowsParser(rows));
   report("S5 官方 compileFn parser（JIT·stock）", ro);
-  const rv = measure(() => RowsV2.safeParse(rows));
-  report("S5 zc-v2 CoW parse（零拷贝）", rv);
+  const rv = measure(() => RowsZ4.safeParse(rows));
+  report("S5 zc-z4 CoW parse（零拷贝）", rv);
   console.log(
-    `  比值（中位）: stock/v2 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   官方parser/v2 = ${(medianOf(ro) / medianOf(rv)).toFixed(2)}x`,
+    `  比值（中位）: stock/z4 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   官方parser/z4 = ${(medianOf(ro) / medianOf(rv)).toFixed(2)}x`,
   );
 }
 
@@ -354,10 +354,10 @@ console.log(
     };
   }
   const Rows = z.array(Row);
-  const RowsV2 = compileV2(Rows);
+  const RowsZ4 = compile(Rows);
   const rowsParser = compileFn(Rows) as (i: unknown) => unknown;
 
-  const probe = RowsV2.safeParse(rows);
+  const probe = RowsZ4.safeParse(rows);
   assert.ok(probe.success);
   assert.deepStrictEqual(probe.data, (Rows.safeParse(rows) as any).data);
   console.log(
@@ -368,10 +368,10 @@ console.log(
   report("S6 stock（tuple 每条重建 new 数组）", rs);
   const ro = measure(() => rowsParser(rows));
   report("S6 官方 compileFn parser（JIT·stock）", ro);
-  const rv = measure(() => RowsV2.safeParse(rows));
-  report("S6 zc-v2 CoW parse（零拷贝）", rv);
+  const rv = measure(() => RowsZ4.safeParse(rows));
+  report("S6 zc-z4 CoW parse（零拷贝）", rv);
   console.log(
-    `  比值（中位）: stock/v2 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   官方parser/v2 = ${(medianOf(ro) / medianOf(rv)).toFixed(2)}x`,
+    `  比值（中位）: stock/z4 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   官方parser/z4 = ${(medianOf(ro) / medianOf(rv)).toFixed(2)}x`,
   );
 }
 
@@ -391,15 +391,15 @@ console.log(
   const rows: { id: number; email: string; score: number }[] = new Array(M);
   for (let i = 0; i < M; i++) rows[i] = { id: i, email: `USER${i}@EXAMPLE.COM`, score: i % 100 };
   const Rows = z.array(Row);
-  const RowsV2 = compileV2(Rows);
-  assert.ok(RowsV2.async && !RowsV2.stock, "async 骨架编译成功");
+  const RowsZ4 = compile(Rows);
+  assert.ok(RowsZ4.async && !RowsZ4.stock, "async 骨架编译成功");
 
-  const probe = await RowsV2.safeParseAsync(rows);
+  const probe = await RowsZ4.safeParseAsync(rows);
   const stockProbe = await Rows.safeParseAsync(rows);
   assert.ok(probe.success && stockProbe.success);
   assert.deepStrictEqual(probe.data, stockProbe.data);
   console.log(
-    `  正确性: deepStrictEqual ✓   v2 async=${RowsV2.async}   分配压力（输出 email 全脏 → 每行新对象）`,
+    `  正确性: deepStrictEqual ✓   z4 async=${RowsZ4.async}   分配压力（输出 email 全脏 → 每行新对象）`,
   );
 
   const stockAsync = Rows.safeParseAsync.bind(Rows);
@@ -409,10 +409,10 @@ console.log(
     return r.data.length;
   });
   report("S7 stock safeParseAsync（async 解释器）", rs);
-  const rv = await measureAsync(() => RowsV2.safeParseAsync(rows));
-  report("S7 zc-v2 safeParseAsync（async 骨架+CoW）", rv);
+  const rv = await measureAsync(() => RowsZ4.safeParseAsync(rows));
+  report("S7 zc-z4 safeParseAsync（async 骨架+CoW）", rv);
   console.log(
-    `  比值（中位）: stock/v2 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   （async 叶子值变 → 拷贝集中在脏行，骨架其余零拷贝）`,
+    `  比值（中位）: stock/z4 = ${(medianOf(rs) / medianOf(rv)).toFixed(2)}x   （async 叶子值变 → 拷贝集中在脏行，骨架其余零拷贝）`,
   );
 }
 
@@ -426,12 +426,12 @@ console.log(`\n═══ S4 validate 纯校验（返回原引用语义） ══
     return ok;
   });
   report("官方 assertOnly validator（逐账户）", mVal);
-  const mV2Val = measure(() => {
+  const mZ4Val = measure(() => {
     let ok = 0;
-    for (let i = 0; i < N; i++) if (V2Stock.validate(data[i]) !== null) ok++;
+    for (let i = 0; i < N; i++) if (Z4Stock.validate(data[i]) !== null) ok++;
     return ok;
   });
-  report("zc-v2 validate（整树 assertOnly 产物）", mV2Val);
+  report("zc-z4 validate（整树 assertOnly 产物）", mZ4Val);
 }
 
 /* ─────────────────────────── arktype 参照 ─────────────────────────── */
@@ -457,4 +457,4 @@ try {
 }
 
 console.log("\n注：分配压力 = 运行结束（gc 前）heapUsed 增量；gc后驻留 = gc 后仍占用的增量。");
-console.log("    zc-v2 在纯路径上返回输入原引用（≈0 分配、0 驻留）；脏路径仅脏对象浅拷贝。");
+console.log("    zc-z4 在纯路径上返回输入原引用（≈0 分配、0 驻留）；脏路径仅脏对象浅拷贝。");

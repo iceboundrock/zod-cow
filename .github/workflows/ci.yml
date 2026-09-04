@@ -39,8 +39,8 @@ jobs:
       - name: Test zod 3
         run: pnpm test
 
-      - name: Test zod 4 v2
-        run: pnpm run test:v2
+      - name: Test zod 4
+        run: pnpm run test:z4
 
   lint:
     name: lint

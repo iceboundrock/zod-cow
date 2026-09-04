@@ -1,5 +1,5 @@
 /**
- * zc-v2 public API — the engine is "zod4 official codegen + CoW container skeletons"
+ * zc-z4 public API — the engine is "zod4 official codegen + CoW container skeletons"
  * (tuple skeletons and async schemas supported since Task 6).
  *
  *   compile(schema) returns:
@@ -15,10 +15,10 @@
  *                       $ZodAsyncError (same semantics as stock)
  */
 import type { z } from "zod4";
-import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4-v2.js";
+import { INVALID, compileCowDebug, officialValidator, isAsyncProduct, type Fn } from "./cow4.js";
 import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod4/v4/core";
 
-export interface CompiledV2<T extends z.ZodType> {
+export interface Compiled<T extends z.ZodType> {
   readonly schema: T;
   /** true = CoW 编译未成功，parse/safeParse 全部直通 stock（语义无损） */
   readonly stock: boolean;
@@ -40,7 +40,7 @@ export interface CompiledV2<T extends z.ZodType> {
 
 type SyncResult = { success: boolean; data?: unknown; error?: z.ZodError };
 
-export function compileV2<T extends z.ZodType>(schema: T): CompiledV2<T> {
+export function compile<T extends z.ZodType>(schema: T): Compiled<T> {
   let cowFn: Fn | null = null;
   let code: string | null = null;
   try {
@@ -122,5 +122,5 @@ export function compileV2<T extends z.ZodType>(schema: T): CompiledV2<T> {
       if (cowFn) return cowFn(data) !== INVALID ? data : null;
       return (stockParse(data) as { success: boolean }).success ? data : null;
     },
-  } satisfies CompiledV2<T>;
+  } satisfies Compiled<T>;
 }

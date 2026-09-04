@@ -1,14 +1,14 @@
 /**
- * 冒烟测试：v2（官方 codegen + CoW 修饰）的行为与代码 dump。
+ * 冒烟测试：z4（官方 codegen + CoW 修饰）的行为与代码 dump。
  */
 import assert from "node:assert/strict";
 import { z } from "zod4";
-import { compileV2 } from "../src/index-z4-v2.js";
+import { compile } from "../src/index-z4.js";
 
 /* ── 1. 基础 object：干净输入原引用 ── */
 {
   const S = z.object({ a: z.string().max(4), b: z.email(), c: z.enum(["x", "y"]) });
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { a: "abc", b: "u@e.com", c: "x" };
   const out = C.parse(input);
   console.log("── 基础 object ──");
@@ -39,7 +39,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 2. strip：多余键 → 浅拷贝剥离 ── */
 {
   const S = z.object({ a: z.string(), b: z.number() });
-  const C = compileV2(S);
+  const C = compile(S);
   const input = { a: "x", b: 1, extra: true, more: 2 };
   const out = C.parse(input) as typeof input;
   console.log("\n── strip 多余键 ──");
@@ -52,7 +52,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 
   // strict：多余键 → 失败
   const Strict = z.strictObject({ a: z.string() });
-  const CS = compileV2(Strict);
+  const CS = compile(Strict);
   assert.equal(CS.safeParse({ a: "x", extra: 1 }).success, false);
   assert.deepEqual(CS.parse({ a: "x" }), { a: "x" });
   console.log("  strict: 多余键拒绝 ✓  干净通过 ✓");
@@ -61,7 +61,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 3. 脏负载：default 注入 → 单键浅拷贝 ── */
 {
   const S = z.object({ name: z.string(), role: z.enum(["a", "b"]).default("b") });
-  const C = compileV2(S);
+  const C = compile(S);
   const clean = { name: "n", role: "a" };
   const dirty = { name: "n" }; // 缺 role → default 注入
   const outClean = C.parse(clean);
@@ -85,7 +85,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 4. transform → 引用比较自动判脏 ── */
 {
   const S = z.object({ n: z.string(), len: z.string().transform((s) => s.length) });
-  const C = compileV2(S);
+  const C = compile(S);
   const input: Record<string, unknown> = { n: "x", len: "abcd" };
   const out = C.parse(input) as { n: string; len: number };
   console.log("\n── transform（pipe）──");
@@ -103,7 +103,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
     tags: z.array(z.string()),
     addr: z.object({ city: z.string(), zip: z.string() }),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   const addr = { city: "NYC", zip: "10001" };
   const input = { name: "n", tags: ["a", "b"], addr };
   const out = C.parse(input) as typeof input;
@@ -120,7 +120,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
     tags: z.array(z.string()),
     addr: z.object({ city: z.string(), zip: z.string() }),
   });
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const out2 = C2.parse(input2) as typeof input2;
   console.log("  脏 addr: out2 === input2:", out2 === input2, "（期望 false）");
   console.log("  out2.addr === input2.addr:", out2.addr === input2.addr, "（期望 false，被拷贝）");
@@ -133,7 +133,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 6. 数组元素 CoW ── */
 {
   const S = z.array(z.object({ id: z.number(), name: z.string() }));
-  const C = compileV2(S);
+  const C = compile(S);
   const items = [
     { id: 1, name: "a" },
     { id: 2, name: "b" },
@@ -144,7 +144,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   assert.equal(out, items);
 
   const S2 = z.array(z.object({ id: z.number().int(), n: z.number().default(0) }));
-  const C2 = compileV2(S2);
+  const C2 = compile(S2);
   const items2 = [{ id: 1, n: 5 }, { id: 2 }];
   const out2 = C2.parse(items2) as { id: number; n: number }[];
   console.log("  脏数组: out2 === items2:", out2 === items2, "（期望 false）");
@@ -161,7 +161,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
     b: z.number().nullable(),
     c: z.union([z.string(), z.number()]),
   });
-  const C = compileV2(S);
+  const C = compile(S);
   const i1 = { b: null, c: "s" }; // a 缺席
   const o1 = C.parse(i1);
   console.log("\n── optional/nullable/union ──");
@@ -176,7 +176,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 8. 顶层 array + 非纯元素 transform ── */
 {
   const S = z.array(z.string().transform((s) => s.toUpperCase()));
-  const C = compileV2(S);
+  const C = compile(S);
   const out = C.parse(["a", "b"]) as string[];
   console.log("\n── 数组元素 transform ──");
   console.log("  out:", JSON.stringify(out));
@@ -186,14 +186,14 @@ import { compileV2 } from "../src/index-z4-v2.js";
 /* ── 9. 降级：schema catchall / 递归 / async ── */
 {
   const Catchall = z.object({ a: z.string() }).catchall(z.number());
-  const CC = compileV2(Catchall);
+  const CC = compile(Catchall);
   console.log("\n── 降级 ──");
   console.log("  catchall schema → stock:", CC.stock, "（期望 true）");
   assert.equal(CC.stock, true);
 
   type Tree = { v: string; children?: Tree[] };
   const Tree: any = z.object({ v: z.string(), children: z.array(z.lazy(() => Tree)).optional() });
-  const CT = compileV2(Tree);
+  const CT = compile(Tree);
   console.log("  递归 → stock:", CT.stock);
   const treeInput: Tree = { v: "root", children: [{ v: "leaf" }] };
   const treeOut = CT.safeParse(treeInput);
@@ -201,7 +201,7 @@ import { compileV2 } from "../src/index-z4-v2.js";
   console.log("  递归 stock 语义正常 ✓");
 
   const Async = z.string().refine(async (s) => s.length > 0);
-  const CA = compileV2(Async);
+  const CA = compile(Async);
   console.log(
     "  async refine → stock:",
     CA.stock,

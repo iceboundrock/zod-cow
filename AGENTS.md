@@ -20,6 +20,7 @@ Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + b
 | `docs/ARCHITECTURE-z4.md` | English architecture deep dive on the zod4 engine (§1 to §11 plus Appendix A). Architecture changes go here |
 | `docs/ARCHITECTURE-z4.zh-CN.md` | Frozen Chinese snapshot of the v0.5 architecture text. Not maintained; do not edit it when the English doc changes |
 | `docs/upstream-issue-draft.md` | Draft issue for zod upstream asking to make `compileFn` / `assertOnly` / `INVALID` public |
+| `docs/adr/` | Architecture decision records, numbered. `0001-package-layout.md` (#8): one package per zod major in a pnpm workspace, `zod-cow` name, verified-minor peer range for zod, zod3 line unpublished. A new decision gets the next number; a superseded ADR keeps its file and gains a `Superseded by` status line |
 
 ## Commands
 

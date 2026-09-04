@@ -212,6 +212,7 @@ bench/bench.ts              zod3 基准（50 万账户）
 examples/demo.ts            60 秒上手
 docs/ARCHITECTURE-z4.md     zod4 引擎架构深度走读（英文，权威版本；docs/ARCHITECTURE-z4.zh-CN.md 是冻结的中文快照）
 docs/upstream-issue-draft.md   给 zod 上游的 issue 草稿：请求公开 compileFn / assertOnly / INVALID
+docs/adr/0001-package-layout.md   ADR：每个 zod 大版本一个包的 pnpm workspace 布局、`zod-cow` 包名、peer 依赖策略、zod3 线不发布
 CHANGELOG.md                v0.1～v0.5 历史与各版本的历史基准表
 ```
 

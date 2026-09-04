@@ -4,7 +4,9 @@ name: Benchmarks
 # one run of this workflow by run id (GitHub-hosted runner, node 24,
 # BENCH_N=50 000). Runner noise is a few milliseconds at that record count, so
 # ratios close to 1.0x should be read as level. The workflow also proves the
-# bench scripts still run after refactors.
+# bench scripts still run after refactors. bench-v4 imports the built
+# zod-cow-v4 package, so the build step runs before it; bench-v3 measures the
+# frozen zod3 line from source.
 on:
   workflow_dispatch:
     inputs:
@@ -47,19 +49,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build zod-cow-v4
+        run: pnpm run build
+
       # Each bench step tees its output into a file so the summary step below
       # can render it even when a later step fails. `shell: bash` enables
       # pipefail, so a failing bench still fails the step through `tee`.
-      # The package.json scripts already pass --expose-gc; BENCH_N comes from
+      # The package scripts already pass --expose-gc; BENCH_N comes from
       # the job env.
-      - name: Bench zod 4
+      - name: Bench zod 4 (bench-v4, built package)
         shell: bash
-        run: pnpm run bench:z4 2>&1 | tee bench-z4.txt
+        run: pnpm --filter bench-v4 run bench 2>&1 | tee bench-v4.txt
 
-      - name: Bench zod 3
+      - name: Bench zod 3 (bench-v3)
         if: ${{ !cancelled() }}
         shell: bash
-        run: pnpm run bench 2>&1 | tee bench-z3.txt
+        run: pnpm --filter bench-v3 run bench 2>&1 | tee bench-v3.txt
 
       - name: Write job summary
         if: ${{ !cancelled() }}
@@ -91,6 +96,6 @@ jobs:
               echo "> This run uses BENCH_N=${BENCH_N}, so its numbers are not comparable with the cited run; it only checks that the bench scripts still work."
             fi
             echo
-            section "zod 4 (bench:z4)" bench-z4.txt
-            section "zod 3 (bench)" bench-z3.txt
+            section "zod 4 (bench-v4, built zod-cow-v4)" bench-v4.txt
+            section "zod 3 (bench-v3)" bench-v3.txt
           } >> "$GITHUB_STEP_SUMMARY"

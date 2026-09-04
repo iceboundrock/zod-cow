@@ -1,7 +1,7 @@
 /**
- * zod 3.24.1 内部正则的逐字拷贝（node_modules/zod/lib/index.umd.js）。
- * 目的：让编译层与 stock zod 在 email/uuid/datetime/… 等格式校验上逐位一致。
- * 升级 zod 版本时请同步此处（probe 的差分测试会兜底暴露漂移）。
+ * Verbatim copy of zod 3.24.1's internal regexes (node_modules/zod/lib/index.umd.js).
+ * Purpose: keep the compilation layer bit-for-bit consistent with stock zod on email/uuid/datetime/… format checks.
+ * Keep this in sync when bumping the zod version (the probe's differential tests are the backstop that exposes drift).
  */
 
 export const CUID_REGEX = /^c[^\s-]{8,}$/i;

@@ -1,22 +1,22 @@
 /**
- * 内部协议 — CoW 编译层的公共约定。
+ * Internal protocol — the shared contract of the CoW compilation layer.
  *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ 核心思想：每个编译后的节点是一个同步函数                                   │
- * │                                                                         │
- * │   (data, ctx) => value | FAILED                                         │
- * │                                                                         │
- * │  · 成功 → 返回解析后的值。该值可能 === data（未修改，零拷贝），             │
- * │          也可能是新引用（default 注入 / transform / strip 多余键 …）       │
- * │  · 失败 → 返回 FAILED 哨兵，issue 追加到 ctx.issues                      │
- * │                                                                         │
- * │ “值是否被修改过”不用任何标志位 —— 直接用 outVal !== inVal 判定：           │
- * │  · 原始类型（string/number/…）按值比较，校验通过永远“没变”；               │
- * │  · 对象/数组按引用比较，子节点透传原引用 → 父层无需拷贝；                   │
- * │  · 变换类节点（transform/default/coerce/catch）返回新值 →                 │
- * │    “脏”信号沿引用比较自然向上传播，父层在第一个变化点做一次浅拷贝            │
- * │    （copy-on-write / path-copying），其余兄弟子树全部共享。                │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ * │ Core idea: every compiled node is a synchronous function                                                          │
+ * │                                                                                                                   │
+ * │   (data, ctx) => value | FAILED                                                                                   │
+ * │                                                                                                                   │
+ * │  · Success → returns the parsed value. That value may be === data (unchanged, zero-copy),                         │
+ * │          or it may also be a new reference (default injection / transform / strip extra keys …)                   │
+ * │  · Failure → returns the FAILED sentinel, the issue is appended to ctx.issues                                     │
+ * │                                                                                                                   │
+ * │ "Has the value been modified?" needs no flag bit at all — it is decided directly by outVal !== inVal:             │
+ * │  · Primitives (string/number/…) compare by value; when validation passes they are always "unchanged";             │
+ * │  · Objects/arrays compare by reference; a child passes the original reference through → the parent needs no copy; │
+ * │  · Transform nodes (transform/default/coerce/catch) return a new value →                                          │
+ * │    the "dirty" signal propagates naturally upward by reference comparison, and the parent makes one shallow copy  │
+ * │    at the first change point (copy-on-write / path-copying), and all other sibling subtrees stay shared.          │
+ * └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  */
 
 export const FAILED: unique symbol = Symbol("zc.FAILED");
@@ -29,18 +29,18 @@ export interface Issue {
   message: string;
   expected?: string;
   received?: string;
-  /** unrecognized_keys 专用 */
+  /** For unrecognized_keys only */
   keys?: string[];
-  /** 扩展字段（minimum / maximum / validation / multipleOf …），与 stock zod 的 issue params 对齐 */
+  /** Extra fields (minimum / maximum / validation / multipleOf …), aligned with stock zod's issue params */
   [param: string]: unknown;
 }
 
 export interface Ctx {
   issues: Issue[];
   /**
-   * 惰性 path：整个 parse 过程复用一个可变数组，push/pop 进出子节点，
-   * 只有真正产生 issue 时才 slice() 物化一份快照。
-   * stock zod 则为每个节点新建 path 数组 —— 这是每节点分配的来源之一。
+   * Lazy path: one mutable array is reused for the whole parse, pushed/popped on entering and leaving a child,
+   * and slice() only materializes a snapshot when an issue is actually produced.
+   * stock zod builds a new path array per node — one of the sources of its per-node allocation.
    */
   path: PathSegment[];
 }
@@ -65,13 +65,13 @@ export class ZcError extends Error {
   }
 }
 
-/* ────────────────────────── issue 辅助 ────────────────────────── */
+/* ────────────────────────── issue helpers ────────────────────────── */
 
 export function pushIssue(ctx: Ctx, code: string, message: string, extra?: Partial<Issue>): void {
   ctx.issues.push({ code, path: ctx.path.slice(), message, ...extra });
 }
 
-/** 在显式路径上追加 issue（如 discriminated union 的 discriminator 键） */
+/** Append an issue at an explicit path (e.g. the discriminator key of a discriminated union) */
 export function pushIssueAt(
   ctx: Ctx,
   path: PathSegment[],
@@ -90,8 +90,8 @@ export function pushInvalidType(ctx: Ctx, expected: string, received: string): v
 }
 
 /**
- * 近似 stock zod 的 getParsedType —— 只用于 issue 的 received 字段。
- * 未覆盖的类型一律回退 'object' / typeof，不影响成败判定。
+ * An approximation of stock zod's getParsedType — used only for the received field of an issue.
+ * Uncovered types always fall back to 'object' / typeof, which does not affect the pass/fail decision.
  */
 export function parsedType(v: unknown): string {
   if (v === null) return "null";
@@ -108,8 +108,8 @@ export function parsedType(v: unknown): string {
 }
 
 /**
- * 原型污染安全的写键。`JSON.parse('{"__proto__": …}')` 会产生名为 __proto__ 的
- * own property，直接 `out[k] = v` 会改原型而不是写属性。
+ * Prototype-pollution-safe key write. `JSON.parse('{"__proto__": …}')` produces an own
+ * property named __proto__, so a plain `out[k] = v` would change the prototype instead of writing the property.
  */
 export function safeSet(obj: Record<string, unknown>, key: string, value: unknown): void {
   if (key === "__proto__" || key === "constructor" || key === "prototype") {
@@ -124,7 +124,7 @@ export function safeSet(obj: Record<string, unknown>, key: string, value: unknow
   }
 }
 
-/** 零分配检测对象自身是否含有 shape 之外的键（供 strip/strict 使用） */
+/** Zero-allocation check for whether an object has own keys outside the shape (used by strip/strict) */
 export function findExtraKey(data: object, keySet: Set<string>): string | null {
   for (const k in data) {
     if (Object.hasOwn(data, k) && !keySet.has(k)) return k;

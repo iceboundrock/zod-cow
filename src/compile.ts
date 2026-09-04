@@ -1,15 +1,15 @@
 /**
- * CoW 编译器 — 把 stock zod 的 schema 树编译成特化校验闭包。
+ * CoW compiler — compiles stock zod's schema tree into specialized validation closures.
  *
- * 与 stock zod（解释器）的区别：
- *   1. 不再有 { status, value } 包装对象 / ParseStatus 合并 —— 返回值直达；
- *   2. 不再为每个节点新建 ParseContext 与 path 数组 —— 单一可变 ctx + 惰性 path；
- *   3. 不再重建输出树 —— CoW：全部子值未变时返回原引用，第一个变化点才浅拷贝
- *      （path-copying：改一个叶子只拷贝它到根的一条路径，兄弟子树全部共享）；
- *   4. shape() / keys / checks / options 只在编译期解析一次（stock 每次 parse 重取）。
+ * Differences from stock zod (an interpreter):
+ *   1. No more { status, value } wrapper objects / ParseStatus merging — the return value goes straight through;
+ *   2. No new ParseContext and path array per node — a single mutable ctx + a lazy path;
+ *   3. No rebuilding of the output tree — CoW: return the original reference when no child value changed, shallow-copy only at the first change point
+ *      (path-copying: changing one leaf copies only the single path from it to the root, all sibling subtrees stay shared);
+ *   4. shape() / keys / checks / options are resolved once at compile time (stock re-reads them on every parse).
  *
- * 编译期缓存：全局 WeakMap<schema, validator>，同一 schema 实例只编译一次；
- * z.lazy 的 getter 推迟到首次 parse 时解析，配合“先占位后编译”即可支持递归 schema。
+ * Compile-time cache: a global WeakMap<schema, validator>, so the same schema instance is compiled only once;
+ * the z.lazy getter is resolved lazily on the first parse, which together with "placeholder first, compile later" supports recursive schemas.
  */
 import { z } from "zod";
 import {
@@ -45,7 +45,7 @@ import {
   timeRegex,
 } from "./regexes.js";
 
-/** 格式类 string check 的编译：kind → 判定函数（正则来自 regexes.ts，与 stock 逐字一致） */
+/** Compilation of format-style string checks: kind → predicate (regexes come from regexes.ts, verbatim from stock) */
 function formatStringStep(c: any): StringStep {
   const kind: string = c.kind;
   const message = (): string => c.message ?? `Invalid ${kind === "email" ? "email" : kind}`;
@@ -96,7 +96,7 @@ function formatStringStep(c: any): StringStep {
     };
   }
 
-  // 非正则判定（与 stock 的判定函数一致）
+  // Non-regex predicates (identical to stock's predicate functions)
   switch (kind) {
     case "url": {
       return (v, ctx) => {
@@ -110,7 +110,7 @@ function formatStringStep(c: any): StringStep {
       };
     }
     case "emoji": {
-      // zod 惰性构建：^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$（u flag）
+      // zod builds it lazily: ^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$ (u flag)
       const emojiRe = /^(\p{Extended_Pictographic}|\p{Emoji_Component})+$/u;
       return (v, ctx) => {
         if (!emojiRe.test(v)) {
@@ -232,15 +232,15 @@ function stringStep(c: any): StringStep {
       };
     }
     case "trim":
-      // 变换：返回新字符串。'  x ' → 'x' 值不同 → 父层判脏；
-      // 'x' → 'x' 值相同 → 不脏（零拷贝）。“按需拷贝”的原始类型版本。
+      // Transform: returns a new string. '  x ' → 'x' differs in value → the parent marks dirty;
+      // 'x' → 'x' is the same value → not dirty (zero-copy). The primitive-type version of "copy-on-demand".
       return (v) => v.trim();
     case "toLowerCase":
       return (v) => v.toLowerCase();
     case "toUpperCase":
       return (v) => v.toUpperCase();
     default:
-      // 格式类校验（email/uuid/datetime/…）——正则与 stock 逐字一致
+      // Format checks (email/uuid/datetime/…) — regexes are verbatim from stock
       return formatStringStep(c);
   }
 }
@@ -350,18 +350,18 @@ function makeNumber(def: any): Validator {
       return FAILED;
     }
     if (Number.isNaN(data)) {
-      // 与 stock 一致：z.number() 拒绝 NaN（received: 'nan'）
+      // Same as stock: z.number() rejects NaN (received: 'nan')
       pushInvalidType(ctx, "number", "nan");
       return FAILED;
     }
     for (let i = 0; i < steps.length; i++) {
       if (steps[i](data, ctx) === FAILED) return FAILED;
     }
-    return data; // 原始值：返回即透传
+    return data; // Primitive value: returning it is pass-through
   };
 }
 
-/* ════════════════════════════ 叶子节点 ════════════════════════════ */
+/* ════════════════════════════ Leaf nodes ════════════════════════════ */
 
 function makeDate(def: any): Validator {
   const checks: any[] = def.checks ?? [];
@@ -444,7 +444,7 @@ function makeEnum(def: any): Validator {
 function makeNativeEnum(def: any): Validator {
   const obj = def.values;
   const set = new Set<unknown>();
-  // 与 stock 一致：跳过数字枚举的反向映射（键为数字字符串）
+  // Same as stock: skip the reverse mapping of numeric enums (keys that are numeric strings)
   for (const k in obj) {
     if (Object.hasOwn(obj, k) && Number.isNaN(Number(k))) {
       set.add(obj[k]);
@@ -465,9 +465,9 @@ function makeNativeEnum(def: any): Validator {
   };
 }
 
-/* ════════════════════════════ ZodObject（CoW 核心） ════════════════════════════ */
+/* ════════════════════════════ ZodObject (CoW core) ════════════════════════════ */
 
-/** parse(undefined) 是否（a）合法且（b）产出 undefined —— 如 optional/any/unknown/undefined/void */
+/** Whether parse(undefined) is (a) valid and (b) produces undefined — e.g. optional/any/unknown/undefined/void */
 function isUndefStable(s: z.ZodTypeAny): boolean {
   try {
     const r = s.safeParse(undefined);
@@ -486,7 +486,7 @@ function makeObject(def: any): Validator {
     );
   }
 
-  // 编译期一次性解析 shape / keys / 子编译器 / undefined 稳定性
+  // Resolve shape / keys / child compilers / undefined-stability once at compile time
   const shape: Record<string, z.ZodTypeAny> = def.shape();
   const keys = Object.keys(shape);
   const children: Validator[] = new Array(keys.length);
@@ -498,8 +498,8 @@ function makeObject(def: any): Validator {
   }
   const keySet = new Set(keys);
 
-  // 探针驱动的版本兼容。zod 3.24.1 实测：缺席 optional 键不物化（输出 {}）、
-  // present-undefined 保留 —— 二者与透传语义天然一致，下列分支通常不触发。
+  // Probe-driven version compatibility. Measured on zod 3.24.1: an absent optional key is not materialized (output {}),
+  // and present-undefined is kept — both agree naturally with pass-through semantics, so the branches below usually do not fire.
   const matAbsent =
     mode === "passthrough" ? PROBE.absentOptionalKeptPassthrough : PROBE.absentOptionalKeptStrip;
   const keepPresentUndef =
@@ -511,11 +511,11 @@ function makeObject(def: any): Validator {
       return FAILED;
     }
 
-    let out: any = data; // 乐观假设：直接用原对象
+    let out: any = data; // Optimistic assumption: use the original object directly
     let dirty = false;
     let anyFailed = false;
-    let absentUndef: number[] | null = null; // 需显式补 undefined 的键（旧版本 zod 兼容）
-    let presentDrop: number[] | null = null; // 需 delete 的键（旧版本 zod 兼容）
+    let absentUndef: number[] | null = null; // Keys needing an explicit undefined (older-zod compatibility)
+    let presentDrop: number[] | null = null; // Keys needing a delete (older-zod compatibility)
 
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i]!;
@@ -530,20 +530,20 @@ function makeObject(def: any): Validator {
           presentDrop ??= [];
           presentDrop.push(i);
         }
-        continue; // 透传即可覆盖的行为：什么都不做（零开销）
+        continue; // Behavior already covered by pass-through: do nothing (zero cost)
       }
 
       ctx.path.push(k);
       const outVal = children[i]!(inVal, ctx);
       ctx.path.pop();
       if (outVal === FAILED) {
-        // 失败后继续遍历其余字段 —— 与 stock 一致，一次 parse 收集全部 issue
+        // Keep walking the remaining fields after a failure — same as stock, one parse collects every issue
         anyFailed = true;
         continue;
       }
 
       if (outVal !== inVal && !anyFailed) {
-        // 第一个“被迫修改”的点 —— copy-on-write：此时才浅拷贝
+        // The first point "forced to change" — copy-on-write: only now is a shallow copy made
         if (!dirty) {
           dirty = true;
           out = { ...data };
@@ -554,8 +554,8 @@ function makeObject(def: any): Validator {
     if (anyFailed) return FAILED;
 
     if (mode !== "passthrough") {
-      // strip：只需知道“有没有”多余键（零分配 for-in + Set，首见即停）
-      // strict：收集全部多余键用于报错
+      // strip: only needs to know "whether there is" an extra key (zero-allocation for-in + Set, stops at the first hit)
+      // strict: collects every extra key for the error
       let extras: string[] | null = null;
       for (const k in data) {
         if (!Object.hasOwn(data, k)) continue;
@@ -579,13 +579,13 @@ function makeObject(def: any): Validator {
           );
           return FAILED;
         }
-        // strip：真有多余键才需要一份干净副本（注意：绝不原地 delete，输入完好无损）
+        // strip: a clean copy is needed only when extra keys really exist (note: never delete in place, the input stays intact)
         if (!dirty) {
           dirty = true;
           out = {};
           for (let i = 0; i < keys.length; i++) {
             const k = keys[i]!;
-            // alwaysSet 语义对齐：stock 只保留“非 undefined 或输入中存在”的键
+            // Aligned with alwaysSet semantics: stock keeps only keys that are "not undefined or present in the input"
             if (data[k] !== undefined || Object.hasOwn(data, k)) {
               out[k] = data[k];
             }
@@ -613,7 +613,7 @@ function makeObject(def: any): Validator {
       for (const i of presentDrop) delete out[keys[i]!];
     }
 
-    return out; // 纯场景：=== data，原引用直达
+    return out; // Pure case: === data, the original reference goes straight through
   };
 }
 
@@ -663,13 +663,13 @@ function makeArray(def: any): Validator {
       const outVal = el(data[i], ctx);
       ctx.path.pop();
       if (outVal === FAILED) {
-        anyFailed = true; // 继续收集其余元素的 issue（与 stock 一致）
+        anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
         continue;
       }
       if (outVal !== data[i] && !anyFailed) {
         if (!dirty) {
           dirty = true;
-          out = data.slice(); // 第一次“被迫”才 slice —— 其余元素持续共享
+          out = data.slice(); // slice only at the first "forced" change — the other elements stay shared
         }
         out[i] = outVal;
       }
@@ -748,7 +748,7 @@ function makeRecord(def: any): Validator {
       const outVal = outKey === FAILED ? FAILED : valV(inVal, ctx);
       ctx.path.pop();
       if (outKey === FAILED || outVal === FAILED) {
-        anyFailed = true; // 键/值解析互不影响，继续收集（与 stock 一致）
+        anyFailed = true; // Key and value parsing do not affect each other, keep collecting (same as stock)
         continue;
       }
       if ((outKey !== k || outVal !== inVal) && !anyFailed) {
@@ -756,7 +756,7 @@ function makeRecord(def: any): Validator {
           dirty = true;
           out = { ...data };
         }
-        if (outKey !== k) delete out[k]; // 键被重命名；碰撞时后写覆盖（与 stock 一致）
+        if (outKey !== k) delete out[k]; // Key renamed; on a collision the later write wins (same as stock)
         safeSet(out, outKey, outVal);
       }
     }
@@ -866,7 +866,7 @@ function makeUnion(options: z.ZodTypeAny[]): Validator {
     for (let i = 0; i < opts.length; i++) {
       const r = opts[i](data, ctx);
       if (r !== FAILED) return r;
-      ctx.issues.length = base; // 截断该分支产生的 issue
+      ctx.issues.length = base; // Truncate the issues produced by this branch
     }
     pushIssue(ctx, "invalid_union", "Invalid input");
     return FAILED;
@@ -923,9 +923,9 @@ function makeDiscriminated(def: any): Validator {
   };
 }
 
-/* ════════════════════════════ 包装类节点 ════════════════════════════ */
+/* ════════════════════════════ Wrapper nodes ════════════════════════════ */
 
-/** transform/refinement 回调里的 ctx 形参 —— 每个 effect 只建一个，跨调用复用 */
+/** The ctx parameter inside transform/refinement callbacks — one per effect, reused across calls */
 interface EffectShim {
   readonly path: PathSegment[];
   addIssue(arg: any): void;
@@ -964,7 +964,7 @@ function makeEffects(def: any): Validator {
     const shim = makeShim(holder);
     return (data, ctx) => {
       holder.ctx = ctx;
-      const mapped = eff.transform(data, shim); // 可能抛异常（与 stock 一致，向上传播）
+      const mapped = eff.transform(data, shim); // May throw (same as stock, propagates upward)
       return inner(mapped, ctx);
     };
   }
@@ -976,11 +976,11 @@ function makeEffects(def: any): Validator {
       const r = inner(data, ctx);
       if (r === FAILED) return FAILED;
       holder.ctx = ctx;
-      return eff.transform(r, shim); // 返回新值 → 父层引用比较自动判脏
+      return eff.transform(r, shim); // Returns a new value → the parent's reference comparison marks dirty automatically
     };
   }
 
-  // refinement：纯谓词。约定回调不得修改输入（CoW 的前提，README 有说明）。
+  // refinement: a pure predicate. By contract the callback must not modify the input (the premise of CoW, explained in the README).
   const holder: { ctx: Ctx | null } = { ctx: null };
   const shim = makeShim(holder);
   return (data, ctx) => {
@@ -1001,8 +1001,8 @@ function makeDefault(def: any): Validator {
   const getDefaultValue: () => unknown = def.defaultValue;
   return (data, ctx) => {
     if (data === undefined) {
-      // 与 stock 一致：默认值也要过一遍内层校验（非法默认值 → 校验失败）
-      return inner(getDefaultValue(), ctx); // 新值 → 父层自动判脏
+      // Same as stock: the default value also runs through the inner validation (an invalid default → validation failure)
+      return inner(getDefaultValue(), ctx); // A new value → the parent marks dirty automatically
     }
     return inner(data, ctx);
   };
@@ -1017,9 +1017,9 @@ function makeCatch(def: any): Validator {
       const r = inner(data, ctx);
       if (r !== FAILED) return r;
     } catch {
-      /* 吞掉异常 → 落到 catch 值（与 stock 行为一致） */
+      /* Swallow the exception → fall through to the catch value (same behavior as stock) */
     }
-    ctx.issues.length = base; // 丢弃内部 issue（stock 用独立 ctx，同样不透出）
+    ctx.issues.length = base; // Discard the inner issues (stock uses a separate ctx and likewise does not surface them)
     return catchValue({ input: data, issues: [] });
   };
 }
@@ -1029,7 +1029,7 @@ function makeReadonly(def: any): Validator {
   return (data, ctx) => {
     const r = inner(data, ctx);
     if (r === FAILED) return FAILED;
-    // 与 stock 一致：浅冻结。CoW 下这反而是优点 —— 冻结的共享结构天然防篡改。
+    // Same as stock: a shallow freeze. Under CoW this is actually an advantage — frozen shared structure is naturally tamper-proof.
     if (r !== null && (typeof r === "object" || typeof r === "function")) Object.freeze(r);
     return r;
   };
@@ -1041,17 +1041,17 @@ function makePipe(def: any): Validator {
   return (data, ctx) => {
     const r = a(data, ctx);
     if (r === FAILED) return FAILED;
-    return b(r, ctx); // 脏标记沿链自然传播
+    return b(r, ctx); // The dirty mark propagates naturally along the chain
   };
 }
 
-/* ════════════════════════════ 编译缓存与分发器 ════════════════════════════ */
+/* ════════════════════════════ Compile cache and dispatcher ════════════════════════════ */
 
 const cache = new WeakMap<z.ZodTypeAny, Validator>();
 
 /**
- * 编译入口：schema 树 → 特化校验闭包。
- * “先占位、后替换”处理 z.lazy 递归：占位闭包在真实编译器就绪前转发给它。
+ * Compilation entry point: schema tree → specialized validation closure.
+ * "Placeholder first, replace later" handles z.lazy recursion: the placeholder closure forwards to the real compiler before it is ready.
  */
 export function go(schema: z.ZodTypeAny): Validator {
   const hit = cache.get(schema);
@@ -1123,7 +1123,7 @@ function build(def: any): Validator {
       };
     case "ZodAny":
     case "ZodUnknown":
-      return (data) => data; // 全接受，纯透传
+      return (data) => data; // Accepts everything, pure pass-through
     case "ZodNever":
       return (data, ctx) => {
         pushInvalidType(ctx, "never", parsedType(data));
@@ -1135,7 +1135,7 @@ function build(def: any): Validator {
           pushInvalidType(ctx, "nan", parsedType(data));
           return FAILED;
         }
-        return data; // 注意 NaN !== NaN 恒真 → 父层永远判脏（输出仍正确，仅多拷贝一次）
+        return data; // Note NaN !== NaN is always true → the parent always marks dirty (output is still correct, just one extra copy)
       };
     case "ZodDate":
       return makeDate(def);
@@ -1183,7 +1183,7 @@ function build(def: any): Validator {
       const getter: () => z.ZodTypeAny = def.getter;
       let inner: Validator | null = null;
       return (data, ctx) => {
-        if (inner === null) inner = go(getter()); // 首次 parse 时解析，命中 cache 完成递归
+        if (inner === null) inner = go(getter()); // Resolved on the first parse; the cache hit closes the recursion
         return inner(data, ctx);
       };
     }
@@ -1194,15 +1194,15 @@ function build(def: any): Validator {
   }
 }
 
-/* ════════════════════════════ 静态纯度分析 ════════════════════════════ */
+/* ════════════════════════════ Static purity analysis ════════════════════════════ */
 
 /**
- * 静态纯度：该 schema 是否“永远不可能产生新值”。
- * 纯 schema 的 parse 恒等返回输入引用（strip 模式假定输入不含多余键）。
- * 用于文档化与测试断言，不参与运行时逻辑（运行时以引用比较为准）。
+ * Static purity: whether this schema "can never possibly produce a new value".
+ * A pure schema's parse always returns the input reference (strip mode assumes the input carries no extra keys).
+ * Used for documentation and test assertions, not part of the runtime logic (at runtime the reference comparison is what counts).
  */
 export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
-  if (seen.has(schema)) return true; // z.lazy 环：环上节点视为纯（其展开由调用方保证）
+  if (seen.has(schema)) return true; // z.lazy cycle: nodes on the cycle count as pure (the caller guarantees their expansion)
   seen.add(schema);
   const def: any = (schema as any)._def;
   switch (def.typeName) {
@@ -1227,7 +1227,7 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodNativeEnum":
       return true;
     case "ZodObject":
-      // strip 视为纯：仅当输入确有多余键时才拷贝（运行时以引用比较为准）
+      // strip counts as pure: it copies only when the input really has extra keys (at runtime the reference comparison is what counts)
       return Object.values(def.shape() as Record<string, z.ZodTypeAny>).every((c) =>
         isStaticPure(c, seen),
       );
@@ -1258,6 +1258,6 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodLazy":
       return isStaticPure(def.getter(), seen);
     default:
-      return false; // Default/Catch/transform/preprocess/Pipe 等：可能产生新值
+      return false; // Default/Catch/transform/preprocess/Pipe etc.: may produce a new value
   }
 }

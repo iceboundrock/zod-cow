@@ -1,14 +1,14 @@
 /**
  * zc — Zod-compatible CoW compilation layer (prototype).
  *
- * 消费 stock zod 的 schema（读取其 .def 树），编译出零拷贝/按需拷贝的校验闭包。
- * 不 fork zod、不改 Zod API：z.schema 继续用于类型推断与普通 parse；
- * compile(schema) 额外提供三个入口：
+ * Consumes stock zod schemas (reads their .def tree) and compiles zero-copy / copy-on-demand validation closures.
+ * Does not fork zod and does not change the Zod API: z.schema is still used for type inference and plain parse;
+ * compile(schema) additionally provides three entry points:
  *
- *   .parse(data)     CoW 语义：成功返回值（可能 === 输入，结构共享）
- *   .validate(data)  与 parse 相同的运行时，返回类型标 DeepReadonly —— 把
- *                    “输出与输入共享”这一事实写进类型系统
- *   .safeParse(data) 不抛错误的版本
+ *   .parse(data)     CoW semantics: returns the value on success (may be === the input, structurally shared)
+ *   .validate(data)  The same runtime as parse, with the return type marked DeepReadonly — it writes
+ *                    the fact that "the output shares with the input" into the type system
+ *   .safeParse(data) The non-throwing version
  */
 import type { z } from "zod";
 import { FAILED, type Issue, ZcError } from "./internal.js";
@@ -31,22 +31,22 @@ export type DeepReadonly<T> = T extends (infer U)[]
 export type SafeParseResult<T> = { success: true; data: T } | { success: false; error: ZcError };
 
 export interface Compiled<T extends z.ZodTypeAny> {
-  /** 原始 zod schema（仍可用作类型推断 / .extend / stock parse） */
+  /** The original zod schema (still usable for type inference / .extend / stock parse) */
   readonly schema: T;
   /**
-   * 静态纯度：true 表示该 schema 校验成功时恒等返回输入引用
-   * （strip 模式对象假定输入不含多余键；运行时始终以引用比较为准）。
+   * Static purity: true means this schema always returns the input reference when validation succeeds
+   * (strip-mode objects assume the input carries no extra keys; at runtime the reference comparison is always what counts).
    */
   readonly pure: boolean;
   /**
-   * CoW parse：成功返回解析值。
-   * 未发生任何“被迫修改”时 === 输入本身；否则仅脏路径上的对象被浅拷贝。
-   * 失败抛 ZcError（含 issues）。输入永不失真（绝不原地修改）。
+   * CoW parse: returns the parsed value on success.
+   * === the input itself when nothing was "forced to change"; otherwise only the objects on the dirty path are shallow-copied.
+   * Throws ZcError (carrying issues) on failure. The input is never altered (never mutated in place).
    */
   parse(data: unknown): z.output<T>;
   /**
-   * validate 语义（Numeric 用例）：与 parse 完全相同的运行时，
-   * 但返回类型为 DeepReadonly —— 提示调用方输出与输入共享结构。
+   * validate semantics (the Numeric use case): exactly the same runtime as parse,
+   * but the return type is DeepReadonly — a hint to the caller that output and input share structure.
    */
   validate(data: unknown): DeepReadonly<z.output<T>>;
   safeParse(data: unknown): SafeParseResult<z.output<T>>;

@@ -132,7 +132,7 @@ How to read it:
 - Against stock: 2.43x on S5, 2.47x on S2, 2.99x on S6 and 3.67x on S1 (the highest), and the 12 to 22 MB retained after GC drops to zero. Async (S7) is 2.67x.
 - Against the official JIT parser: level on the object scenarios (S1 1.08x, S2 0.94x, a 1 to 2 ms gap at this record count and within runner noise, since the output construction the skeleton skips pays for the sub-skeleton calls). Ahead on the container scenarios (S5 1.76x, S6 1.88x): the whole-tree rebuild is a fixed cost of stock semantics, while CoW pays only for the paths that changed.
 - validate fast path: `validate()` is the official whole-tree `assertOnly` product of the same array schema, so S4 reads level with that baseline by construction (0.99x). Its value is the validation-only cost: 14 ms / 50 000 = 280 ns per account, 1.42x below the S1 parse of the same data, with nothing retained after GC.
-- The +3.1 MB in S1 is short-lived allocation from the official leaf products (datetime/email format temporaries) and the own-symbol probes required before returning strip-mode objects by reference; the CoW layer copies no containers.
+- The +3.1 MB in S1 is short-lived allocation from the strip-mode probe: exactly one empty own-symbol array (32 bytes) per object, 100 000 objects here, read to prove that the object can be returned by reference. The official leaf products allocate nothing measurable and the CoW layer copies no containers.
 
 The zod3 line measured 4.4x to 4.8x against stock zod 3.24.1 in the same run (S1 4.36x, S2 4.77x; stock zod3 still pays the interpreter tax). The earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 

@@ -192,14 +192,15 @@ if (x7 !== x6) x0 = true;
 for (const k in input) {
   if (k !== "id" && k !== "email" && k !== "tags" && k !== "address") { x1 = true; break; }
 }                                                           // fixed string keys are generated comparisons
-if (Object.getOwnPropertySymbols(input).length !== 0) x1 = true; // no declared symbols: any own symbol is extra
+const x8 = Object.getOwnPropertySymbols(input);            // the clean path's only allocation: one empty array per object
+if (x8.length !== 0) x1 = true;                            // no declared symbols: any own symbol is extra
 if (!x0 && !x1) {
   return input;                                            // ═══ the one line the official template does not have ═══
 }
 const out = { ...input };                                  // copy only when forced: key presence and key order stay faithful
 if (x1) {
-  for (const k in input) if (!c4.has(k)) delete out[k];    // dirty path reuses one Set for deletion
-  for (const s of Object.getOwnPropertySymbols(input)) if (!c4.has(s)) delete out[s];
+  for (const k in input) if (k !== "id" && k !== "email" && k !== "tags" && k !== "address") delete out[k];
+  for (const s of x8) delete out[s];                       // the same comparisons and the same symbol array decide what to drop
 }
 return out;
 ```
@@ -208,11 +209,11 @@ Point-by-point correspondence with the official dump:
 
 | Official parser | zc-z4 skeleton | Note |
 |---|---|---|
-| `const v8 = {...}` unconditionally | `if (!dirty && !extra) return input;` | The CoW core: zero allocation on clean input |
+| `const v8 = {...}` unconditionally | `if (!dirty && !extra) return input;` | The CoW core: no copy on clean input; the strip probe's one empty own-symbol array per object is the clean path's only allocation |
 | `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
 | (output assembly handles key presence implicitly) | `{ ...input }` | Spread keeps presence and key order faithful naturally |
-| `for (const k in …)` unknown probe | generated string comparisons for shapes up to 16 keys, then a `Set` fallback | Same inherited-enumerable semantics with faster monomorphic small-object membership; the cap avoids quadratic scans and excessive code on large shapes |
+| `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the strip deletion path reuses the same predicate and the symbol array the probe read | Same inherited-enumerable semantics with faster monomorphic small-object membership; the `Set` is hoisted only when something references it (large shapes, declared symbol keys), and the cap bounds the generated code size (see the constant's comment for the measurement) |
 
 ### 3.2 The container's own checks: the two-path timing
 
@@ -485,10 +486,10 @@ How to read it:
    skeleton; an all-dirty async transform scenario is still 2.67x, with allocation -30% (14.0→9.8MB).
 4. validate fast path: `validate()` is the official assertOnly whole-tree product of the same array schema, so S4 reads level
    with that baseline by construction (14ms against 14ms, 0.99x). Its value is the validation-only cost: 14ms / 50 000 = 280ns per account,
-   1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the same short-lived leaf allocation as in S1).
+   1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the `tags` arrays the official array product materializes even in assertOnly mode once a size check such as `.max(8)` is present).
    The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
-S1's +3.1MB of short-lived allocation comes from the official leaf products (temporary values in the datetime/email format checks) and the own-symbol arrays required to prove that strip-mode objects can be returned by reference,
+S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exactly one empty array (32 bytes) per object, 100 000 objects at 50 000 accounts with a nested address, read to prove that the object can be returned by reference. The official leaf products allocate nothing measurable (the datetime/email format checks included; measured per leaf with the sampling heap profiler and `heapUsed` deltas on Node 24),
 and nothing is retained after GC: CoW itself copies no containers. In the v0.5 local measurement v1 allocated less (12.1MB against zc-z4's 30.5MB) but was twice as slow; the trade-off between speed and
 a small amount of short-lived allocation was decided in favor of zc-z4 in a production context (where minor GC is cheap), which is also one of the reasons v1 was eventually removed.
 

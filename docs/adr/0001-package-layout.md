@@ -27,12 +27,12 @@ The issue listed three layouts: a single package with subpath exports (`zod-cow`
 ### 1. Layout: pnpm workspace, one package per zod major
 
 ```
-packages/zod-cow-v4/    published as `zod-cow`: the zod4 line (entry, engine, probes, canary flags,
+packages/zod-cow-v4/    published as `zod-cow-v4`: the zod4 line (entry, engine, probes, canary flags,
                         smoke and differential tests, its own copy of the test harness)
 packages/zod-cow-v3/    private `zod-cow-v3`: the frozen zod3 line, its unit and differential tests,
                         its own copy of the test harness
 packages/bench-v4/      private `bench-v4`: the zod4 benchmark and `examples/demo.ts`; depends on
-                        `zod-cow` (`workspace:*`), `zod@4.5.4` and the reference-line libraries (`arktype`)
+                        `zod-cow-v4` (`workspace:*`), `zod@4.5.4` and the reference-line libraries (`arktype`)
 packages/bench-v3/      private `bench-v3`: the zod3 benchmark; depends on `zod-cow-v3` (`workspace:*`),
                         `zod@3.24.1` and `arktype`
 ```
@@ -43,27 +43,27 @@ There is **no shared package**, neither runtime nor development. The only code b
 
 Each package directory owns exactly one `zod` at the right major (a devDependency in the line packages, a dependency in the bench packages), so every package imports `zod` by its real specifier. The `zod4` alias and the `zod3`-vs-`zod4` naming in imports disappear.
 
-The benchmarks are packages of their own for two reasons. The reference-line libraries they compare against (`arktype` today, possibly more later) never appear in the dependency list of a line package. And `bench-v4` imports `zod-cow` through its real `exports` entry, so it measures the built artifact a consumer installs rather than the TypeScript source. `bench-v3` imports `zod-cow-v3` through the workspace link; that package is private and has no build, so its `exports` points at the TypeScript source and `tsx` transpiles it (a pnpm workspace link resolves to the real path under `packages/`, outside `node_modules`).
+The benchmarks are packages of their own for two reasons. The reference-line libraries they compare against (`arktype` today, possibly more later) never appear in the dependency list of a line package. And `bench-v4` imports `zod-cow-v4` through its real `exports` entry, so it measures the built artifact a consumer installs rather than the TypeScript source. `bench-v3` imports `zod-cow-v3` through the workspace link; that package is private and has no build, so its `exports` points at the TypeScript source and `tsx` transpiles it (a pnpm workspace link resolves to the real path under `packages/`, outside `node_modules`).
 
 ### 2. Names and entry points
 
-- The published package is **`zod-cow`**, matching the repository name. The name was unregistered on npm on 2026-09-04 (`cow-zod` was also free and was rejected for not matching the repository). It is unscoped. Its directory is `packages/zod-cow-v4/`: the directory carries the major so the four directories read as two pairs; the npm name does not.
-- `zod-cow` has a single entry: `import { compile } from "zod-cow"`. There is no `zod-cow/v4` subpath, because the package contains exactly one line; there is nothing for a subpath to disambiguate.
+- The published package is **`zod-cow-v4`**: the repository name plus the zod major it is built for. The name was unregistered on npm on 2026-09-04, as were `zod-cow-v3` and the bare `zod-cow` (`cow-zod` was also free and was rejected for not matching the repository). It is unscoped, and its directory is `packages/zod-cow-v4/`, so package names and directories match across the workspace. Carrying the major in the name says up front what the peer range in section 3 enforces: the package targets one zod major. It also makes the zod3 line and a future zod5 line sibling packages (`zod-cow-v3`, `zod-cow-v5`) instead of subpaths or renames.
+- `zod-cow-v4` has a single entry: `import { compile } from "zod-cow-v4"`. There is no version subpath, because the major is in the package name and the package contains exactly one line; there is nothing for a subpath to disambiguate.
 - The private packages are named `zod-cow-v3`, `bench-v4` and `bench-v3`, unscoped and matching their directories. Their names only matter inside the workspace.
-- `zod-cow` carries the project version and continues the existing 0.x sequence; `CHANGELOG.md` at the root covers the whole workspace.
+- `zod-cow-v4` carries the project version and continues the existing 0.x sequence; `CHANGELOG.md` at the root covers the whole workspace.
 
 ### 3. Peer-dependency policy for zod
 
-`zod-cow` declares `zod` as a **peerDependency whose range covers only the minors the test suites have verified**. The initial range is `>=4.5.4 <4.6.0`. The package's own devDependency pins the exact version used in CI (`zod@4.5.4`).
+`zod-cow-v4` declares `zod` as a **peerDependency whose range covers only the minors the test suites have verified**. The initial range is `>=4.5.4 <4.6.0`. The package's own devDependency pins the exact version used in CI (`zod@4.5.4`).
 
 Widening the range is a release, not a config edit. The steps, in order:
 
 1. Bump the devDependency to the new zod version.
 2. Diff `src/cow4/predicates.ts` and `WHEN_DEFAULTED_CHECKS` against the upstream compiler and update the copies.
 3. Run `probe:z4`, the canary, the smoke tests and the full differential fuzzer; the reference-sharing rate must not drop.
-4. Widen the peer range to include the verified minor and publish `zod-cow`.
+4. Widen the peer range to include the verified minor and publish `zod-cow-v4`.
 
-A caret range (`^4.5.4`) is rejected: it would let a zod minor change compiler internals under an installed `zod-cow` with no signal on the consumer's side, since the canary only runs in this repository's CI. The peer range is the honest statement of what the engine depends on. The exit from this policy is upstream making `compileFn` / `assertOnly` / `INVALID` public (`docs/upstream-issue-draft.md`).
+A caret range (`^4.5.4`) is rejected: it would let a zod minor change compiler internals under an installed `zod-cow-v4` with no signal on the consumer's side, since the canary only runs in this repository's CI. The peer range is the honest statement of what the engine depends on. The exit from this policy is upstream making `compileFn` / `assertOnly` / `INVALID` public (`docs/upstream-issue-draft.md`).
 
 `zod-cow-v3` pins `zod@3.24.1` exactly as a devDependency and declares no peer, since it is not published.
 
@@ -75,26 +75,27 @@ A caret range (`^4.5.4`) is rejected: it would let a zod minor change compiler i
 - It deviates from stock in a known way (`readonly` freezes the caller's input in place, #27) and its API differs from the zod4 line (`ZcError` instead of `ZodError`, `validate()` returns a `DeepReadonly` view instead of `unknown`). Publishing it would commit the project to supporting a second API surface.
 - zod 3 is in maintenance upstream.
 
-If it is ever published, it becomes a release of its own package under this layout; `zod-cow` is untouched. That is the point of one package per major.
+If it is ever published, it becomes a release of its own package under this layout; `zod-cow-v4` is untouched. That is the point of one package per major.
 
 ### 5. Build and artifact shape
 
-- ESM only, plus `.d.ts` declarations, emitted by `tsc`. No CJS build: the engine floor is Node.js >= 22.13.0, which supports `require(esm)`, so CommonJS consumers on the supported Node range can still `require("zod-cow")`.
+- ESM only, plus `.d.ts` declarations, emitted by `tsc`. No CJS build: the engine floor is Node.js >= 22.13.0, which supports `require(esm)`, so CommonJS consumers on the supported Node range can still `require("zod-cow-v4")`.
 - `exports` lists `.` and `./package.json` only. `files` restricts the tarball to the build output. npm adds `package.json`, `README` and `LICENSE` to every tarball regardless of `files`, but it takes them from the package directory, so `packages/zod-cow-v4/` carries its own README and a copy of the root `LICENSE`; the root copies are not in the tarball.
 - Probes (`probe-z4.ts`), canary flags (`probe-z4-flags.ts`) and tests live in the package directory but stay outside the build's `include` and outside `files`. They are diagnostics, not API. The benchmark and the examples are not in the package at all; they live in `bench-v4`.
 
 ## Consequences
 
 - #9 moves the sources into the four packages, adds the build, `exports`, `files` and the workspace wiring, moves `arktype` from the root `devDependencies` into the two bench packages, and reworks CI so typecheck, lint, both test lines and both benches run against the new layout. The command table and module map in `AGENTS.md`, the repository layout in both READMEs, and the `zod4/v4/core` references in the docs change in that PR.
-- The Benchmarks workflow builds `zod-cow` before running `bench-v4`, and the zod4 numbers in the README come from the built artifact from then on. `bench-v3` keeps measuring the zod3 source. The asymmetry is accepted: that line is frozen and its table is historical.
+- The Benchmarks workflow builds `zod-cow-v4` before running `bench-v4`, and the zod4 numbers in the README come from the built artifact from then on. `bench-v3` keeps measuring the zod3 source. The asymmetry is accepted: that line is frozen and its table is historical.
 - The test harness exists twice. A fix to one copy is applied to the other in the same PR, the rule the two READMEs already follow.
-- Every zod 4 minor requires a `zod-cow` release before consumers on that minor can install without a peer warning. This cost is accepted; it is the cost of building on internal API.
+- Every zod 4 minor requires a `zod-cow-v4` release before consumers on that minor can install without a peer warning. This cost is accepted; it is the cost of building on internal API.
 - The differential suites run per package, so they keep their `SEEDS` / `CASES` / `REPRO` knobs unchanged.
-- Nothing in the published artifact references the zod3 line, and nothing in the zod3 line references `zod-cow`; the two packages can evolve on independent cadences if that ever matters.
+- Nothing in the published artifact references the zod3 line, and nothing in the zod3 line references `zod-cow-v4`; the two packages can evolve on independent cadences if that ever matters.
 
 ## Rejected alternatives
 
 - **Single package with subpath exports** (`zod-cow` and `zod-cow/v3`). Rejected because a package resolves one `zod`: the zod3 line could not be typechecked and tested against zod 3 in the same package without the npm alias, and the alias cannot ship. It would also have needed a peer range of `3.24.x || 4.5.x` in which the default entry fails at import time on zod 3. Mirroring zod's own `zod` / `zod/v3` / `zod/v4` shape only works because zod ships all of them from one codebase against one dependency tree; this project does not.
+- **`zod-cow` as the published name.** Rejected because the bare name would claim the neutral name for a package that supports one zod major; the peer range says so, and the name should say the same. It would also make a later zod3 or zod5 release either a subpath of that package, which section 1 rules out, or a rename.
 - **Three-package monorepo** (shared / zod3 / zod4). Rejected because the shared package would hold no runtime code: `internal.ts` is used only by the zod3 line, and the zod4 line never imported it. A development-only shared package (test harness, bench fixtures, measurement helpers) was considered as a fifth package and rejected as well; see section 1.
 - **Benchmarks inside the line packages.** Rejected because the reference-line libraries would become devDependencies of the published package, and because the zod4 benchmark would keep measuring the TypeScript source instead of the shipped build.
 - **One benchmark package for both lines.** Rejected because it would need both zod majors in one directory, which is the alias problem section 1 removes.

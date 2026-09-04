@@ -4,11 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-z4.md` is the deep dive on the current engine.
+A prototype **Copy-on-Write (CoW) compilation layer for Zod schemas**. `compile(schema)` returns a fast parser whose output is `===` the input reference when nothing was forced to change (no default/transform/strip/etc. fired), and otherwise copies only the dirty path from leaf to root. The README is the authoritative narrative; `docs/ARCHITECTURE-z4.md` is the deep dive on the current engine; `CHANGELOG.md` holds the v0.1 to v0.5 history and the superseded benchmark tables.
 
 Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck + both test lines on a Node 22/24/26 matrix, plus a separate `lint` job). A second workflow, `.github/workflows/bench.yml`, runs `bench:z4` and `bench` on `workflow_dispatch` / weekly schedule only (never on push/PR) with a reduced `BENCH_N` and writes the output to the job summary; treat those as smoke results, not reference numbers. Linting and formatting use Biome (`biome.json`: recommended rules with `noExplicitAny` and `noNonNullAssertion` off); `pnpm run lint` must pass before a PR is opened.
 
-**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Code comments and test/bench output were translated in #6; the README, architecture doc and CHANGELOG are still largely in Chinese, and that migration is tracked in #7. When you edit an existing file, write new or changed comments in English and do not mass-translate unrelated lines in the same change. Purely mechanical edits inside an existing Chinese line (swapping a command or identifier, fixing a path) do not by themselves require translating that line.
+**Language:** all code comments, test/bench output strings, and non-code artifacts (docs, issues, PR text, plans, reviews) are written in English. Code comments and test/bench output were translated in #6, the docs in #7. The only Chinese files are the two deliberate ones listed under Documentation layout below.
+
+**Documentation layout:**
+
+| File | Role |
+|---|---|
+| `README.md` | English source of truth: what the layer is, quick start, usage of both entry points, the CoW invariant, the current benchmark table, correctness evidence, known limitations, repository layout |
+| `README.zh-CN.md` | Chinese counterpart with the same headings. A change to `README.md` must be applied to `README.zh-CN.md` in the same PR |
+| `CHANGELOG.md` | Keep a Changelog style; `Unreleased` plus v0.1 to v0.5. Historical benchmark tables live here, never in the README |
+| `docs/ARCHITECTURE-z4.md` | English architecture deep dive on the zod4 engine (§1 to §11 plus Appendix A). Architecture changes go here |
+| `docs/ARCHITECTURE-z4.zh-CN.md` | Frozen Chinese snapshot of the v0.5 architecture text. Not maintained; do not edit it when the English doc changes |
+| `docs/upstream-issue-draft.md` | Draft issue for zod upstream asking to make `compileFn` / `assertOnly` / `INVALID` public |
 
 ## Commands
 
@@ -91,7 +102,7 @@ The zod4 line depends on zod4 internals and on hand-copied predicates (`WHEN_DEF
 
 - Any change to purity rules or a container skeleton must be validated with the differential fuzzer for that line (`tests/differential-z4.test.ts` for the zod4 line), not only the smoke tests. Report the reference-sharing rate it prints; a drop indicates a lost CoW path.
 - Benchmarks in the README/docs were measured on node v24 with 3-run medians; update the tables when re-measuring rather than adding new ones.
-- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md`; `docs/upstream-issue-draft.md` is a draft issue for zod upstream asking to make `compileFn`/`assertOnly`/`INVALID` public.
+- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md` (English; the `.zh-CN.md` snapshot stays untouched). User-facing changes (API, supported features, benchmark tables) go into both READMEs and the `Unreleased` section of `CHANGELOG.md`.
 
 ## Non-code artifacts
 

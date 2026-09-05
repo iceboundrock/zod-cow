@@ -978,12 +978,13 @@ import { compile } from "../src/index.js";
 /* ── 17. clean path keeps what stock's rebuild normalizes (#48) ── */
 {
   console.log("\n── clean path keeps what stock's rebuild normalizes (#48) ──");
-  // The two undeclared-key probes prove only what they look at (`for...in`: enumerable string keys;
-  // `Object.getOwnPropertySymbols`: own symbols), and nothing on the clean path reads a property
-  // descriptor or the prototype, so a clean input comes back with everything stock's rebuild would
-  // normalize away. Documented under known limitations, not probed; the copy path is the official
-  // assembly and matches stock. These assertions pin the documented behavior next to stock's, so a
-  // future probe is a deliberate change. Group 16 pins the declared-key descriptor member.
+  // The two undeclared-key probes prove only what they look at (`for...in`: enumerable string keys,
+  // own and inherited, which is why it walks the prototype chain; `Object.getOwnPropertySymbols`:
+  // own symbols), and no explicit descriptor or prototype probe runs on the clean path, so a clean
+  // input comes back with everything stock's rebuild would normalize away. Documented under known
+  // limitations, not probed; the copy path is the official assembly and matches stock. These
+  // assertions pin the documented behavior next to stock's, so a future probe is a deliberate
+  // change. Group 16 pins the declared-key descriptor member.
   const hide = <T extends object>(o: T, key: PropertyKey, value: unknown): T =>
     Object.defineProperty(o, key, { value, enumerable: false });
   const ownNames = (o: unknown) => Object.getOwnPropertyNames(o as object);
@@ -1026,6 +1027,14 @@ import { compile } from "../src/index.js";
   const numberIn = hide({ 1: 1 }, "hidden", 2);
   assert.deepEqual(ownNames(NumberRecord.parse(numberIn)), ["1"]);
   assert.equal(compile(NumberRecord).parse(numberIn), numberIn, "number record: returned as it is");
+  assert.deepEqual(ownNames(numberIn), ["1", "hidden"], "number record: the input is not mutated");
+  const NumberRecordT = z.record(z.coerce.number(), bump);
+  const numberDirty = hide({ 1: 1 }, "hidden", 2);
+  const numberOut = compile(NumberRecordT).parse(numberDirty) as Record<string, unknown>;
+  assert.notEqual(numberOut, numberDirty);
+  assert.deepEqual(ownNames(numberOut), ["1"], "number record: the copy path drops it like stock");
+  assert.deepEqual(numberOut, NumberRecordT.parse(numberDirty));
+  assert.equal(numberOut[1], 2);
   console.log(
     "  a non-enumerable undeclared string key survives the clean path, the copy drops it ✓",
   );
@@ -1087,20 +1096,22 @@ import { compile } from "../src/index.js";
   }
   console.log("  a class instance and an inherited key come back as passed on the clean path ✓");
 
-  // 3. Proxy traps: strip's `for...in` probe consults `ownKeys` and `getOwnPropertyDescriptor` where
-  // stock's strip template enumerates nothing; loose consults `ownKeys` alone (the own-symbol probe,
-  // parity with stock's `for...in` append there since #42) and nothing under `"ignore"`, where stock's
-  // append consults both; strict runs the official unknown-key loop on both sides
+  // 3. Proxy traps: a `for...in` consults `ownKeys`, `getOwnPropertyDescriptor` and, walking the
+  // prototype chain, `getPrototypeOf`. Strip's `for...in` probe consults all three where stock's strip
+  // template enumerates nothing; loose consults `ownKeys` alone (the own-symbol probe, parity with
+  // stock's `for...in` append there since #42) and nothing under `"ignore"`, where stock's append
+  // consults all three; strict runs the official unknown-key loop on both sides
   class TrapError extends Error {}
-  const trapped = (trap: "ownKeys" | "getOwnPropertyDescriptor") => {
-    const boom = () => {
-      throw new TrapError(trap);
-    };
-    return new Proxy(
+  const traps = ["ownKeys", "getOwnPropertyDescriptor", "getPrototypeOf"] as const;
+  const trapped = (trap: (typeof traps)[number]) =>
+    new Proxy(
       { a: 1 },
-      trap === "ownKeys" ? { ownKeys: boom } : { getOwnPropertyDescriptor: boom },
+      {
+        [trap]: () => {
+          throw new TrapError(trap);
+        },
+      },
     );
-  };
   const throwsTrap = (f: () => unknown) => {
     try {
       f();
@@ -1110,7 +1121,7 @@ import { compile } from "../src/index.js";
       return true;
     }
   };
-  for (const trap of ["ownKeys", "getOwnPropertyDescriptor"] as const) {
+  for (const trap of traps) {
     assert.equal(
       throwsTrap(() => Strip.parse(trapped(trap))),
       false,
@@ -1147,21 +1158,25 @@ import { compile } from "../src/index.js";
     true,
     "loose: ownKeys",
   );
-  const descriptorTrap = trapped("getOwnPropertyDescriptor");
-  assert.equal(
-    compile(Loose).parse(descriptorTrap),
-    descriptorTrap,
-    "loose: getOwnPropertyDescriptor is not consulted, the proxy is returned as it is (#48)",
-  );
-  const keysTrap = trapped("ownKeys");
-  assert.equal(
-    compile(Loose, { ownSymbolKeys: "ignore" }).parse(keysTrap),
-    keysTrap,
-    'loose under "ignore": nothing is enumerated, the proxy is returned as it is (#48)',
-  );
+  for (const trap of ["getOwnPropertyDescriptor", "getPrototypeOf"] as const) {
+    const proxy = trapped(trap);
+    assert.equal(
+      compile(Loose).parse(proxy),
+      proxy,
+      `loose: ${trap} is not consulted, the proxy is returned as it is (#48)`,
+    );
+  }
+  for (const trap of traps) {
+    const proxy = trapped(trap);
+    assert.equal(
+      compile(Loose, { ownSymbolKeys: "ignore" }).parse(proxy),
+      proxy,
+      `loose under "ignore": ${trap} is not consulted, the proxy is returned as it is (#48)`,
+    );
+  }
   console.log("  Proxy traps: strip enumerates where stock does not, loose less than stock ✓");
 
-  // No probe for any of it: the object skeleton reads neither descriptors nor the prototype
+  // No explicit probe for any of it: the object skeleton calls no descriptor or prototype reader
   for (const [label, S] of objectModes) {
     for (const C of [compile(S), compile(S, { ownSymbolKeys: "ignore" })]) {
       for (const probe of [

@@ -735,32 +735,33 @@ function makeObject(def: any): Validator {
     });
   }
 
+  // Same algorithm as the generated skeleton: every shape key is read once into `vals` (the
+  // output value of the slot once validated), the clean path returns the input by reference and
+  // the copy is stock's output assembly from those values (shape order, stock's presence rule,
+  // passthrough extras appended by `for...in`), never a spread of the input.
   return (data, ctx): any => {
     if (!isObjectType(data)) {
       pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
 
-    let out: any = data; // Optimistic assumption: use the original object directly
+    const vals: any[] = new Array(n);
     let dirty = false;
     let anyFailed = false;
-    let absentUndef: number[] | null = null; // Keys needing an explicit undefined (older-zod compatibility)
-    let presentDrop: number[] | null = null; // Keys needing a delete (older-zod compatibility)
 
     for (let i = 0; i < n; i++) {
       const k = keys[i]!;
       const inVal = data[k];
+      vals[i] = inVal;
 
       if (inVal === undefined && undefStable[i]) {
-        const present = hop.call(data, k);
-        if (!present && matAbsent) {
-          absentUndef ??= [];
-          absentUndef.push(i);
-        } else if (present && !keepPresentUndef) {
-          presentDrop ??= [];
-          presentDrop.push(i);
+        // The child is not run; the presence rule of the assembly below covers the key. Only the
+        // flags of another zod version (an absent optional key materialized as undefined, a
+        // present undefined dropped) force a copy here.
+        if (matAbsent || !keepPresentUndef) {
+          if (k in data ? !keepPresentUndef : matAbsent) dirty = true;
         }
-        continue; // Behavior already covered by pass-through: do nothing (zero cost)
+        continue;
       }
 
       let outVal: any;
@@ -778,34 +779,24 @@ function makeObject(def: any): Validator {
         anyFailed = true;
         continue;
       }
-
-      if (outVal !== inVal && !anyFailed) {
-        // The first point "forced to change" — copy-on-write: only now is a shallow copy made
-        if (!dirty) {
-          dirty = true;
-          out = { ...data };
-        }
-        if (i !== protoIdx) out[k] = outVal;
+      if (outVal !== inVal) {
+        // The first point "forced to change": the copy is assembled once at the end
+        dirty = true;
+        vals[i] = outVal;
       }
     }
     // An aborted child aborts the object, after the strict probe below has had its say (stock parses
     // every pair, then reports the unrecognized keys, then returns INVALID)
     if (anyFailed && mode !== "strict") return FAILED;
-    if (dropOwnProto && hop.call(data, "__proto__")) {
-      if (!dirty) {
-        dirty = true;
-        out = { ...data };
-      }
-      Reflect.deleteProperty(out, "__proto__");
-    }
+    if (dropOwnProto && hop.call(data, "__proto__")) dirty = true;
 
     if (mode !== "passthrough") {
-      // Undeclared-key probe. strip only needs to know whether an extra own key exists (stops at the
-      // first hit); strict collects every extra key for the error. The enumeration order of a plain
-      // object usually follows the shape (JSON payloads, literals), so each enumerated key is first
-      // compared against the shape key expected at that position (one string compare, no hash) and
-      // the index map is consulted only on a mismatch; `hasOwnProperty.call` is folded away by V8
-      // inside a `for...in` over the enum cache, where `Object.hasOwn` is not.
+      // Undeclared-key probe, stock's own `for...in` (an inherited enumerable key counts as
+      // undeclared, as it does for stock). strip only needs to know whether an extra key exists
+      // (stops at the first hit); strict collects every extra key for the error. The enumeration
+      // order of a plain object usually follows the shape (JSON payloads, literals), so each
+      // enumerated key is first compared against the shape key expected at that position (one
+      // string compare, no hash) and the index map is consulted only on a mismatch.
       let extras: string[] | null = null;
       let hint = 0;
       for (const k in data) {
@@ -818,7 +809,6 @@ function makeObject(def: any): Validator {
           hint = j + 1;
           continue;
         }
-        if (!hop.call(data, k)) continue;
         if (mode === "strict") {
           extras ??= [];
           extras.push(k);
@@ -832,37 +822,31 @@ function makeObject(def: any): Validator {
         if (mode === "strict")
           pushIssue(ctx, data, em, { code: "unrecognized_keys", keys: extras });
         if (anyFailed) return FAILED;
-        // strip: a clean copy is needed only when extra keys really exist (never a delete on the
-        // input, never a delete on the copy either: the output is assembled from the shape keys)
-        const src = out;
-        out = {};
-        for (let i = 0; i < n; i++) {
-          if (i === protoIdx) continue;
-          const k = keys[i]!;
-          // Aligned with alwaysSet semantics: stock keeps only keys that are "not undefined or present in the input"
-          if (src[k] !== undefined || hop.call(data, k)) out[k] = src[k];
-        }
         dirty = true;
       }
     }
     if (anyFailed) return FAILED;
+    if (!dirty) return data; // Pure case: === data, the original reference goes straight through
 
-    if (absentUndef !== null) {
-      if (!dirty) {
-        dirty = true;
-        out = { ...data };
-      }
-      for (const i of absentUndef) out[keys[i]!] = undefined;
+    // Stock's output assembly (`mergeObjectSync`): the shape keys in shape order, a key written when
+    // its value is defined or the key is present on the input (`in`, as stock tests it; the flags
+    // of another zod version widen or narrow that), "__proto__" never; then, in passthrough mode,
+    // the undeclared keys stock's `for...in` appends, an undefined value dropped as stock drops it
+    const out: any = {};
+    for (let i = 0; i < n; i++) {
+      if (i === protoIdx) continue;
+      const k = keys[i]!;
+      const v = vals[i];
+      if (v !== undefined || (k in data ? keepPresentUndef : matAbsent)) out[k] = v;
     }
-    if (presentDrop !== null) {
-      if (!dirty) {
-        dirty = true;
-        out = { ...data };
+    if (mode === "passthrough") {
+      for (const k in data) {
+        if (keyIndex.has(k) || k === "__proto__") continue;
+        const v = data[k];
+        if (v !== undefined) out[k] = v;
       }
-      for (const i of presentDrop) delete out[keys[i]!];
     }
-
-    return out; // Pure case: === data, the original reference goes straight through
+    return out;
   };
 }
 
@@ -1730,8 +1714,10 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodNullable":
       return isStaticPure(def.innerType, seen);
     case "ZodReadonly":
-      // Frozen copy for containers (#27): only a pass-through leaf keeps the reference
-      return !stockRebuilds(def.innerType) && isStaticPure(def.innerType, seen);
+      // Frozen copy for containers (#27): only a pass-through leaf keeps the reference. A `null`
+      // answer (the branch taken decides at run time, see `stockRebuilds`) may rebuild, so it is
+      // not pure either
+      return stockRebuilds(def.innerType) === false && isStaticPure(def.innerType, seen);
     case "ZodPipeline":
       return isStaticPure(def.in, seen) && isStaticPure(def.out, seen);
     case "ZodBranded":

@@ -4,8 +4,14 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { compile, ZcError, ZcNotSupportedError } from "../src/index.js";
-import { test, summary } from "./harness.js";
+import type { ZcError as ZcErrorType } from "../src/index.js";
+import { summary, test } from "./harness.js";
+
+// `--no-codegen` runs the same tests through the closure skeletons (the fallback used where
+// `new Function` is unavailable); the flag must be set before the compiler module loads
+const noCodegen = process.argv.includes("--no-codegen");
+if (noCodegen) process.env.ZC_V3_CODEGEN = "0";
+const { compile, ZcError, ZcNotSupportedError } = await import("../src/index.js");
 
 console.log("── CoW semantics ──");
 
@@ -416,6 +422,121 @@ test("__proto__ as a declared key: validated, never written, dropped from the ou
   assert.deepEqual(P.parse(pin), { a: "x", b: 2 });
   assert.equal(Object.hasOwn(P.parse(pin) as object, "__proto__"), false);
   assert.equal(({} as any).p, undefined);
+});
+
+test("object copy path: stock's output assembly from the validated values (non-enumerable declared key kept, own symbol dropped, getter read once, shape order, presence rule)", () => {
+  const S = z.object({ a: z.string(), b: z.string().default("d"), c: z.string().optional() });
+  for (const M of [S, S.strict(), S.passthrough()]) {
+    const C = compile(M);
+    // A declared key the input defines as non-enumerable: stock reads it by name and writes it
+    const ne: any = { b: undefined };
+    Object.defineProperty(ne, "a", { value: "x", enumerable: false });
+    const out = C.parse(ne) as any;
+    assert.notEqual(out, ne);
+    assert.deepEqual(Object.keys(out), ["a", "b"]);
+    assert.deepEqual(out, M.parse(ne));
+    // Presence rule of the copy: an absent optional key stays absent, a present undefined is written
+    const presentUndef = { a: "x", c: undefined };
+    assert.deepEqual(Object.keys(C.parse(presentUndef) as any), ["a", "b", "c"]);
+    assert.deepEqual(Object.keys(M.parse(presentUndef) as any), ["a", "b", "c"]);
+    assert.deepEqual(Object.keys(C.parse({ a: "x" }) as any), ["a", "b"]);
+    // An undeclared own symbol key is dropped by the copy like stock (the clean path keeps it by reference)
+    const sym = Symbol("s");
+    const withSym: any = { a: "x", [sym]: 1 };
+    assert.deepEqual(Object.getOwnPropertySymbols(C.parse(withSym) as any), []);
+    assert.deepEqual(Object.getOwnPropertySymbols(M.parse(withSym) as any), []);
+    const cleanSym: any = { a: "x", b: "y", [sym]: 1 };
+    assert.equal(C.parse(cleanSym), cleanSym);
+    // A getter is read once on the copy path, as stock reads each shape key once
+    let reads = 0;
+    const g: any = {
+      get a() {
+        reads++;
+        return "x";
+      },
+    };
+    const outG = C.parse(g) as any;
+    assert.notEqual(outG, g);
+    assert.equal(reads, 1);
+    assert.deepEqual(outG, { a: "x", b: "d" });
+    // The copy follows shape order, whatever the input's order
+    const reordered = { c: "z", a: "x" };
+    assert.deepEqual(Object.keys(C.parse(reordered) as any), ["a", "b", "c"]);
+    assert.deepEqual(Object.keys(M.parse(reordered) as any), ["a", "b", "c"]);
+  }
+});
+
+test("passthrough copy path: undeclared keys appended like stock's for...in (undefined value dropped, inherited enumerable key written as own, __proto__ skipped)", () => {
+  const S = z.object({ a: z.string().default("d") }).passthrough();
+  const C = compile(S);
+  const proto = { inh: 1 };
+  const input: any = Object.create(proto);
+  input.a = undefined;
+  input.x = undefined;
+  input.y = 2;
+  const out = C.parse(input) as any;
+  const stock = S.parse(input) as any;
+  assert.deepEqual(Object.keys(stock), ["a", "y", "inh"]);
+  assert.deepEqual(Object.keys(out), ["a", "y", "inh"]);
+  assert.equal(Object.hasOwn(out, "inh"), true);
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  assert.deepEqual(out, stock);
+  const json = JSON.parse('{"__proto__":{"p":1}}');
+  assert.deepEqual(Object.keys(C.parse(json) as any), ["a"]);
+  assert.equal(Object.getPrototypeOf(C.parse(json)), Object.prototype);
+  // The clean path returns the input as it is (documented: keys stay where the input holds them)
+  const clean: any = Object.create(proto);
+  clean.a = "x";
+  clean.x = undefined;
+  assert.equal(C.parse(clean), clean);
+});
+
+test("strip / strict probe: an inherited enumerable key counts as undeclared, as in stock's for...in", () => {
+  const input = Object.assign(Object.create({ inh: 1 }), { a: "x" });
+  const strict = z.object({ a: z.string() }).strict();
+  const r = compile(strict).safeParse(input);
+  assert.equal(strict.safeParse(input).success, false);
+  assert.equal(r.success, false);
+  if (!r.success) {
+    assert.equal(r.error.issues.length, 1);
+    assert.equal(r.error.issues[0]!.code, "unrecognized_keys");
+    assert.deepEqual((r.error.issues[0] as any).keys, ["inh"]);
+  }
+  const strip = z.object({ a: z.string() });
+  const out = compile(strip).parse(input) as any;
+  assert.notEqual(out, input);
+  assert.deepEqual(Object.keys(out), ["a"]);
+  assert.equal("inh" in out, false);
+  assert.deepEqual(out, strip.parse(input));
+});
+
+test("readonly .pure: a union whose branch decides the provenance at run time is not pure, and both branches behave like stock", () => {
+  const S = z.union([z.object({ a: z.string() }), z.any()]).readonly();
+  const C = compile(S);
+  assert.equal(C.pure, false);
+  // Object branch: a frozen copy, the input untouched (stock builds the copy and freezes that)
+  const obj = { a: "x" };
+  const stockObj = { a: "x" };
+  const out = C.parse(obj);
+  assert.notEqual(out, obj);
+  assert.equal(Object.isFrozen(out), true);
+  assert.equal(Object.isFrozen(obj), false);
+  assert.notEqual(S.parse(stockObj), stockObj);
+  assert.equal(Object.isFrozen(stockObj), false);
+  // `any` branch: the input itself, frozen in place, as stock does
+  const leaf = { n: 1 };
+  const stockLeaf = { n: 1 };
+  assert.equal(C.parse(leaf), leaf);
+  assert.equal(Object.isFrozen(leaf), true);
+  assert.equal(S.parse(stockLeaf), stockLeaf);
+  assert.equal(Object.isFrozen(stockLeaf), true);
+  // Static answers stay static
+  assert.equal(compile(z.union([z.any(), z.unknown()]).readonly()).pure, true);
+  assert.equal(
+    compile(z.union([z.object({ a: z.string() }), z.array(z.string())]).readonly()).pure,
+    false,
+  );
+  assert.equal(compile(z.object({ a: z.string() }).catch({ a: "d" }).readonly()).pure, false);
 });
 
 test("object / record / discriminated union reject a Date, Map, Set or promise-like input like stock (invalid_type, received date / map / set / promise)", () => {
@@ -869,8 +990,8 @@ test("ZcError carries issues", () => {
     assert.fail("should throw");
   } catch (e) {
     assert.ok(e instanceof ZcError);
-    assert.equal((e as ZcError).issues[0]!.code, "invalid_type");
+    assert.equal((e as ZcErrorType).issues[0]!.code, "invalid_type");
   }
 });
 
-summary("unit");
+summary(noCodegen ? "unit (closure skeletons, --no-codegen)" : "unit (generated skeletons)");

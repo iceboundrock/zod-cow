@@ -180,10 +180,27 @@ export interface ObjectSpec {
 const lit = (s: string): string => JSON.stringify(s);
 
 /**
- * One child slot: test the inline predicate when there is one, otherwise call the closure; on a
- * call, prefix the issues it left (lazy) or bracket it with push/pop (eager), then the CoW
- * bookkeeping. `access` is the expression that reads the input value, `key` the path segment
- * expression and `assign` the statement that writes a changed value into the copy.
+ * The closure call of one child slot: `outVal` receives the closure's result for `inVar`; the
+ * issues it left are prefixed lazily with the key, or the call is bracketed by push/pop (eager).
+ */
+function childCall(
+  g: Gen,
+  child: ChildSpec,
+  eager: boolean,
+  keyExpr: string,
+  inVar: string,
+): string {
+  const c = g.hoist(child.validator, "c");
+  return eager
+    ? `ctx.path.push(${keyExpr}); const outVal = ${c}(${inVar}, ctx); ctx.path.pop();`
+    : `const before = ctx.issues.length; const outVal = ${c}(${inVar}, ctx); if (ctx.issues.length !== before) prefixIssues(ctx, before, ${keyExpr});`;
+}
+
+/**
+ * One child slot of an array or tuple: test the inline predicate when there is one, otherwise call
+ * the closure, then the CoW bookkeeping. `access` is the expression that reads the input value,
+ * `key` the path segment expression and `assign` the statement that writes a changed value into
+ * the copy.
  */
 function childBlock(
   g: Gen,
@@ -193,22 +210,27 @@ function childBlock(
   keyExpr: string,
   copyExpr: string,
   assign: (outVal: string) => string,
-  guardUndefined: boolean,
 ): string {
-  const c = g.hoist(child.validator, "c");
   const pred = inlinePredicate(child.schema, g, "inVal", spec.regexOf);
-  const call = spec.eager
-    ? `ctx.path.push(${keyExpr}); const outVal = ${c}(inVal, ctx); ctx.path.pop();`
-    : `const before = ctx.issues.length; const outVal = ${c}(inVal, ctx); if (ctx.issues.length !== before) prefixIssues(ctx, before, ${keyExpr});`;
-  const body = `${call}
+  const body = `${childCall(g, child, spec.eager, keyExpr, "inVal")}
       if (outVal === FAILED) anyFailed = true;
       else if (outVal !== inVal && !anyFailed) { if (!dirty) { dirty = true; out = ${copyExpr}; } ${assign("outVal")} }`;
-  const guarded = pred === null ? body : `if (!(${pred})) { ${body} }`;
   return `{ const inVal = ${access};
-    ${guardUndefined ? `if (inVal !== undefined) { ${guarded} }` : guarded} }`;
+    ${pred === null ? body : `if (!(${pred})) { ${body} }`} }`;
 }
 
-/** Generated object skeleton (the closure `makeObject` in compile.ts, specialized per shape) */
+/**
+ * Generated object skeleton (the closure `makeObject` in compile.ts, specialized per shape).
+ *
+ * Every shape key is read once into a local (`v0`, `v1`, …) that ends up holding the output value
+ * of the slot; the clean path returns the input by reference, and the copy is stock's own output
+ * assembly from those locals: the shape keys in shape order under stock's presence rule
+ * (`value !== undefined || key in input`), never a spread of the input. So the copy holds a
+ * declared key the input defines as non-enumerable, drops undeclared own symbol keys, reads a
+ * getter once and, in passthrough mode, appends the undeclared keys the way stock's `for...in`
+ * does (inherited enumerable keys included, an `undefined` value dropped). The strip / strict
+ * probe is stock's `for...in` as well, so an inherited enumerable key counts as undeclared.
+ */
 export function genObject(spec: ObjectSpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
@@ -220,53 +242,63 @@ export function genObject(spec: ObjectSpec): Validator {
   // path; strip and strict mode drop an undeclared one through their key probe, passthrough mode
   // and a declared one need the explicit copy below.
   const protoIdx = spec.keys.indexOf("__proto__");
-  const outKeys = spec.keys.filter((k) => k !== "__proto__");
-  const slots = spec.keys.map((k, i) =>
-    childBlock(
-      g,
-      spec.children[i]!,
-      spec,
-      `data[${lit(k)}]`,
-      lit(k),
-      "{ ...data }",
-      i === protoIdx ? () => "" : (outVal) => `out[${lit(k)}] = ${outVal};`,
-      spec.undefStable[i]!,
-    ),
-  );
+  const slots = spec.keys.map((k, i) => {
+    const V = `v${i}`;
+    const pred = inlinePredicate(spec.children[i]!.schema, g, V, spec.regexOf);
+    const body = `${childCall(g, spec.children[i]!, spec.eager, lit(k), V)}
+      if (outVal === FAILED) anyFailed = true;
+      else if (outVal !== ${V}) { dirty = true; ${V} = outVal; }`;
+    const guarded = pred === null ? body : `if (!(${pred})) { ${body} }`;
+    return `${V} = data[${lit(k)}];
+    ${spec.undefStable[i] ? `if (${V} !== undefined) { ${guarded} }` : `{ ${guarded} }`}`;
+  });
   const dropOwnProto =
     protoIdx !== -1 || spec.mode === "passthrough"
-      ? `if (hop.call(data, "__proto__")) { if (!dirty) { dirty = true; out = { ...data }; } delete out["__proto__"]; }`
+      ? `if (hop.call(data, "__proto__")) dirty = true;`
       : "";
   const keysName = g.hoist(spec.keys, "keys");
-  // Undeclared-key probe: position hint, then the inline comparison chain (a Map above 16 keys)
+  // Undeclared-key test: the inline comparison chain (a Map above 16 keys)
   const knownTest =
     n <= 16
-      ? spec.keys.map((k) => `k === ${lit(k)}`).join(" || ")
+      ? spec.keys.map((k) => `k === ${lit(k)}`).join(" || ") || "false"
       : `${g.hoist(new Map(spec.keys.map((k, i) => [k, i])), "idx")}.has(k)`;
+  // Strip / strict probe with a position hint: each enumerated key is first compared against the
+  // shape key expected at that position, the test above runs only on a mismatch
   const probe =
     spec.mode === "passthrough"
       ? ""
       : `let extras = null; let hint = 0;
     for (const k in data) {
       if (k === ${keysName}[hint]) { hint++; continue; }
-      if (${knownTest || "false"}) continue;
-      if (!hop.call(data, k)) continue;
+      if (${knownTest}) continue;
       ${spec.mode === "strict" ? "(extras ??= []).push(k);" : "extras = [k]; break;"}
     }
     if (extras !== null) {
       ${spec.mode === "strict" ? `pushIssue(ctx, data, ${em}, { code: "unrecognized_keys", keys: extras }); if (anyFailed) return FAILED;` : ""}
-      const src = out; out = {};
-      ${outKeys.map((k) => `if (src[${lit(k)}] !== undefined || hop.call(data, ${lit(k)})) out[${lit(k)}] = src[${lit(k)}];`).join("\n      ")}
       dirty = true;
     }`;
+  const assembly = spec.keys
+    .map((k, i) =>
+      i === protoIdx ? "" : `if (v${i} !== undefined || ${lit(k)} in data) out[${lit(k)}] = v${i};`,
+    )
+    .filter((s) => s !== "");
+  const extrasAppend =
+    spec.mode === "passthrough"
+      ? `for (const k in data) { if (${knownTest} || k === "__proto__") continue; const v = data[k]; if (v !== undefined) out[k] = v; }`
+      : "";
   const src = `return function generatedObject(data, ctx) {
     if (!isObjectType(data)) { pushInvalidType(ctx, data, ${em}, "object"); return FAILED; }
-    let out = data, dirty = false, anyFailed = false;
+    let dirty = false, anyFailed = false;
+    ${n === 0 ? "" : `let ${spec.keys.map((_, i) => `v${i}`).join(", ")};`}
     ${slots.join("\n    ")}
     ${spec.mode === "strict" ? "" : "if (anyFailed) return FAILED;"}
     ${dropOwnProto}
     ${probe}
     ${spec.mode === "strict" ? "if (anyFailed) return FAILED;" : ""}
+    if (!dirty) return data;
+    const out = {};
+    ${assembly.join("\n    ")}
+    ${extrasAppend}
     return out;
   };`;
   return build(g, spec.prefixIssues, src);
@@ -315,7 +347,6 @@ export function genArray(spec: ArraySpec): Validator {
     "i",
     "data.slice()",
     (outVal) => `out[i] = ${outVal};`,
-    false,
   );
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
@@ -350,7 +381,6 @@ export function genTuple(spec: TupleSpec): Validator {
       String(i),
       "data.slice()",
       (outVal) => `out[${i}] = ${outVal};`,
-      false,
     ),
   );
   const src = `return function generatedTuple(data, ctx) {

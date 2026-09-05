@@ -9,6 +9,18 @@ import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ── object skeleton: reference comparison + conditional {...input} copy ── */
 
+/**
+ * Shapes with at most this many string keys probe unknown keys with a generated
+ * `k !== "a" && k !== "b" …` chain; larger shapes fall back to `Set.has(k)`.
+ * `for...in` hands V8 internalized strings, so each comparison is a pointer
+ * compare, while `Set.has` hashes and probes per key. Measured on Node 24 the
+ * chain is still 4 to 5x faster than the Set at 16 to 32 keys and only reaches
+ * parity around 128 keys, so this cap is conservative; it bounds the generated
+ * code size rather than marking the break-even point. Raising it is a
+ * benchmark-backed decision, not a correctness one (#34).
+ */
+const MAX_INLINE_KEY_COMPARISONS = 16;
+
 export function emitCoWObject(
   ctx: CodeCtx,
   schema: Node,
@@ -123,28 +135,47 @@ export function emitCoWObject(
     writeback.push({ keyExpr, outVar, inVar });
   }
 
-  // Extra-key detection (official for...in template: inherited keys participate, matching the runtime)
-  if (mode !== "loose" && (mode === "strict" || stringKeys.length > 0 || allKeys.length === 0)) {
-    const known = ctx.addConst(new Set(allKeys));
+  // Extra-key detection (official for...in template: inherited keys participate, matching the runtime).
+  // `for...in` yields string keys only, so the string probe never sees a symbol; own symbols get a probe of their own.
+  // Everything below is hoisted lazily: a small shape without declared symbols never references the Set.
+  let known: string | null = null;
+  const knownSet = () => (known ??= ctx.addConst(new Set(allKeys)));
+  let unknownStringKeyExpr: string | null = null;
+  const unknownStringKey = () =>
+    (unknownStringKeyExpr ??=
+      stringKeys.length <= MAX_INLINE_KEY_COMPARISONS
+        ? stringKeys.map((key) => `k !== ${escKey(key)}`).join(" && ") || "true"
+        : `!${knownSet()}.has(k)`);
+  const probesUnknownKeys =
+    mode !== "loose" && (mode === "strict" || stringKeys.length > 0 || allKeys.length === 0);
+  /** strip only: the own-symbol array read by the probe, reused by the deletion path */
+  let syms: string | null = null;
+  if (probesUnknownKeys) {
     if (mode === "strict") {
       ctx.write(`for (const k in ${accessor}) {`);
       ctx.indented(() => {
-        ctx.write(`if (!${known}.has(k)) return INVALID;`);
+        ctx.write(`if (${unknownStringKey()}) return INVALID;`);
       });
       ctx.write(`}`);
     } else {
-      // strip: zero-allocation early-exit probe
+      // strip: early-exit probe; the own-symbol array below is the clean path's only allocation
       ctx.write(`for (const k in ${accessor}) {`);
       ctx.indented(() => {
-        ctx.write(`if (!${known}.has(k)) { ${extra} = true; break; }`);
+        ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
       });
       ctx.write(`}`);
       // Official strip discards extra enumerable own symbol keys while {...input} keeps them → probe for them
-      ctx.write(`for (const s of Object.getOwnPropertySymbols(${accessor})) {`);
-      ctx.indented(() => {
-        ctx.write(`if (!${known}.has(s)) { ${extra} = true; break; }`);
-      });
-      ctx.write(`}`);
+      syms = ctx.var();
+      ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
+      if (symbolKeys.length === 0) {
+        ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
+      } else {
+        ctx.write(`for (const s of ${syms}) {`);
+        ctx.indented(() => {
+          ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
+        });
+        ctx.write(`}`);
+      }
     }
   }
 
@@ -173,14 +204,17 @@ export function emitCoWObject(
     ctx.write(`}`);
   }
 
-  if (mode === "strip") {
+  // strip deletion: the same probes as above decide what to drop, on the copy, from the symbol array already read.
+  // (without a probe `extra` stays false and the block would be dead code)
+  if (syms !== null) {
     ctx.write(`if (${extra}) {`);
     ctx.indented(() => {
-      const known2 = ctx.addConst(new Set(allKeys));
-      ctx.write(`for (const k in ${accessor}) if (!${known2}.has(k)) delete out[k];`);
-      ctx.write(
-        `for (const s of Object.getOwnPropertySymbols(${accessor})) if (!${known2}.has(s)) delete out[s];`,
-      );
+      ctx.write(`for (const k in ${accessor}) if (${unknownStringKey()}) delete out[k];`);
+      if (symbolKeys.length === 0) {
+        ctx.write(`for (const s of ${syms}) delete out[s];`);
+      } else {
+        ctx.write(`for (const s of ${syms}) if (!${knownSet()}.has(s)) delete out[s];`);
+      }
     });
     ctx.write(`}`);
   }

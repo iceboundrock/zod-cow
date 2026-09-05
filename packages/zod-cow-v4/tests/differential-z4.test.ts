@@ -64,6 +64,25 @@ const DATES = [
   null,
 ] as const;
 
+/**
+ * Deep copy of a generated input for the mutation check. `structuredClone` drops symbol-keyed
+ * properties, which the object generator emits (declared and extra symbol keys) and the harness
+ * comparator does see. The generators only produce plain data: primitives, Date, Array, Map, Set and
+ * plain objects with own enumerable keys.
+ */
+function snapshotInput(v: unknown): unknown {
+  if (typeof v !== "object" || v === null) return v;
+  if (v instanceof Date) return new Date(v.getTime());
+  if (Array.isArray(v)) return v.map(snapshotInput);
+  if (v instanceof Map)
+    return new Map([...v].map(([k, x]) => [snapshotInput(k), snapshotInput(x)]));
+  if (v instanceof Set) return new Set([...v].map(snapshotInput));
+  const out: Record<PropertyKey, unknown> = {};
+  for (const k of Reflect.ownKeys(v))
+    out[k] = snapshotInput((v as Record<PropertyKey, unknown>)[k]);
+  return out;
+}
+
 function repr(v: unknown): string {
   try {
     return (
@@ -269,14 +288,35 @@ function bWrap(rng: RNG, inner: Built): Built {
   };
 }
 
+/** Declared symbol key shared by every object schema that rolls one; the extra own symbol the strip-mode input may carry */
+const DECLARED_SYMBOL = Symbol("declared");
+const EXTRA_SYMBOL = Symbol("extra");
+
 function bObject(rng: RNG, depth: number): Built {
+  // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to 17
+  // to 20 string keys so it crosses the object skeleton's inline-comparison cap and takes the Set
+  // fallback; 1 in 10 shapes declares a symbol key so the declared-symbol probe and the symbol
+  // deletion path run. At least one string key is always present (a symbol-only strip shape is a
+  // known deviation from stock and is deliberately not generated).
   const nFields = 1 + rng.int(3);
-  const fields: { key: string; built: Built }[] = [];
+  const fields: { key: string | symbol; built: Built }[] = [];
   for (let i = 0; i < nFields; i++) {
     fields.push({ key: `f${i}`, built: bChild(rng, depth) });
   }
+  const large = rng.chance(0.05);
+  if (large) {
+    const padding = 17 - nFields + rng.int(4);
+    for (let i = 0; i < padding; i++) {
+      fields.push({
+        key: `p${i}`,
+        built: { schema: z.string(), desc: "string", gen: (r) => r.pick(["p", "q"] as const) },
+      });
+    }
+  }
+  const withSymbol = rng.chance(0.1);
+  if (withSymbol) fields.push({ key: DECLARED_SYMBOL, built: bLeaf(rng) });
   const modeRoll = rng.int(10);
-  const shape: Record<string, z.ZodType> = {};
+  const shape: Record<string | symbol, z.ZodType> = {};
   for (const f of fields) shape[f.key] = f.built.schema;
   let schema: z.ZodType = z.object(shape);
   let modeDesc = "";
@@ -287,18 +327,24 @@ function bObject(rng: RNG, depth: number): Built {
     schema = z.looseObject(shape);
     modeDesc = ".passthrough()";
   }
-  const desc = `object({${fields.map((f) => `${f.key}: ${f.built.desc}`).join(", ")}})${modeDesc}`;
+  const keyDesc = (f: { key: string | symbol; built: Built }) =>
+    `${typeof f.key === "symbol" ? "[sym]" : f.key}: ${f.built.desc}`;
+  const shown = large ? [...fields.slice(0, nFields), ...fields.slice(nFields + 1)] : fields;
+  const desc = `object({${shown.map(keyDesc).join(", ")}${large ? `, …${fields.length - shown.length} more string keys` : ""}})${modeDesc}`;
   let extraSeq = 0;
   return {
     schema,
     desc,
     gen: (r) => {
-      const out: Record<string, unknown> = {};
+      const out: Record<string | symbol, unknown> = {};
       for (const f of fields) {
         const v = f.built.gen(r);
         if (v !== ABSENT) out[f.key] = v;
       }
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
+      // Extra own symbol, strip mode only: strict does not probe own symbols and loose passes them
+      // through by reference while stock's rebuild drops them (both listed under known limitations)
+      if (modeRoll >= 2 && r.chance(0.1)) out[EXTRA_SYMBOL] = true;
       return out;
     },
   };
@@ -525,7 +571,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       );
     }
 
-    const snapshot = structuredClone(input);
+    const snapshot = snapshotInput(input);
 
     let stock: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
     let stockThrew: Error | null = null;

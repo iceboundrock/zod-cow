@@ -234,7 +234,7 @@ return out;
 `min_size/max_size/size_equals`（`.size` 直读）。其余（superRefine 改写
 `ctx.value`、overwrite、自定义 `when`）→ 该节点整体降级官方 parser 产物。
 
-## 4. 纯度分析：白名单与三大陷阱
+## 4. 纯度分析：白名单与四大陷阱
 
 定义：`isPure(schema)` = 校验通过 ⇒ 输出必然 `===` 输入引用，且无副作用。
 纯净子树走官方 validator（值=输入），拿不准的一律非纯（parser 产物 + 引用比较）。
@@ -245,7 +245,7 @@ return out;
 | optional/nullable | 递归 inner | 值透传 |
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
-| union | 全分支纯 | 分支透传 |
+| union | 全分支纯，且没有分支是容器或经 optional / nullable 剥壳后是容器 | 分支透传；容器分支需要 union 位置给不出的骨架，见陷阱四（#47） |
 | readonly | false | `Object.freeze` 副作用（冻输入的风险） |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | 值产生器/黑盒/新容器 |
 
@@ -273,8 +273,22 @@ size_equals/max_length/min_length/length_equals）。zc-z4 最初把任何 truth
 `cowSafeContainerForChild` 沿 optional/nullable 链剥壳，`emitBoxedContainer`
 发射壳检查（null→null、undefined→undefined），到容器后走 CoW 骨架。
 
-> 方法论：这四个 bug 没有一个是靠读代码发现的，全部由随机 schema 差分测试
-> 抓出（`REPRO=seed:case` 一键复现）。纯度分析的完备性只能靠 fuzz 验证：
+### 陷阱四：union 分支不是骨架位置（#44 评审中发现，生成器加入 union 后由差分复现，#47）
+
+白名单判容器为纯的前提是"本层骨架接管"，这在顶层和键 / 元素 / 值位置成立
+（`cowSafeContainerForChild` / `containerChildFn` 把容器路由进子骨架）。而 union 整体是一个官方产物，
+其分支拿不到骨架：`z.union([z.object({ a: z.string() }), z.number()])` 被判纯（各分支皆纯），
+`childProduct` 为整个 union 发射 `assertOnly` validator，输入 `{ a: "x", extra: 1 }` 按原引用返回并保留
+`extra`，而 stock 会重建对象并丢掉它（顶层与嵌套皆然；strict 分支会保留未声明的自有 symbol 键，
+`array(object)`、`optional(object)` 分支与 discriminatedUnion 表现相同）。修复：只要有一个分支是容器
+（object / array / tuple / record / map / set）或经 optional / nullable 剥壳后是容器，`isPure(union)` 即为
+`false`；该 union 走官方 parser + 引用比较，按 stock 的方式重建命中的容器。代价是带容器分支的 union
+失去 CoW 路径（现在总会拷贝）；按顺序尝试各分支 CoW 产物的 union 骨架是长期修复。差分生成器自此修复起
+生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion）；下文引用的早期运行
+虽然列表里写着 "union"，实际一个也没生成。
+
+> 方法论：前三个陷阱没有一个是靠读代码发现的，全部由随机 schema 差分测试
+> 抓出（`REPRO=seed:case` 一键复现；第四个在评审中发现，之所以逃过 fuzz 只是因为生成器不生成 union，于是生成器补上了它）。纯度分析的完备性只能靠 fuzz 验证：
 > 白名单"宁可误判非纯"的保守性 + 5 万 case 差分，是这条路线的安全性边界。
 
 ## 5. record/map/set 骨架（v0.4 新增，激进全覆盖）
@@ -486,7 +500,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（11 组行为断言）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（14 组行为断言，第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套
@@ -496,6 +510,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   - 输出 `deepStrictEqual` 一致（Map/Set 按条目集合比较）
   - 输入零失真（structuredClone 快照比对）
   - 顶层引用共享率 89.1%（成功 case），stock 降级 0 次
+- 自 #47 起生成器生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion），上面的列表此前虚有其名；在未修复的引擎上新生成器在默认 pass 失败 15 / 20 000 case、`"ignore"` pass 失败 11 个，全部是陷阱四形态的输出不一致，修复后为 0。默认规模下成功 case 的顶层引用共享率为 85.6%（默认）与 86.2%（`"ignore"`），同一生成器在未修复引擎上为 85.9% 与 86.6%（该规则放弃的容器分支 union 的 CoW 路径），旧生成器下为 88.8% / 89.4%。
 - 已知不对齐项（刻意保留）：async rest 槽 + nullable null 输入时 stock runtime 产生
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）；

@@ -258,7 +258,7 @@ Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
 `min_size/max_size/size_equals` (`.size` read directly). Everything else (superRefine rewriting
 `ctx.value`, overwrite, a custom `when`) → the whole node degrades to the official parser product.
 
-## 4. Purity analysis: the whitelist and the three traps
+## 4. Purity analysis: the whitelist and the four traps
 
 Definition: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.
 A pure subtree goes through the official validator (value = input); anything uncertain is treated as impure (parser product + reference comparison).
@@ -269,7 +269,7 @@ A pure subtree goes through the official validator (value = input); anything unc
 | optional/nullable | recurse into the inner | the value passes through |
 | object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
 | record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
-| union | all branches pure | branches pass through |
+| union | all options pure and no option is, or unwraps through optional / nullable to, a container | the options pass through; a container option would need a skeleton that the union position cannot provide, see trap four (#47) |
 | readonly | false | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | value producer / black box / new container |
 
@@ -298,8 +298,23 @@ divergence from stock. Fix:
 `cowSafeContainerForChild` unwraps along the optional/nullable chain, `emitBoxedContainer`
 emits the wrapper checks (null→null, undefined→undefined), and once at the container the CoW skeleton takes over.
 
-> Methodology: not one of these three traps was found by reading code; all of them were caught by differential testing
-> with random schemas (`REPRO=seed:case` reproduces one in a single command). The completeness of purity analysis can only be
+### Trap four: a union option is not a skeleton position (found in the review of #44, reproduced by the fuzzer once it generated unions, #47)
+
+The whitelist judges a container pure on the premise that "this layer's skeleton takes over", which holds at the top
+level and at the key / element / value positions (`cowSafeContainerForChild` / `containerChildFn` route a container into a
+sub-skeleton). A union is one official product as a whole, so its options get no skeleton: `z.union([z.object({ a: z.string() }), z.number()])`
+was judged pure (every option pure), `childProduct` emitted the `assertOnly` validator for the whole union, and an input
+`{ a: "x", extra: 1 }` came back by reference with `extra` kept where stock rebuilds the object and drops it (top level and
+nested alike; a strict option kept an undeclared own symbol key, `array(object)` and `optional(object)` options and
+discriminated unions behaved the same). Fix: `isPure(union)` is `false` as soon as one option is, or unwraps through
+optional / nullable to, a container (object / array / tuple / record / map / set); the union then takes the official parser
+plus the reference comparison, which rebuilds the matching container the way stock does. The price is the CoW path of a
+union with a container option (it always copies now); a union skeleton that tries each option's CoW product in order is the
+long-term fix. The differential generator emits unions since this fix (2 to 3 random options, one in four a discriminated
+union of two object branches); the earlier runs quoted below generated none, although the list said "union".
+
+> Methodology: not one of the first three traps was found by reading code; all of them were caught by differential testing
+> with random schemas (the fourth was found in a review and had escaped the fuzzer only because it generated no unions, so the generator gained them) (`REPRO=seed:case` reproduces one in a single command). The completeness of purity analysis can only be
 > verified by fuzzing: the whitelist's conservatism of "rather misjudge as impure" plus 50 000 differential cases is the
 > safety boundary of this route.
 
@@ -532,7 +547,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
 
 ## 8. Correctness evidence
 
-- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (13 groups of behavioral assertions, the last two the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons under every container (object, array, tuple, record, map, set), treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value, an explicit `null` or a non-plain options object with `TypeError` (also when the rejected object carries a throwing `constructor` / `name` accessor or a throwing Proxy `getPrototypeOf` trap, when the rejected value carries a throwing `toJSON` or Proxy `get` trap, is a bigint, a symbol, a function or a cycle, and when the options object is a Proxy whose `getOwnPropertyDescriptor` / `get` trap throws, then with the trap's error as `cause`), treats an explicit `undefined` as the default, ignores an `ownSymbolKeys` inherited from `Object.prototype`; then the same probe in strict and loose mode, #42: default copies on an undeclared symbol, enumerable or not, and shares the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, strict still rejects an undeclared string key, loose keeps one in the copy while dropping the symbol, declared symbol keys count as known, a nested loose object is reached) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (14 groups of behavioral assertions; the twelfth and thirteenth the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons under every container (object, array, tuple, record, map, set), treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value, an explicit `null` or a non-plain options object with `TypeError` (also when the rejected object carries a throwing `constructor` / `name` accessor or a throwing Proxy `getPrototypeOf` trap, when the rejected value carries a throwing `toJSON` or Proxy `get` trap, is a bigint, a symbol, a function or a cycle, and when the options object is a Proxy whose `getOwnPropertyDescriptor` / `get` trap throws, then with the trap's error as `cause`), treats an explicit `undefined` as the default, ignores an `ownSymbolKeys` inherited from `Object.prototype`; then the same probe in strict and loose mode, #42: default copies on an undeclared symbol, enumerable or not, and shares the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, strict still rejects an undeclared string key, loose keeps one in the copy while dropping the symbol, declared symbol keys count as known, a nested loose object is reached; the fourteenth #47: a union with a strip-object option drops an undeclared key like stock at the top level and nested with the sibling still shared, a strict option drops an undeclared own symbol, `optional(object)`, `array(object)` and discriminated-union options strip like stock, and a leaf-only union keeps the validator so its parent shares) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
@@ -543,6 +558,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
   - zero input distortion (compared against a structuredClone snapshot)
   - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
   - since #43 the suite runs every case a second time compiled with `ownSymbolKeys: "ignore"` against the same RNG stream minus the extra own symbol (the one input the option treats differently from stock; since #42 the generator emits it in every object mode, so the default pass compares strict and loose objects carrying an undeclared symbol against stock, which the previous generator excluded), with the same three checks plus: no generated top-level skeleton carries `getOwnPropertySymbols`, and the pass shares at least as many top-level references as the default pass (at the 20 000-case default after #42: 88.8% default, 89.4% with the option among successful cases, 0 degradations in both)
+- since #47 the generator emits unions (2 to 3 random options, one in four a discriminated union of two object branches), which the list above had claimed while no union was generated; on the unfixed engine the new generator failed 15 of 20 000 cases in the default pass and 11 in the `"ignore"` pass, all output mismatches of the trap-four shape, and the fixed engine fails none. Top-level reference sharing among successful cases at the default size is 85.6% (default) and 86.2% (`"ignore"`), from 85.9% and 86.6% on the unfixed engine with the same generator (the union-of-containers CoW path given up by the rule) and 88.8% / 89.4% with the previous generator.
 - Known misalignment (deliberately kept): with an async rest slot and a nullable null input, the stock runtime produces
   a sparse array and loses the null (deterministic repro: `z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length", slot 1 becomes a hole).

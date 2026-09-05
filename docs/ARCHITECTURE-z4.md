@@ -392,7 +392,7 @@ A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-137
    (the case where a trailing optional truncates to the input length can keep the original reference).
 
 The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
-(S6 in run 33837195401: 2.99x vs stock / 1.88x vs the official parser, the widest margin over the official parser of all scenarios).
+(S6 in run 33936127958: 4.37x vs stock / 1.75x vs the official parser; ArkType is ahead here at 0.61x, see §7).
 
 ### 5.5 async channel (added in v0.5)
 
@@ -416,7 +416,7 @@ A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncEr
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
 
 In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
-(S7 in run 33837195401: an async transform scenario over 5 000 rows, 2.67x vs stock safeParseAsync, allocation -30%).
+(S7 in run 33936127958: an async transform scenario over 5 000 rows, 1.60x vs stock safeParseAsync, allocation -27%; 2.67x in the earlier run 33837195401, both inside runner noise at that row count).
 
 ## 6. Degradation chain state machine
 
@@ -452,41 +452,50 @@ compiles as usual. The lazy subtree goes through the official parser product at 
 brings its own cache-parser black box that handles circular references correctly (smoke test #9: `stock: false` and the semantics are normal).
 What really degrades the whole tree is a top-level recursive schema (a circular reference in the def tree, which the official compileFn rejects).
 
-## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, median of 3 runs)
+## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, medians of 3 interleaved rounds)
 
-The numbers come from [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`. The earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, is kept in the CHANGELOG under v0.5; today's `bench:z4` no longer runs v1.
+The numbers come from [Benchmarks workflow run 33936127958](https://github.com/iceboundrock/zod-cow/actions/runs/33936127958) on a GitHub-hosted `ubuntu-latest` runner with `BENCH_N=50 000`, measuring the built `zod-cow-v4` package. Every candidate gets 2 warmup rounds and 3 timed rounds; the timed rounds are interleaved with a rotated candidate order and separated by `gc()`, every timed call verifies its own result, and an equivalence gate runs valid and invalid fixtures through every implementation before timing (`packages/bench-v4/harness.ts`, `gates.ts`). ArkType 2.2.3 is a column of its own: measured through its normal public API on a schema with the same constraints where one exists, `N/A` with the reason otherwise (the cross-library table is in the README). The superseded table from run 33837195401 and the earlier local 500 000-record measurement, including the `zc-v1` column for the front-end deleted in issue #4, are kept in the CHANGELOG.
 
-| Scenario | stock | official compileFn parser | zc-z4 | arktype |
+| Scenario | stock | official compileFn parser | zod-cow-v4 | ArkType |
 |---|---|---|---|---|
-| S1 pure validation | 75ms | 22ms | **20ms** | 8ms |
-| S1 allocation pressure | +63.5MB | +11.0MB | **+3.1MB** | +2.7MB |
-| S1 retained after GC | +12.4MB | +10.8MB | **0.0MB** | 0.0MB |
-| S2 dirty load (10% default) | 55ms | 21ms | **22ms** | — |
-| S3 sweep 0% / 25% / 50% / 100% dirty | 45/47/47/48ms | 20/24/27/27ms | **21/24/26/28ms** | — |
-| S3 zc-z4 retained | +12.3MB constant | — | **0.0 / 2.0 / 3.6 / 6.9MB** | — |
-| S4 validate | — | 14ms (official `assertOnly` validator) | **14ms** | 8ms |
-| S5 record/map/set | 69ms | 50ms | **28ms** | — |
-| S5 allocation pressure | +50.8MB | +61.3MB | **+29.4MB** | — |
-| S5 retained after GC | +21.7MB | +21.7MB | **0.0MB** | — |
-| S6 tuple | 18ms | 12ms | **6ms** | — |
-| S6 allocation pressure / retained | +53.4MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | — |
-| S7 async transform (5 000 rows) | 11ms (safeParseAsync) | compile rejected | **4ms (safeParseAsync)** | — |
-| S7 allocation pressure | +14.0MB | — | **+9.8MB** | — |
+| S1 pure validation parse | 51ms | 14ms | **15ms** | 15ms |
+| S1 allocation pressure / retained | +17.0MB / +12.3MB | +11.0MB / +10.8MB | **+3.1MB / 0.0MB** | +5.4MB / 0.0MB |
+| S2 10% default | 53ms | 22ms | **19ms** | 610ms |
+| S2 allocation pressure / retained | +16.0MB / +11.7MB | +18.2MB / +11.6MB | **+4.4MB / +1.0MB** | +81.3MB / +11.6MB |
+| S3 sweep 0% / 25% / 50% / 100% dirty | 52/55/55/56ms | 19/20/19/19ms | **18/22/25/32ms** | 611/613/612/602ms |
+| S3 retained | +11.6 to +12.3MB | +11.6MB constant | **0.0 / 1.8 / 3.2 / 6.1MB** | +11.6MB constant |
+| S4 validation only | N/A (no validation-only API) | 14ms (`assertOnly` validator) | **14ms** (`validate()`) | 17ms (`.allows()`) |
+| S5 record/map/set | 66ms | 42ms | **21ms** | N/A (`Map`/`Set` instanceof-only; non-equivalent reference 7ms) |
+| S5 allocation pressure / retained | +52.4MB / +21.7MB | +60.2MB / +21.7MB | **+29.4MB / 0.0MB** | N/A |
+| S6 tuple | 20ms | 8ms | **4ms** | 3ms |
+| S6 allocation pressure / retained | +54.4MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | +0.0MB / 0.0MB |
+| S7 async transform (5 000 rows) | 9ms (safeParseAsync) | N/A (compile rejected) | **6ms (safeParseAsync)** | N/A (no native async morph) |
+| S7 allocation pressure | +12.8MB | N/A | **+9.4MB** | N/A |
+
+Ratios against zod-cow-v4 (above 1 = the other implementation took longer): stock 3.40x (S1), 2.74x (S2), 2.88x / 2.43x / 2.23x / 1.78x (S3), 3.13x (S5), 4.37x (S6), 1.60x (S7); official JIT 0.95x (S1), 1.11x (S2), 1.04x / 0.88x / 0.77x / 0.61x (S3), 1.00x (S4), 2.01x (S5), 1.75x (S6); ArkType 1.00x (S1), 31.43x (S2), 33.60x / 27.29x / 24.78x / 19.12x (S3), 1.21x (S4), 0.61x (S6).
 
 How to read it:
 
-1. Against stock: 2.43x (S5) ~ 2.47x (S2) ~ 2.99x (S6) ~ 3.67x (S1, the highest of all scenarios),
-   with retained memory going from 12~22MB to zero; the async scenario (S7) is 2.67x.
-2. Against the official JIT parser: level in the object scenarios (S1 1.08x, S2 0.94x, a 1 to 2ms gap at this record count and within runner noise; the output
-   construction the skeleton saves offsets the call overhead of the sub-skeleton functions); ahead in the container scenarios (S5 1.76x, S6 1.88x),
+1. Against stock: 2.7x to 4.4x on the sync scenarios (S1 3.40x, S2 2.74x, S5 3.13x, S6 4.37x),
+   with retained memory going from 12~22MB to zero on clean input; the async scenario (S7) is 1.60x at 5 000 rows, where runner noise weighs heavily.
+2. Against the official JIT parser: level on clean object input (S1 0.95x, S3 0% 1.04x, within runner noise; the output
+   construction the skeleton saves offsets the call overhead of the sub-skeleton functions), ahead when the default fires on a minority of rows (S2 1.11x),
+   behind as the dirty share grows (S3 100% 0.61x: every row is copied and the reference comparisons are still paid), and ahead in the container scenarios (S5 2.01x, S6 1.75x),
    because the whole-tree rebuild of the official stock semantics is a fixed cost, while CoW only pays for the paths
-   that actually got dirty. The 1.88x in S6 shows that tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
+   that actually got dirty. Tuple is the container with the highest share of rebuilding (every parse does a new Array plus a per-slot write,
    while the slots barely change), so CoW decoration gains the most there.
-3. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
-   skeleton; an all-dirty async transform scenario is still 2.67x, with allocation -30% (14.0→9.8MB).
-4. validate fast path: `validate()` is the official assertOnly whole-tree product of the same array schema, so S4 reads level
-   with that baseline by construction (14ms against 14ms, 0.99x). Its value is the validation-only cost: 14ms / 50 000 = 280ns per account,
-   1.42x below the S1 parse of the same data, with nothing retained after GC (the +2.0MB is the `tags` arrays the official array product materializes even in assertOnly mode once a size check such as `.max(8)` is present).
+3. Against ArkType: level on the pure parse (S1 1.00x), ahead on validation-only (S4 1.21x), behind on tuples (S6 0.61x: ArkType's precompiled
+   check returns the input and allocates nothing, while the skeleton pays the strip probe and one sub-skeleton call per row). The S2/S3 gap is architectural:
+   a type with any morph (a key default is one) loses ArkType's `allows` root-apply strategy and runs the contextual one, an interpreted `traverseApply`
+   over a `Traversal` context whose `finalize` deep-clones the whole input before applying the queued morphs (`@ark/schema` `node.js` / `traversal.js`),
+   so every row is rebuilt at every ratio (+80MB allocated, 610ms at 50 000 rows, independent of the dirty share). zod-cow compiles the default as an
+   ordinary official leaf and copies only the rows that were missing the key. The earlier reference line (8ms in run 33837195401) used a weaker ArkType
+   schema (no integer bound on `id`, `createdAt` as a plain string, no bound on `tags`); with equivalent constraints ArkType's S1 cost is 15ms.
+4. async channel (S7): a local await in the skeleton, so async subtree positions pay the microtask cost and the rest keeps the reference-comparison
+   skeleton; an all-dirty async transform scenario is 1.60x here (2.67x in run 33837195401; at 5 000 rows both numbers sit inside runner noise), with allocation -27% (12.8→9.4MB).
+5. validate fast path: `validate()` is the official assertOnly whole-tree product of the same array schema, so S4 reads level
+   with that baseline by construction (14ms against 14ms, 1.00x). Its value is the validation-only cost: 14ms / 50 000 = 280ns per account,
+   with nothing retained after GC (the +2.0MB is the `tags` arrays the official array product materializes even in assertOnly mode once a size check such as `.max(8)` is present).
    The S4 baseline is the validator, not the parser product named in the column header: the parser has no validation-only mode.
 
 S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exactly one empty array (32 bytes) per object, 100 000 objects at 50 000 accounts with a nested address, read to prove that the object can be returned by reference. The official leaf products allocate nothing measurable (the datetime/email format checks included; measured per leaf with the sampling heap profiler and `heapUsed` deltas on Node 24),
@@ -541,7 +550,7 @@ which would remove the largest single internal dependency.
 - zc-z4 (official codegen + CoW decoration) is the right answer for the zod4 era: semantic correctness is outsourced to the official
   compiler and runtime, the self-written surface shrinks to "purity analysis + 6 container skeletons + async channel", and upstream
   optimizations benefit it automatically; speed is level with the official JIT on objects and ahead on containers (record/map/set 1.76x, tuple 1.88x), async 2.67x vs stock
-  (2.4~3.7x against stock overall; run 33837195401, see §7), with GC-retained memory down to zero.
+  (2.7~4.4x against stock overall; run 33936127958, see §7), with GC-retained memory down to zero.
 - Both routes share the same CoW mental model: reference comparison is the dirty signal, path-copying is the copy strategy.
   The only difference is who implements the validation and transformation layer.
 

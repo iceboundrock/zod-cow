@@ -15,7 +15,7 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - The zod4 engine was split from one file into cohesive modules under `src/cow4/` (product contract, code context, copied predicates, purity analysis, official-product wrappers, codegen core, one skeleton module per container). Section 11 of `docs/ARCHITECTURE-z4.md` maps modules to document sections (#5, #20).
 - Package management moved to pnpm 11 with a Node.js >= 22.13.0 floor (#11).
 - All code comments and test/bench output strings were translated to English (#6, #21, #22, #23, #24). The README, the architecture document and this changelog followed in #7; the Chinese README is `README.zh-CN.md` and the Chinese architecture text is kept as a frozen snapshot in `docs/ARCHITECTURE-z4.zh-CN.md`.
-- The benchmark tables in both READMEs, `docs/ARCHITECTURE-z4.md` §7 and the upstream issue draft now quote [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, median of 3 runs) instead of a local 500 000-record run. The superseded v0.5 table is kept below under 0.5.0.
+- The benchmark tables in both READMEs and `docs/ARCHITECTURE-z4.md` §7 quote [Benchmarks workflow run 33936127958](https://github.com/iceboundrock/zod-cow/actions/runs/33936127958) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, the built package, medians of 3 interleaved rounds), with an ArkType column in every scenario. They previously quoted [run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (same runner and record count, measured from source before the package split, one ArkType reference line on a weaker schema); that table is kept at the end of this section. The superseded v0.5 local table is kept below under 0.5.0.
 - The zod4 object skeleton specializes unknown-string-key probes at compile time: shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) string keys emit direct comparisons instead of a `Set.has()` call per enumerated property, while larger shapes retain the constant-time `Set` path. The known-key `Set` is hoisted only when a large shape or a declared symbol key references it, the strip probe reads the own-symbol array once and the dirty deletion path reuses that array and the same comparisons. The differential fuzzer now also generates 17- to 20-key shapes, declared symbol keys and extra own symbols, and snapshots inputs with a symbol-preserving copy for its mutation check. The allocation notes in both READMEs and the architecture document attribute S1's short-lived allocation to the probe's one empty symbol array per object, not to the leaf products (#33).
 
 ### Added
@@ -32,6 +32,26 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 ### Fixed
 
 - `bench/bench-z4.ts` S4: the zc-z4 side was compiled from the array schema but called once per account, so `validate()` rejected every input at the type check and the reported time was the cost of the rejections, not of validation (this also affects the S4 rows of the v0.3 and v0.5 tables below, marked there). Both validators now take the whole S1 array, the run asserts that both accept it, and every timed call throws on a rejection. S4 now reads level with the official `assertOnly` validator, which `validate()` wraps (#25).
+
+### Superseded table (run 33837195401)
+
+zod4 line, [Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401): 50 000 accounts, node v24, `--expose-gc`, median of 3 rounds per variant, measured from the TypeScript source before the package split, candidates timed one after another. The arktype column was a single reference line at the end of the script on a weaker schema (no integer bound on `id`, `createdAt` as a plain string, no bound on `tags`), which is why it reads 8 ms where the equivalent schema reads 15 ms in run 33936127958.
+
+| Scenario | stock zod4 | official parser | **zc-z4 (CoW)** | arktype |
+|---|---|---|---|---|
+| S1 pure validation | 75 ms | 22 ms | **20 ms** | 8 ms |
+| S1 allocation pressure | +63.5 MB | +11.0 MB | **+3.1 MB** | +2.7 MB |
+| S1 retained after GC | +12.4 MB | +10.8 MB | **0.0 MB** | 0.0 MB |
+| S2 dirty load (10% default injection) | 55 ms | 21 ms | **22 ms** | — |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 45 / 47 / 47 / 48 ms | 20 / 24 / 27 / 27 ms | **21 / 24 / 26 / 28 ms** | — |
+| S3 retained after GC | +12.3 MB constant | — | **0.0 / 2.0 / 3.6 / 6.9 MB** | — |
+| S4 validate | — | 14 ms (official `assertOnly` validator) | **14 ms** | 8 ms |
+| S5 record / map / set | 69 ms | 50 ms | **28 ms** | — |
+| S5 allocation pressure / retained | +50.8 MB / +21.7 MB | +61.3 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | — |
+| S6 tuple | 18 ms | 12 ms | **6 ms** | — |
+| S6 allocation pressure / retained | +53.4 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | — |
+| S7 async transform (5 000 rows) | 11 ms (safeParseAsync) | compile refused | **4 ms (safeParseAsync)** | — |
+| S7 allocation pressure | +14.0 MB | — | **+9.8 MB** | — |
 
 ## [0.5.0]
 

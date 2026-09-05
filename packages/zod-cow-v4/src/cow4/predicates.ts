@@ -69,9 +69,8 @@ export function requiresPresence(schema: Node): boolean {
 }
 
 // Official mayOutputUndefined: whether this key may produce undefined when the output is assembled
-// (decides the copy branch's write rule for absent/present-undefined keys)
-// biome-ignore lint/correctness/noUnusedVariables: reference copy of zod's predicate, kept for version anchoring (see AGENTS.md)
-function mayOutputUndefined(schema: Node): boolean {
+// (decides the copy path's write rule for absent/present-undefined keys)
+export function mayOutputUndefined(schema: Node): boolean {
   const def = schema._zod.def;
   switch (def.type) {
     case "string":

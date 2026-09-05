@@ -123,6 +123,14 @@ export function emitCoWTuple(
     ctx.indented(() => {
       const e = ctx.var();
       ctx.write(`const ${e} = ${accessor}[${i}];`);
+      if (i < optinStart) {
+        // The length guard already proved input.length >= optinStart: the slot is present, so the
+        // runtime present/absent split below is skipped for it (this `return` leaves the indented
+        // callback for this slot only, not the loop over the slots)
+        if (p.kind === "validator") emitValidatorSlot(p, e, String(i), true);
+        else emitValueSlot(p, e, String(i), e);
+        return;
+      }
       // Absence is not knowable at compile time (input.length is a runtime value) → the present branch is guarded at runtime
       ctx.write(`if (${i} < ${accessor}.length) {`);
       ctx.indented(() => {
@@ -148,7 +156,9 @@ export function emitCoWTuple(
     const drop = dropsWhenAbsent(items[i]!); // known at compile time → emit only the branch that applies
     ctx.write(`{`);
     ctx.indented(() => {
-      ctx.write(`if (${fillLen} === ${i}) {`);
+      // The first tail slot always sees fillLen === optoutStart (set just above): no gate to emit
+      const gated = i > optoutStart;
+      ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
       ctx.indented(() => {
         ctx.write(`if (${i} < ${accessor}.length) {`);
         ctx.indented(() => {

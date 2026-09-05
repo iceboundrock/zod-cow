@@ -294,4 +294,65 @@ import { compile } from "../src/index.js";
   );
 }
 
+/* ── copy path: stock's output assembly from the captured locals ── */
+{
+  console.log("\n── copy path ──");
+  // A getter is read exactly once, on the copy path too (#36): the copy is assembled from the
+  // locals captured while validating, never from a second read through a spread.
+  let reads = 0;
+  const G = z.object({ a: z.string(), b: z.string().default("d") });
+  const getterInput = {
+    get a() {
+      reads++;
+      return "x";
+    },
+  };
+  const gOut = compile(G).parse(getterInput);
+  assert.deepEqual(gOut, { a: "x", b: "d" });
+  assert.equal(reads, 1);
+  reads = 0;
+  G.parse(getterInput);
+  assert.equal(reads, 1);
+  console.log("  getter read once on the copy path (stock reads once too) ✓");
+
+  // The copy follows stock's key order (shape order), not the input's
+  const O = z.object({ a: z.string(), b: z.number().default(1), c: z.boolean() });
+  const oOut = compile(O).parse({ c: true, a: "x", extra: 1 });
+  assert.deepEqual(Object.keys(oOut), Object.keys(O.parse({ c: true, a: "x", extra: 1 })));
+  assert.deepEqual(Object.keys(oOut), ["a", "b", "c"]);
+  console.log("  copy path key order = shape order, same as stock ✓");
+
+  // Optional keys on the copy path: absent stays absent, present-undefined stays present (stock rules)
+  const P = z.object({
+    a: z.string().optional(),
+    b: z.string().default("d"),
+    c: z.string().optional(),
+  });
+  const pIn = { c: undefined };
+  const pOut = compile(P).parse(pIn) as Record<string, unknown>;
+  assert.deepEqual(pOut, P.parse(pIn));
+  assert.ok(!("a" in pOut) && "c" in pOut && pOut.c === undefined && pOut.b === "d");
+  console.log("  optional keys: absent not materialized, present-undefined kept ✓");
+
+  // Strip shape declaring only symbol keys still probes for undeclared string keys (#35)
+  const sym = Symbol("declared");
+  const SymOnly = compile(z.object({ [sym]: z.string() }));
+  const symClean = { [sym]: "x" };
+  assert.equal(SymOnly.parse(symClean), symClean);
+  const symExtra = { [sym]: "x", extra: 1 };
+  const symOut = SymOnly.parse(symExtra);
+  assert.notEqual(symOut, symExtra);
+  assert.deepEqual(symOut, z.object({ [sym]: z.string() }).parse(symExtra));
+  assert.ok(!("extra" in symOut));
+  console.log("  symbol-only strip shape strips undeclared string keys ✓");
+
+  // Loose copy: undeclared string keys follow the shape keys, as in stock's rebuild
+  const L = z.looseObject({ a: z.string(), b: z.number().default(1) });
+  const lIn = { extra: 1, a: "x" };
+  const lOut = compile(L).parse(lIn);
+  assert.deepEqual(lOut, L.parse(lIn));
+  assert.deepEqual(Object.keys(lOut), ["a", "b", "extra"]);
+  console.log("  loose copy keeps undeclared keys after the shape keys ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

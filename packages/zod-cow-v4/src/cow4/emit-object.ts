@@ -1,13 +1,17 @@
-/** Object skeleton: reference comparison + conditional {...input} copy. */
+/**
+ * Object skeleton: reference comparison on every key, the input reference when nothing changed,
+ * otherwise the output rebuilt in shape order from the captured locals (the official parser's
+ * own assembly rules).
+ */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, escKey } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
-import { requiresPresence } from "./predicates.js";
+import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
-/* ── object skeleton: reference comparison + conditional {...input} copy ── */
+/* ── object skeleton ── */
 
 /**
  * Shapes with at most this many string keys probe unknown keys with a generated
@@ -21,6 +25,24 @@ import { cowSafeContainerForChild, isPure } from "./purity.js";
  */
 const MAX_INLINE_KEY_COMPARISONS = 16;
 
+/**
+ * Two paths, decided at runtime per object:
+ *
+ *   clean   every key's product returned its input (or validated a pure leaf) and, in strip
+ *           mode, the input carries no undeclared string or symbol key: the container checks run
+ *           on the input and the input reference is returned;
+ *   copy    something changed (a value producer fired, a nested container was copied) or strip
+ *           found an undeclared key: the output is a fresh object assembled in shape order from
+ *           the locals captured while validating, with the official presence rules
+ *           (`dropsWhenAbsent` / `mayOutputUndefined`, copied from zod's generateObjectCheck), and
+ *           in loose mode the undeclared string keys appended by the official for...in template.
+ *
+ * The copy path never spreads the input: a spread would re-read every getter (#36), keep the
+ * undeclared keys (which then had to be deleted, turning the copy into a dictionary-mode object)
+ * and produce the input's key order instead of stock's shape order. Assembling from the locals
+ * gives stock's output exactly and lets strip mode skip both undeclared-key probes once a key is
+ * known dirty: the probes only decide whether the input can be returned by reference.
+ */
 export function emitCoWObject(
   ctx: CodeCtx,
   schema: Node,
@@ -56,11 +78,10 @@ export function emitCoWObject(
   }
 
   const dirty = ctx.var();
-  const extra = ctx.var();
-  ctx.write(`let ${dirty} = false, ${extra} = false;`);
+  ctx.write(`let ${dirty} = false;`);
 
-  /** Impure keys the copy branch has to overwrite */
-  const writeback: { keyExpr: string; outVar: string; inVar: string }[] = [];
+  /** Per key: the expression holding its output value on the copy path */
+  const outputs: { key: string | symbol; keyExpr: string; valueVar: string }[] = [];
 
   for (const key of allKeys) {
     const child: Node = shape[key];
@@ -71,13 +92,11 @@ export function emitCoWObject(
 
     // Official presence guard: the value-level fast path cannot tell an absent required key from a present-undefined one
     if (requiresPresence(child)) {
-      ctx.write(
-        `if (!(${typeof key === "symbol" ? keyExpr : keyExpr} in ${accessor})) return INVALID;`,
-      );
+      ctx.write(`if (!(${keyExpr} in ${accessor})) return INVALID;`);
     }
 
     if (isPure(child) && !cowSafeContainerForChild(child)) {
-      // Pure leaf key: the official assertOnly product. Output === input, {...input} already preserves it, no write-back.
+      // Pure leaf key: the official assertOnly product. Output === input, so the captured local is the output value.
       // (container keys do not take this branch: the strip semantics need a CoW sub-skeleton, see cowSafeContainerForChild)
       const vFn = officialFn(child, true);
       const v = ctx.addConst(vFn);
@@ -88,6 +107,7 @@ export function emitCoWObject(
       } else {
         ctx.write(`if (${v}(${inVar}) === INVALID) return INVALID;`);
       }
+      outputs.push({ key, keyExpr, valueVar: inVar });
       continue;
     }
 
@@ -100,9 +120,9 @@ export function emitCoWObject(
       const outVar = ctx.var();
       ctx.write(`const ${outVar} = ${isA ? "await " : ""}${v}(${inVar});`);
       ctx.write(`if (${outVar} === INVALID) return INVALID;`);
-      // A clean sub-skeleton returns the original reference → equal, not dirty; a dirty one returns a new reference → mark dirty + write back
+      // A clean sub-skeleton returns the original reference → equal, not dirty; a dirty one returns a new reference → mark dirty
       ctx.write(`if (${outVar} !== ${inVar}) ${dirty} = true;`);
-      writeback.push({ keyExpr, outVar, inVar });
+      outputs.push({ key, keyExpr, valueVar: outVar });
       continue;
     }
 
@@ -132,12 +152,12 @@ export function emitCoWObject(
     ctx.write(
       `if (${outVar} !== ${inVar} && !(${outVar} === undefined && !(${keyExpr} in ${accessor}))) ${dirty} = true;`,
     );
-    writeback.push({ keyExpr, outVar, inVar });
+    outputs.push({ key, keyExpr, valueVar: outVar });
   }
 
-  // Extra-key detection (official for...in template: inherited keys participate, matching the runtime).
+  // Undeclared-key predicate (official for...in template: inherited keys participate, matching the runtime).
   // `for...in` yields string keys only, so the string probe never sees a symbol; own symbols get a probe of their own.
-  // Everything below is hoisted lazily: a small shape without declared symbols never references the Set.
+  // The known-key Set is hoisted lazily: a small shape without declared symbols never references it.
   let known: string | null = null;
   const knownSet = () => (known ??= ctx.addConst(new Set(allKeys)));
   let unknownStringKeyExpr: string | null = null;
@@ -146,37 +166,14 @@ export function emitCoWObject(
       stringKeys.length <= MAX_INLINE_KEY_COMPARISONS
         ? stringKeys.map((key) => `k !== ${escKey(key)}`).join(" && ") || "true"
         : `!${knownSet()}.has(k)`);
-  const probesUnknownKeys =
-    mode !== "loose" && (mode === "strict" || stringKeys.length > 0 || allKeys.length === 0);
-  /** strip only: the own-symbol array read by the probe, reused by the deletion path */
-  let syms: string | null = null;
-  if (probesUnknownKeys) {
-    if (mode === "strict") {
-      ctx.write(`for (const k in ${accessor}) {`);
-      ctx.indented(() => {
-        ctx.write(`if (${unknownStringKey()}) return INVALID;`);
-      });
-      ctx.write(`}`);
-    } else {
-      // strip: early-exit probe; the own-symbol array below is the clean path's only allocation
-      ctx.write(`for (const k in ${accessor}) {`);
-      ctx.indented(() => {
-        ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
-      });
-      ctx.write(`}`);
-      // Official strip discards extra enumerable own symbol keys while {...input} keeps them → probe for them
-      syms = ctx.var();
-      ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
-      if (symbolKeys.length === 0) {
-        ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
-      } else {
-        ctx.write(`for (const s of ${syms}) {`);
-        ctx.indented(() => {
-          ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
-        });
-        ctx.write(`}`);
-      }
-    }
+
+  if (mode === "strict") {
+    // Validation, not output shaping: runs on every path (the official template)
+    ctx.write(`for (const k in ${accessor}) {`);
+    ctx.indented(() => {
+      ctx.write(`if (${unknownStringKey()}) return INVALID;`);
+    });
+    ctx.write(`}`);
   }
 
   // The container's own checks (.refine/.min and friends): a standalone validation subroutine,
@@ -185,36 +182,83 @@ export function emitCoWObject(
   const cName = checksFn ? ctx.addConst(checksFn) : null;
 
   // ═══ CoW core: the branch the official template does not have ═══
-  ctx.write(`if (!${dirty} && !${extra}) {`);
+  ctx.write(`if (!${dirty}) {`);
   ctx.indented(() => {
-    if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
-    ctx.write(`return ${accessor};`);
+    if (mode === "strip") {
+      // Strip probes, only here: a copy assembled from the declared keys drops undeclared keys by
+      // construction, so the probes exist solely to prove that the input can be returned as is.
+      // Shapes without a string key (symbol-only or empty) treat every string key as undeclared (#35).
+      const extra = ctx.var();
+      ctx.write(`let ${extra} = false;`);
+      ctx.write(`for (const k in ${accessor}) {`);
+      ctx.indented(() => {
+        ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
+      });
+      ctx.write(`}`);
+      ctx.write(`if (!${extra}) {`);
+      ctx.indented(() => {
+        // Official strip discards extra enumerable own symbol keys, which a pass-through would keep → probe for them
+        const syms = ctx.var();
+        ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
+        if (symbolKeys.length === 0) {
+          ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
+        } else {
+          ctx.write(`for (const s of ${syms}) {`);
+          ctx.indented(() => {
+            ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
+          });
+          ctx.write(`}`);
+        }
+      });
+      ctx.write(`}`);
+      ctx.write(`if (!${extra}) {`);
+      ctx.indented(() => {
+        if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
+        ctx.write(`return ${accessor};`);
+      });
+      ctx.write(`}`);
+    } else {
+      if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
+      ctx.write(`return ${accessor};`);
+    }
   });
   ctx.write(`}`);
-  ctx.write(`const out = { ...${accessor} };`);
 
-  for (const { keyExpr, outVar, inVar } of writeback) {
-    // Aligned with the official mayOutputUndefined assembly rule:
-    //   value changed → write; output undefined and key absent → do not materialize; output undefined and key present → write undefined
-    ctx.write(`if (${outVar} !== ${inVar}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${outVar} !== undefined) out[${keyExpr}] = ${outVar};`);
-      ctx.write(`else if (${keyExpr} in ${accessor}) out[${keyExpr}] = undefined;`);
-    });
-    ctx.write(`}`);
-  }
-
-  // strip deletion: the same probes as above decide what to drop, on the copy, from the symbol array already read.
-  // (without a probe `extra` stays false and the block would be dead code)
-  if (syms !== null) {
-    ctx.write(`if (${extra}) {`);
-    ctx.indented(() => {
-      ctx.write(`for (const k in ${accessor}) if (${unknownStringKey()}) delete out[k];`);
-      if (symbolKeys.length === 0) {
-        ctx.write(`for (const s of ${syms}) delete out[s];`);
+  // ═══ Copy path: the official output assembly, from the captured locals ═══
+  // Shape keys in declared order (a literal when no key is conditional, else `{}` plus guarded
+  // writes), then in loose mode the undeclared keys in for...in order. Same rules as the official
+  // generateObjectCheck, so the copy is stock's output: key order, key presence and no second
+  // getter read.
+  const hasConditionalKeys = allKeys.some(
+    (k) => mayOutputUndefined(shape[k]) || dropsWhenAbsent(shape[k]),
+  );
+  if (!hasConditionalKeys) {
+    const literal = outputs
+      .map((o) => `${typeof o.key === "symbol" ? `[${o.keyExpr}]` : o.keyExpr}: ${o.valueVar}`)
+      .join(", ");
+    ctx.write(`const out = { ${literal} };`);
+  } else {
+    ctx.write(`const out = {};`);
+    for (const o of outputs) {
+      const child = shape[o.key];
+      if (dropsWhenAbsent(child)) {
+        ctx.write(`if (${o.keyExpr} in ${accessor}) out[${o.keyExpr}] = ${o.valueVar};`);
+      } else if (mayOutputUndefined(child)) {
+        ctx.write(
+          `if (${o.valueVar} !== undefined || ${o.keyExpr} in ${accessor}) out[${o.keyExpr}] = ${o.valueVar};`,
+        );
       } else {
-        ctx.write(`for (const s of ${syms}) if (!${knownSet()}.has(s)) delete out[s];`);
+        ctx.write(`out[${o.keyExpr}] = ${o.valueVar};`);
       }
+    }
+  }
+  if (mode === "loose") {
+    // Undeclared string keys are copied after the shape keys (official passthrough template:
+    // for...in so inherited enumerables participate, `__proto__` skipped)
+    ctx.write(`for (const k in ${accessor}) {`);
+    ctx.indented(() => {
+      ctx.write(`if (k === "__proto__") continue;`);
+      ctx.write(`if (${unknownStringKey()}) out[k] = ${accessor}[k];`);
     });
     ctx.write(`}`);
   }

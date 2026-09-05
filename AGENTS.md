@@ -19,7 +19,7 @@ Git repository with GitHub Actions CI (`.github/workflows/ci.yml`: typecheck, bo
 | `packages/zod-cow-v4/README.md` | Consumer document for the published package and the authority for install, usage, API and peer-policy text (ADR 0001 §5): that text lives there and nowhere else; the root README links to it, and it links back to the root README for the CoW invariant, the benchmarks, the evidence and the limitations. Ships in the npm tarball. No Chinese counterpart |
 | `CHANGELOG.md` | Keep a Changelog style; `Unreleased` plus v0.1 to v0.5. Historical benchmark tables live here, never in the README. Covers the whole workspace; `zod-cow-v4` carries the project version |
 | `docs/ARCHITECTURE-z4.md` | English architecture deep dive on the zod4 engine (§1 to §11 plus Appendix A). Architecture changes go here |
-| `docs/ARCHITECTURE-z4.zh-CN.md` | Frozen Chinese snapshot of the v0.5 architecture text. Not maintained; do not edit it when the English doc changes |
+| `docs/ARCHITECTURE-z4.zh-CN.md` | Chinese counterpart of the architecture deep dive with the same section numbering. A change to `docs/ARCHITECTURE-z4.md` must be applied to it in the same PR. Its text still reflects v0.5; bringing it up to date is tracked in #52 |
 | `docs/upstream-issue-draft.md` | Draft issue for zod upstream asking to make `compileFn` / `assertOnly` / `INVALID` public |
 | `docs/adr/` | Architecture decision records, numbered. `0001-package-layout.md` (#8, implemented in #9): one package per zod major in a pnpm workspace, `zod-cow-v4` published name, benchmarks split per line, verified-minor peer range for zod, zod3 line unpublished. A new decision gets the next number; a superseded ADR keeps its file and gains a `Superseded by` status line |
 
@@ -30,7 +30,7 @@ A pnpm workspace (`pnpm-workspace.yaml`: `packages/*`). The root is a private pa
 | Package | Directory | Published | Owns |
 |---|---|---|---|
 | `zod-cow-v4` | `packages/zod-cow-v4/` | yes, as `zod-cow-v4` | The zod4 line: entry `src/index.ts`, engine `src/cow4/`, probes `src/probe-z4.ts` and `src/probe-z4-flags.ts`, the canary, smoke and differential tests, its own `tests/harness.ts`, the packed-tarball smoke `scripts/pack-smoke.ts`, a consumer README and a copy of `LICENSE`. devDependency `zod@4.5.4`, peerDependency `zod >=4.5.4 <4.6.0`, `engines.node >=22.13.0`, `license: MIT` |
-| `zod-cow-v3` | `packages/zod-cow-v3/` | no (`private`) | The frozen zod3 line, its unit and differential tests, its own `tests/harness.ts`. `exports` points at `./src/index.ts` (no build; `tsx` transpiles through the workspace link). devDependency `zod@3.24.1` |
+| `zod-cow-v3` | `packages/zod-cow-v3/` | no (`private`) | The zod3 line, its unit and differential tests, its own `tests/harness.ts`. `exports` points at `./src/index.ts` (no build; `tsx` transpiles through the workspace link). devDependency `zod@3.24.1` |
 | `bench-v4` | `packages/bench-v4/` | no | `bench.ts` (the S1 to S7 batch scenarios and the orchestration of the rest), `schemas.ts` (the account and tuple schemas for zod and ArkType side by side, datasets, products, fixture helpers), `strip.ts` (S8 strip-unknown parity), `calibration.ts` (single-record hot loops), `failures.ts` (S9 validation-only failures, S10 full parse failures), `harness.ts` (measurement: warmup, interleaved gc-separated rounds, batch and per-operation modes, `N/A` candidates, summary and diagnostic tables), `gates.ts` (equivalence gates run before timing) and `demo.ts`, written against the published API; depends on `zod-cow-v4` (`workspace:*`), `zod@4.5.4`, `arktype`. Imports `compile` from `"zod-cow-v4"`, so it needs the build first. Columns: stock Zod 4, the public `z.compile()` / `z.validate` API, zod-cow-v4 and ArkType in the primary tables; the internal `compileFn` / `assertOnly` product only in a diagnostic table |
 | `bench-v3` | `packages/bench-v3/` | no | `bench.ts` and the zod3 `demo.ts` (reads `.pure`, shows the `DeepReadonly` view); depends on `zod-cow-v3` (`workspace:*`), `zod@3.24.1`, `arktype` |
 
@@ -54,7 +54,7 @@ Use Node.js >= 22.13.0 with pnpm 11.24.0.
 | Apply safe lint fixes and formatting | `pnpm run lint:fix` |
 | Format only | `pnpm run format` |
 | Compare the two harness copies | `pnpm run check:harness` |
-| Tests, zod4 line (current work): canary, smoke, differential | `pnpm run test:v4` |
+| Tests, zod4 line: canary, smoke, differential | `pnpm run test:v4` |
 | Tests, zod3 line, plus the harness self-test | `pnpm run test:v3` |
 | Both test lines | `pnpm test` |
 | Run one test file | `pnpm --filter zod-cow-v4 exec tsx tests/smoke-z4.test.ts` (or `--filter zod-cow-v3 exec tsx tests/unit.test.ts`) |
@@ -77,8 +77,8 @@ Two compiler front-ends live in two packages; they share no code (`internal.ts` 
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
-| zod3 v1 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Frozen reference |
-| zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Active line**, new work goes here |
+| zod3 v1 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string regexes copied verbatim into `src/regexes.ts` from zod 3.24.1 | Maintained: kept passing and optimized further; not published |
+| zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/index.ts` | Reuses zod4's **official JIT codegen** as the semantic backend, adds CoW container skeletons | **Primary line**: the published package, where new features go |
 
 Each package installs its own zod: `packages/zod-cow-v4` against zod 4.5.4, `packages/zod-cow-v3` against zod 3.24.1; both import `zod` by its real specifier.
 
@@ -92,7 +92,7 @@ Every compiled node is `(input) => output | FAILED-sentinel`. Dirtiness needs no
 
 ### zod4 engine (`packages/zod-cow-v4/src/cow4/`): how the pieces fit
 
-The engine is a directory of small modules (guideline: about 500 lines per file for this line and new code; the frozen zod3 compiler and the fuzzers are exempt):
+The engine is a directory of small modules (guideline: about 500 lines per file for this line and new code; the zod3 compiler and the fuzzers are exempt):
 
 | Module | Holds |
 |---|---|
@@ -127,7 +127,7 @@ The zod4 line depends on `zod/v4/core`, a public permalink subpath whose compile
 - Any change to purity rules or a container skeleton must be validated with the differential fuzzer for that line (`packages/zod-cow-v4/tests/differential-z4.test.ts` for the zod4 line), not only the smoke tests. Report the reference-sharing rate it prints; a drop indicates a lost CoW path.
 - Benchmarks in the README/docs come from a Benchmarks workflow run (node v24, `BENCH_N=50 000`, medians over complete rotations of the candidate order), cited by run id next to each table. When re-measuring, replace the tables and the run id rather than adding new tables, and move the superseded table to the CHANGELOG.
 - ArkType is a first-class column of `bench-v4`, not a reference line: every scenario either measures an ArkType schema built to the same constraints as the zod schema (checked before timing by the equivalence gate in `packages/bench-v4/gates.ts`, valid and invalid fixtures, outputs compared) or prints `N/A — <reason>`. Never weaken the ArkType schema to fill a cell, never label a hand-written validator "ArkType", and keep non-equivalent references (such as the S5 instanceof-only Map/Set schema) out of the ratios. Where an ArkType keyword accepts a superset of the zod constraint (`string.email`, `string.date.iso`), the zod pattern goes in as an ArkType regex constraint so the accepted sets match; where the keyword differs in unit or range (`string <= n` counts UTF-16 units where `.max(n)` counts code points, `number` accepts ±Infinity where `z.number()` does not), the zod rule is reproduced through ArkType's public API (a union with a code-point predicate on the overflow branch, a finite range through the range API) and the gate carries a boundary fixture for it. A known semantic divergence (present-undefined defaults, tuple optional slots) is declared on the fixture, not hidden. The same rules apply to any further external baseline.
-- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md` (English; the `.zh-CN.md` snapshot stays untouched). User-facing changes (API, supported features, benchmark tables) go into both READMEs and the `Unreleased` section of `CHANGELOG.md`; install, usage, API and peer-policy text goes into `packages/zod-cow-v4/README.md` only, with the root READMEs linking to it.
+- Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md` (English, with the same change applied to `docs/ARCHITECTURE-z4.zh-CN.md` in the same PR). User-facing changes (API, supported features, benchmark tables) go into both READMEs and the `Unreleased` section of `CHANGELOG.md`; install, usage, API and peer-policy text goes into `packages/zod-cow-v4/README.md` only, with the root READMEs linking to it.
 - A change to `tests/harness.ts` in one line package must be applied to the other copy in the same PR (`pnpm run check:harness`).
 - Anything that changes what `zod-cow-v4` ships (`exports`, `files`, the build config, `engines`) must keep `pnpm run smoke:pack` green; extend the smoke when a new promise is made to consumers.
 
@@ -156,5 +156,6 @@ Never include AI attribution in commit messages, PR titles, or PR descriptions, 
 - `Co-Authored-By: Claude`
 - `Generated with ...` footers
 - sign-offs or footers naming an LLM or AI agent (OpenAI, GPT, Claude, Anthropic, and the like)
+- `Claude-Session:` trailers or session URLs (`https://claude.ai/code/session_...`), even when a tool inserts them automatically
 
 When squash-merging, write a clean commit message that describes only the change itself.

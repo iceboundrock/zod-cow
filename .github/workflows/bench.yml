@@ -6,7 +6,7 @@ name: Benchmarks
 # ratios close to 1.0x should be read as level. The workflow also proves the
 # bench scripts still run after refactors. bench-v4 imports the built
 # zod-cow-v4 package, so the build step runs before it; bench-v3 measures the
-# frozen zod3 line from source.
+# zod3 line from source.
 on:
   workflow_dispatch:
     inputs:

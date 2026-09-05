@@ -398,7 +398,10 @@ Measured semantic anchors: `{a:1}` against `z.record(z.enum(["a","b"]), z.number
 → the input reference ✓; `{a:"x",b:"y",extra:"z"}` against `z.looseRecord(z.enum(["a","b"]), z.string())` → the input reference ✓.
 `{a:1, b:2, [Symbol()]: 3}` against `z.record(z.enum(["a","b"]), z.number())` → stock drops the symbol → ours copies and
 drops it too, and the same input without the symbol stays the input reference ✓ (#51; before it the clean path returned the
-input with the symbol while the copy path dropped it).
+input with the symbol while the copy path dropped it). A *declared* key defined as a non-enumerable property (a symbol enum
+value or a declared string key) is the #48 family, documented rather than probed: the probe asks only whether an undeclared
+symbol exists, so the clean path returns the input with the property as defined, where stock's rebuild writes an enumerable
+data property; the copy path writes it like stock. The object skeleton behaves the same way (README, known limitations).
 
 ### 5.2 map / set
 

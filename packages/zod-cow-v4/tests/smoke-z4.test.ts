@@ -936,6 +936,43 @@ import { compile } from "../src/index.js";
   assert.deepEqual(nOut, Nested.parse(nIn));
   assert.equal(compile(Nested, { ownSymbolKeys: "ignore" }).parse(nIn), nIn);
   console.log('  nested enum record: default copies, "ignore" shares ✓');
+
+  // Declared keys come back as the input defines them (the #48 family, documented, no probe): the
+  // own-symbol probe asks only whether an undeclared symbol exists, so a clean record or object whose
+  // declared key, symbol or string, is a non-enumerable property is returned by reference as it is,
+  // where stock's rebuild writes an enumerable data property. The copy path writes it like stock.
+  const declared = Symbol("declared");
+  const nonEnumerable = <T extends object>(o: T, key: PropertyKey, value: unknown): T =>
+    Object.defineProperty(o, key, { value, enumerable: false });
+  const enumerableOf = (o: unknown, key: PropertyKey) =>
+    Object.getOwnPropertyDescriptor(o as object, key)?.enumerable;
+  const Literal = z.record(z.literal(declared as never), z.number());
+  const plainDeclared = { [declared]: 1 };
+  assert.deepEqual(Literal.parse(plainDeclared), plainDeclared);
+  assert.equal(compile(Literal).parse(plainDeclared), plainDeclared, "a declared symbol is known");
+  const declaredKeyed = [
+    ["symbol-literal record", Literal, declared],
+    ["enum record", z.record(z.enum(["a"]), z.number()), "a"],
+    ["object, symbol key", z.object({ [declared]: z.number() }), declared],
+    ["object, string key", z.object({ a: z.number() }), "a"],
+  ] as const;
+  for (const [label, S, key] of declaredKeyed) {
+    const hiddenDeclared = nonEnumerable({}, key, 1);
+    assert.equal(enumerableOf(S.parse(hiddenDeclared), key), true, `stock ${label}: enumerable`);
+    assert.equal(
+      compile(S).parse(hiddenDeclared),
+      hiddenDeclared,
+      `${label}: a declared non-enumerable key is returned as it is (#48)`,
+    );
+  }
+  const LiteralT = z.record(
+    z.literal(declared as never),
+    z.number().transform((n) => n + 1),
+  );
+  const tOut = compile(LiteralT).parse(nonEnumerable({}, declared, 1)) as Record<symbol, unknown>;
+  assert.equal(enumerableOf(tOut, declared), true, "the copy path writes it enumerable like stock");
+  assert.equal(tOut[declared], 2);
+  console.log("  declared keys come back as the input defines them, enumerable or not (#48) ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

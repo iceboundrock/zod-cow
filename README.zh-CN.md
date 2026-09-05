@@ -77,7 +77,7 @@ zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `ben
 | string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / any / unknown | 永不 |
 | readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线在每个 `readonly` 节点上原地冻结输入并返回原引用（#27） |
 | object / array / tuple / record / map / set | 所有子值未变则永不：返回输入原引用 |
-| union / discriminatedUnion | 命中分支返回其输入则永不 |
+| union / discriminatedUnion | 所有分支都是叶子（或 optional / nullable 包裹的叶子）且命中分支返回其输入则永不。带容器分支（object / array / tuple / record / map / set，含 optional / nullable 包裹）的 union 整体交给官方 parser，命中的容器按 stock 的方式重建，因此总会拷贝；保留 CoW 路径的 union 骨架是后续工作（#47） |
 | default | 仅当 `undefined` 实际被替换 |
 | transform / preprocess / pipe / catch | 仅当运行时实际产生新值 |
 | strip（对象默认模式） | 仅当输入确实存在多余键（小型固定 shape 使用 `for...in` + 生成的比较，大型 shape 回退到 `Set`，并探测自有 symbol；`compile(schema, { ownSymbolKeys: "ignore" })` 可关闭该探测，#43） |
@@ -183,7 +183,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 
 ## 正确性证据
 
-- 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union，套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（默认规模下成功 case 中分别为 88.8% 与 89.4%，#43）。
+- 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union（普通 union 取 2 到 3 个随机分支，因此会出现带未声明键的 object 分支；另有两个 object 分支的 discriminatedUnion；生成器自 #47 起才生成 union，此前尽管列表如此写，却从未生成过），套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（加入 union 生成器与 #47 的 union 规则后，默认规模下成功 case 中分别为 85.6% 与 86.2%；此前为 88.8% 与 89.4%，#43）。
 - 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
 - zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`），顶层引用共享率约 92%。
@@ -198,6 +198,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - 不支持，明确失败而非静默漂移：
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
+- 带容器分支的 union 总会拷贝：分支全为叶子的 union 按原引用返回输入，但只要有一个 object / array / tuple / record / map / set 分支（含 optional / nullable 包裹），整个 union 就交给官方 parser，因为分支拿不到自己的骨架，而官方 validator 会保留 stock 会剥掉的未声明键（#47）。stock 的 parser 会重建命中的容器，所以该 union 的值以及到根的路径每次 parse 都会拷贝。按顺序尝试各分支 CoW 产物的 union 骨架能恢复共享，是后续工作。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
 - symbol 键 / getter：stock 的重建在所有对象模式下都会丢弃未声明的自有 symbol 键（无论其是否可枚举），默认情况下对象骨架在所有模式下都会探测它们并拷贝（strip 自 #33 起，strict 与 loose 自 #42 起）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于对象是否为脏（#43）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
 - 刻意不对齐的 stock quirk：tuple 带 async rest 槽且 nullable 槽输入为 `null` 时，stock zod4 runtime 产生稀疏数组并丢掉 `null`；骨架输出稠密数组。差分生成器规避该组合，复现见上游 issue 草稿。
@@ -239,7 +240,7 @@ CHANGELOG.md                v0.1～v0.5 历史与各版本的历史基准表（�
 ## 延伸阅读
 
 - [packages/zod-cow-v4/README.md](packages/zod-cow-v4/README.md)：发布包的使用者文档（安装、用法、API、peer 策略）。
-- [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)：生成代码与官方产物并排对照、纯度白名单与三大陷阱、record / map / set / tuple 骨架、async 通道、降级链状态机、版本锚点与风险。
+- [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)：生成代码与官方产物并排对照、纯度白名单与四大陷阱、record / map / set / tuple 骨架、async 通道、降级链状态机、版本锚点与风险。
 - [CHANGELOG.md](CHANGELOG.md)：项目如何从自研 zod3 编译器（v0.1）经自研 zod4 移植（v0.2，已移除）走到复用官方 codegen（v0.3～v0.5），附每一步的基准表。
 - [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md)：请求公开 `compileFn` API 的理由，以及模糊测试中发现的 zod4 runtime quirk。
 - [AGENTS.md](AGENTS.md)：贡献者与编码代理的工作约定（命令、模块地图、版本锚点、PR 规则）。

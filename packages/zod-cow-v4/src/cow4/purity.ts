@@ -33,6 +33,9 @@ export function isPure(schema: Node): boolean {
       return isPure(def.innerType);
     // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
     // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
+    // The verdict holds only where a skeleton is actually emitted for the container (the top level and the
+    // key / element / value positions, which route containers through cowSafeContainerForChild); a union
+    // option is not such a position, see the union case below.
     case "object": {
       if (!checksAreCowSafe(schema)) return false;
       if (def.catchall) {
@@ -54,14 +57,40 @@ export function isPure(schema: Node): boolean {
       if (def.rest && !isPure(def.rest)) return false;
       return true;
     }
+    // Union: the whole union is one official product, so an option gets no skeleton of its own. A container
+    // option would therefore be validated by assertOnly and returned by reference, keeping the undeclared
+    // keys of a strip object (or of an object nested in an array / tuple option) that stock's rebuild drops
+    // (#47). Any option that is, or unwraps through optional / nullable to, a container makes the union
+    // impure: it takes the official parser plus the reference comparison, which rebuilds like stock.
+    // discriminatedUnion shares this def.type.
     case "union":
-      return def.options.every(isPure);
+      return def.options.every((o: Node) => !unwrapsToContainer(o) && isPure(o));
     // freeze side effects / value producers / black boxes: always impure
     // readonly (Object.freeze), default/prefault/catch/coerce, transform/pipe,
     // tuple/record/map/set (the official product unconditionally builds a new container), intersection (mergeValues),
     // lazy/custom/nonoptional/success (conservative)
     default:
       return false;
+  }
+}
+
+/** Whether the node is a container, or an optional / nullable chain ending in one (any checks along the way ignored) */
+function unwrapsToContainer(node: Node): boolean {
+  let cur: Node = node;
+  for (;;) {
+    const t: string = cur._zod.def.type;
+    if (t === "optional" || t === "nullable") {
+      cur = cur._zod.def.innerType;
+      continue;
+    }
+    return (
+      t === "object" ||
+      t === "array" ||
+      t === "tuple" ||
+      t === "record" ||
+      t === "map" ||
+      t === "set"
+    );
   }
 }
 

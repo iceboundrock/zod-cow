@@ -712,4 +712,61 @@ import { compile } from "../src/index.js";
   console.log('  nested loose object: default copies, "ignore" shares ✓');
 }
 
+/* ── 14. a union with a container option is impure: it takes the official parser and strips like stock (#47) ── */
+{
+  console.log("\n── union with a container option (#47) ──");
+  const U = z.union([z.object({ a: z.string() }), z.number()]);
+  const C = compile(U);
+  const input = { a: "x", extra: 1 };
+  const out = C.parse(input);
+  assert.deepEqual(out, { a: "x" });
+  assert.deepEqual(out, U.parse(input));
+  assert.notEqual(out, input);
+  assert.equal(C.parse(3), 3);
+  // White-box pin on the current codegen shape: a top-level assertOnly validator emits `return input;`, the
+  // official parser path returns its own local (`return x0;`). Update the pin if the emitted shape changes.
+  assert.ok(
+    !C.code!.includes("return input;"),
+    "the union is not handed to the assertOnly validator",
+  );
+  console.log("  strip-object option: undeclared key dropped like stock ✓");
+
+  // Nested position: the parent copies because the union rebuilt its value; siblings keep sharing
+  const N = z.object({ u: U, keep: z.object({ n: z.number() }) });
+  const nIn = { u: input, keep: { n: 1 } };
+  const nOut = compile(N).parse(nIn);
+  assert.deepEqual(nOut, N.parse(nIn));
+  assert.notEqual(nOut, nIn);
+  assert.equal(nOut.keep, nIn.keep);
+  console.log("  nested union: parent copies, sibling stays shared ✓");
+
+  // A strict option with an undeclared own symbol key: stock drops the symbol in every mode (#42)
+  const sym = Symbol("extra");
+  const S = z.union([z.strictObject({ a: z.string() }), z.number()]);
+  const sIn = { a: "x", [sym]: 1 };
+  assert.ok(!(sym in (compile(S).parse(sIn) as object)));
+  console.log("  strict option: undeclared own symbol dropped like stock ✓");
+
+  // Container options under a wrapper, inside an array and in a discriminated union
+  const W = z.union([z.object({ a: z.string() }).optional(), z.number()]);
+  assert.deepEqual(compile(W).parse(input), { a: "x" });
+  const A = z.union([z.array(z.object({ a: z.string() })), z.number()]);
+  assert.deepEqual(compile(A).parse([input]), [{ a: "x" }]);
+  const D = z.discriminatedUnion("k", [
+    z.object({ k: z.literal("a"), v: z.string() }),
+    z.object({ k: z.literal("b") }),
+  ]);
+  assert.deepEqual(compile(D).parse({ k: "b", extra: 1 }), { k: "b" });
+  console.log(
+    "  optional(object), array(object) and discriminatedUnion options strip like stock ✓",
+  );
+
+  // A union of leaves stays pure: the official validator answers and the parent keeps sharing
+  const P = z.object({ v: z.union([z.string().optional(), z.literal(1)]) });
+  const pIn = { v: 1 };
+  assert.equal(compile(P).parse(pIn), pIn);
+  assert.equal(compile(P).parse({ v: "s" }).v, "s");
+  console.log("  leaf-only union keeps the validator, parent shares ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

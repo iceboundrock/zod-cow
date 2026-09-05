@@ -560,6 +560,47 @@ function bTuple(rng: RNG, depth: number): Built {
   };
 }
 
+/**
+ * Unions (#47): 2 to 3 options drawn from the ordinary child generator, so object branches (with
+ * their extra keys and extra own symbols), arrays of objects, wrapped and async options all occur
+ * next to leaves; 1 in 4 is a discriminated union of two object branches on a literal `kind` key.
+ * The input follows one option at random, so extra keys reach a strip-object branch; the
+ * discriminated variant now and then carries an extra key, the extra own symbol or an unknown tag.
+ */
+function bUnion(rng: RNG, depth: number): Built {
+  if (rng.chance(0.25)) {
+    const branches = (["a", "b"] as const).map((kind) => ({ kind, built: bChild(rng, depth) }));
+    const schema = z.discriminatedUnion(
+      "kind",
+      branches.map((b) => z.object({ kind: z.literal(b.kind), v: b.built.schema })) as never,
+    );
+    const desc = `discriminatedUnion(kind, [${branches
+      .map((b) => `{kind: ${b.kind}, v: ${b.built.desc}}`)
+      .join(", ")}])`;
+    return {
+      schema,
+      desc,
+      gen: (r) => {
+        const b = r.pick(branches);
+        const out: Record<string | symbol, unknown> = { kind: r.chance(0.05) ? "c" : b.kind };
+        const v = b.built.gen(r);
+        if (v !== ABSENT) out.v = v;
+        if (r.chance(0.25)) out.extra = r.pick([1, "x", null] as const);
+        if (r.chance(0.1) && emitExtraSymbol) out[EXTRA_SYMBOL] = true;
+        return out;
+      },
+    };
+  }
+  const n = 2 + rng.int(2);
+  const options: Built[] = [];
+  for (let i = 0; i < n; i++) options.push(bChild(rng, depth));
+  return {
+    schema: z.union(options.map((o) => o.schema) as never),
+    desc: `union([${options.map((o) => o.desc).join(", ")}])`,
+    gen: (r) => r.pick(options).gen(r),
+  };
+}
+
 function bChild(rng: RNG, depth: number): Built {
   const inner = depth <= 0 ? bLeaf(rng) : bAny(rng, depth - 1);
   return rng.chance(0.4) ? bWrap(rng, inner) : inner;
@@ -568,13 +609,14 @@ function bChild(rng: RNG, depth: number): Built {
 function bAny(rng: RNG, depth: number): Built {
   const roll = rng.next();
   if (depth <= 0) return bLeaf(rng);
-  if (roll < 0.36) return bLeaf(rng);
-  if (roll < 0.52) return bObject(rng, depth);
-  if (roll < 0.62) return bArray(rng, depth);
-  if (roll < 0.72) return bTuple(rng, depth);
-  if (roll < 0.8) return bRecord(rng, depth);
-  if (roll < 0.86) return bMap(rng, depth);
-  if (roll < 0.91) return bSet(rng, depth);
+  if (roll < 0.34) return bLeaf(rng);
+  if (roll < 0.5) return bObject(rng, depth);
+  if (roll < 0.6) return bArray(rng, depth);
+  if (roll < 0.7) return bTuple(rng, depth);
+  if (roll < 0.78) return bRecord(rng, depth);
+  if (roll < 0.84) return bMap(rng, depth);
+  if (roll < 0.89) return bSet(rng, depth);
+  if (roll < 0.95) return bUnion(rng, depth);
   return bWrap(rng, bLeaf(rng));
 }
 

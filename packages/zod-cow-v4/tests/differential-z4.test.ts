@@ -389,8 +389,42 @@ function bArray(rng: RNG, depth: number): Built {
   };
 }
 
+/**
+ * Declaration-driven records (#37): string or numeric enum keys, strict or loose, 2 to 3 declared
+ * keys or 18 (above the inline key-comparison cap, so the probe is the hoisted Set). Inputs drop a
+ * declared key now and then (stock materializes it, or rejects it when the value is required) and
+ * sometimes carry an undeclared key, which strict rejects and loose keeps.
+ */
+function bEnumRecord(rng: RNG, inner: Built): Built {
+  const numeric = rng.chance(0.5);
+  const n = rng.chance(0.15) ? 18 : 2 + rng.int(2);
+  const values = Array.from({ length: n }, (_, i) => (numeric ? i + 1 : `k${i}`));
+  const keySchema = numeric
+    ? z.enum(Object.fromEntries(values.map((v) => [`K${v}`, v])))
+    : z.enum(values as string[] as [string, ...string[]]);
+  const loose = rng.chance(0.3);
+  const schema = loose
+    ? z.looseRecord(keySchema as any, inner.schema)
+    : z.record(keySchema as any, inner.schema);
+  return {
+    schema,
+    desc: `${loose ? "looseRecord" : "record"}(enum[${numeric ? "number" : "string"} x${n}], ${inner.desc})`,
+    gen: (r) => {
+      const out: Record<string, unknown> = {};
+      for (const v of values) {
+        if (r.chance(0.1)) continue;
+        const x = inner.gen(r);
+        if (x !== ABSENT) out[String(v)] = x;
+      }
+      if (r.chance(0.2)) out[numeric && r.chance(0.5) ? "99" : "extra"] = r.chance(0.5) ? 1 : "e";
+      return out;
+    },
+  };
+}
+
 function bRecord(rng: RNG, depth: number): Built {
   const inner = bChild(rng, depth);
+  if (rng.chance(0.3)) return bEnumRecord(rng, inner);
   const numericKeys = rng.chance(0.15);
   const keySchema: z.ZodType = numericKeys ? z.number() : z.string();
   return {

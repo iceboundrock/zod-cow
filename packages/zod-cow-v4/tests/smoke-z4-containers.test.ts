@@ -94,6 +94,76 @@ import { compile } from "../src/index.js";
   assert.ok(!("b" in input4));
 }
 
+/* ── record: numeric enum keys and loose enum records share references (#37) ── */
+{
+  console.log("\n── record numeric enum keys / loose enum records (#37) ──");
+  // for...in yields strings, so the known-key probe must compare against the stringified enum values
+  const S = z.record(z.enum({ A: 1, B: 2 }), z.string());
+  const C = compile(S);
+  const input = { "1": "x", "2": "y" };
+  assert.equal(C.stock, false);
+  assert.equal(C.parse(input), input);
+  console.log("  numeric enum, clean out === input:", C.parse(input) === input);
+  assert.equal(C.safeParse({ "1": "x", "2": "y", "3": "z" }).success, false); // undeclared key: strict
+  assert.equal(C.safeParse({ "1": "x" }).success, false); // declared key missing, value required
+  // A dirty value copies once; the copy carries stock's key set and order and leaves the input alone
+  const T = z.record(z.enum({ A: 1, B: 2 }), z.string().trim());
+  const dirtyIn = { "2": " y", "1": "x" };
+  const out = compile(T).parse(dirtyIn);
+  assert.notEqual(out, dirtyIn);
+  assert.deepEqual(out, T.parse(dirtyIn));
+  assert.deepEqual(dirtyIn, { "2": " y", "1": "x" });
+
+  // loose: undeclared keys pass through (stock skips only "__proto__"), so a clean input is shared
+  const L = z.looseRecord(z.enum(["b", "a"]), z.string());
+  const LC = compile(L);
+  const looseIn = { a: "x", b: "y", extra: "z" };
+  assert.equal(LC.stock, false);
+  assert.equal(LC.parse(looseIn), looseIn);
+  console.log(
+    "  loose enum record with an undeclared key, clean out === input:",
+    LC.parse(looseIn) === looseIn,
+  );
+  const LT = z.looseRecord(z.enum(["b", "a"]), z.string().trim());
+  const looseDirty = { extra: "z", a: " x", b: "y" };
+  const looseOut = compile(LT).parse(looseDirty) as Record<string, string>;
+  assert.notEqual(looseOut, looseDirty);
+  assert.deepEqual(looseOut, { b: "y", a: "x", extra: "z" });
+  // declaration order first, then the undeclared keys in input order: the same order stock builds
+  assert.deepEqual(Object.keys(looseOut), Object.keys(LT.parse(looseDirty)));
+  assert.deepEqual(Object.keys(looseOut), ["b", "a", "extra"]);
+  assert.deepEqual(looseDirty, { extra: "z", a: " x", b: "y" });
+  // A missing declared key with an optional value is materialized in loose mode as well
+  const LO = compile(z.looseRecord(z.enum(["a", "b"]), z.number().optional()));
+  const looseMissing = { a: 1, extra: 2 };
+  const looseMissingOut = LO.parse(looseMissing) as Record<string, unknown>;
+  assert.notEqual(looseMissingOut, looseMissing);
+  assert.ok("b" in looseMissingOut);
+  assert.deepEqual(Object.keys(looseMissingOut), ["a", "b", "extra"]);
+
+  // Getters are read once on both paths (the copy is assembled from the captured locals, #36)
+  let reads = 0;
+  const withGetter = Object.defineProperty({ "2": "y" }, "1", {
+    get: () => {
+      reads++;
+      return " x";
+    },
+    enumerable: true,
+  });
+  assert.deepEqual(compile(T).parse(withGetter), { "1": "x", "2": "y" });
+  assert.equal(reads, 1);
+
+  // Above MAX_INLINE_KEY_COMPARISONS declared keys the probe is the hoisted Set, below it the comparison chain
+  const many = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`K${i}`, i + 1]));
+  const M = compile(z.record(z.enum(many), z.number()));
+  const manyIn = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [String(i + 1), i]));
+  assert.equal(M.parse(manyIn), manyIn);
+  assert.equal(M.safeParse({ ...manyIn, "18": 0 }).success, false);
+  assert.ok(M.code!.includes(".has(k)"));
+  assert.ok(!C.code!.includes(".has(k)"));
+  console.log("  17 declared keys probe through the Set, 2 through the comparison chain ✓");
+}
+
 /* ── record: string-format keys (general path, key names unchanged) ── */
 {
   const S = z.record(z.email(), z.number());

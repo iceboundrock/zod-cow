@@ -4,7 +4,7 @@
  * own assembly rules).
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, escKey } from "./codectx.js";
+import { type CodeCtx, escKey, unknownStringKeyExpr } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
@@ -12,18 +12,6 @@ import { isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ── object skeleton ── */
-
-/**
- * Shapes with at most this many string keys probe unknown keys with a generated
- * `k !== "a" && k !== "b" …` chain; larger shapes fall back to `Set.has(k)`.
- * `for...in` hands V8 internalized strings, so each comparison is a pointer
- * compare, while `Set.has` hashes and probes per key. Measured on Node 24 the
- * chain is still 4 to 5x faster than the Set at 16 to 32 keys and only reaches
- * parity around 128 keys, so this cap is conservative; it bounds the generated
- * code size rather than marking the break-even point. Raising it is a
- * benchmark-backed decision, not a correctness one (#34).
- */
-const MAX_INLINE_KEY_COMPARISONS = 16;
 
 /**
  * Two paths, decided at runtime per object:
@@ -167,12 +155,9 @@ export function emitCoWObject(
   // The known-key Set is hoisted lazily: a small shape without declared symbols never references it.
   let known: string | null = null;
   const knownSet = () => (known ??= ctx.addConst(new Set(allKeys)));
-  let unknownStringKeyExpr: string | null = null;
+  let unknownStringKeyProbe: string | null = null;
   const unknownStringKey = () =>
-    (unknownStringKeyExpr ??=
-      stringKeys.length <= MAX_INLINE_KEY_COMPARISONS
-        ? stringKeys.map((key) => `k !== ${escKey(key)}`).join(" && ") || "true"
-        : `!${knownSet()}.has(k)`);
+    (unknownStringKeyProbe ??= unknownStringKeyExpr(stringKeys, knownSet));
 
   if (mode === "strict") {
     // Validation, not output shaping: runs on every path (the official template)

@@ -348,13 +348,24 @@ Path A (enum, declaration-driven): the official output unconditionally materiali
 (a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
 
 - a missing declared key is dirty (`!(k in input)` → stock materializes that key);
-- the strict rejection of unknown keys is copied verbatim (`for...in → INVALID`);
-- in the copy branch, after `{...input}`, every declared key is written back (a validator-product key writes `inVar`; when the key
-  is missing, `inVar === undefined` happens to be exactly the stock semantics; a parser-product key writes the product's output value).
+- the unknown-key probe is the official `for...in` template over the declared keys *as `for...in` yields them*: numeric enum
+  values are stringified (`z.enum({ A: 1 })` declares the key `"1"`; comparing against the raw `1` rejected every enumerated
+  key and sent every parse to stock, #37), symbol keys never take part. The probe expression is shared with the object skeleton
+  (`unknownStringKeyExpr` in `codectx.ts`): a `k !== "a" && k !== "b" …` chain up to `MAX_INLINE_KEY_COMPARISONS` (16)
+  declared string keys, a hoisted `Set` above (#33). Strict runs it on every path (`→ INVALID`); loose (`z.looseRecord`)
+  keeps unknown keys, so its probe runs only on the copy path;
+- the copy branch is the official assembly, never `{...input}`: an empty literal, every declared key written in declaration order
+  from the locals captured during validation (a validator-product key writes `inVar`; when the key is missing,
+  `inVar === undefined` happens to be exactly the stock semantics; a parser-product key writes the product's output value), then in
+  loose mode the undeclared string keys appended by `for...in` (stock skips only `"__proto__"`). Getters are read once and the
+  copy carries stock's key order (declared keys first, then the undeclared ones in input order).
 
 Measured semantic anchors: `{a:1}` against `z.record(z.enum(["a","b"]), z.number().optional())`
 → stock materializes `b: undefined` → ours marks it dirty and returns `{a:1, b:undefined}` ✓; an unknown key
-`{a:1,b:2,extra:3}` → both sides reject ✓.
+`{a:1,b:2,extra:3}` → both sides reject ✓; `{"1":"x","2":"y"}` against `z.record(z.enum({ A: 1, B: 2 }), z.string())`
+→ the input reference ✓; `{a:"x",b:"y",extra:"z"}` against `z.looseRecord(z.enum(["a","b"]), z.string())` → the input reference ✓.
+An undeclared own *symbol* key on the input is the one divergence: stock's rebuild drops it, the clean path returns the input
+with it, the same behavior strict and loose objects have (#42).
 
 ### 5.2 map / set
 

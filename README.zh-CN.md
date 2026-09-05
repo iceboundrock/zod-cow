@@ -175,7 +175,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 | S1 | 是 | `Type(data)` | `.int()` 用 `number.integer & number.safe`，`string[] <= 8`，字面量联合。zod 的 `.max(64)` 数 Unicode 码点，ArkType 的 `string <= 64` 数 UTF-16 单元（64 个星体字符能过 zod、过不了该关键字），所以上界按 zod 自己的规则写入：原生 `string <= 64` 做联合的第一分支，溢出分支只用一个数码点的谓词。`z.number()` 拒绝两个无穷而 ArkType 的 `number` 接受，所以数字通过 ArkType 的 range API 带一个有限范围（原生 range 节点）。zod 的 email 和 datetime 正则作为 ArkType 正则约束写入，因为 `string.email` 和 `string.date.iso` 接受超集（`.a@x.com`、只有日期、带时区偏移）。gate 为每一项都保留边界 fixture（64 与 65 个星体字符、±Infinity、NaN）。多余键在 ArkType 里按引用透传、在 zod 里被 strip 进拷贝（在多余键 fixture 上声明）；S1 数据没有多余键，S8 测 strip 的情形 |
 | S2、S3 | 是 | `Type(data)`，`role: "'admin' \| 'member' \| 'viewer' = 'viewer'"` | 同样的缺键输入，同样的输出。已声明分歧：zod 对显式存在的 `undefined` 也套 default，ArkType 拒绝 |
 | S4、校准 validate、S9 | 是 | `Type.allows(data)` | 纯校验，与 `z.validate(compiled, data)` 和 `validate()` 并列。ArkType 按自己的代价顺序检查键，zod 按声明顺序，S9 各位置的结果反映了这一点 |
-| S5 | 否 | N/A | `Map` / `Set` 只是 instanceof 检查，没有 `Map<K, V>` / `Set<T>` 泛型，条目和成员从不校验。最接近的 schema 作为标注的非等价参考（8 ms）运行，不进入比值 |
+| S5 | 否 | N/A | `Map` / `Set` 只是 instanceof 检查，没有 `Map<K, V>` / `Set<T>` 泛型，条目和成员从不校验。最接近的 schema 作为标注的非等价参考（10 ms）运行，不进入比值 |
 | S6、S9 tuple | 是 | `Type(data)`，一对有限数（与 S1 相同的有限范围）加 `["string", "string?"]` | 已声明分歧：zod 的可选槽接受显式存在的 `undefined`，ArkType 的 `string?` 只接受缺席；数据只有 1 元素和 2 元素的 label |
 | S7 | 否 | N/A | `.pipe(async fn)` morph 返回一个未 await 的 Promise，后接的 `.to("string")` 把它当对象拒绝；同步 lowercase 或 `Promise.resolve()` 包装都是另一种工作负载 |
 | S8 | 是 | `type(shape).onDeepUndeclaredKey("delete").array()` | ArkType 原生的深层未声明键删除，对应 zod 的嵌套 strip；它是 morph，所以每一行都重建。已声明分歧：未声明的自有 symbol 键被 zod strip、被 ArkType 保留（其删除只看字符串键）。gate 同时检查没有实现改动输入 |

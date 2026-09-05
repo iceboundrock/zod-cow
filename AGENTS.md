@@ -31,7 +31,7 @@ A pnpm workspace (`pnpm-workspace.yaml`: `packages/*`). The root is a private pa
 |---|---|---|---|
 | `zod-cow-v4` | `packages/zod-cow-v4/` | yes, as `zod-cow-v4` | The zod4 line: entry `src/index.ts`, engine `src/cow4/`, probes `src/probe-z4.ts` and `src/probe-z4-flags.ts`, the canary, smoke and differential tests, its own `tests/harness.ts`, the packed-tarball smoke `scripts/pack-smoke.ts`, a consumer README and a copy of `LICENSE`. devDependency `zod@4.5.4`, peerDependency `zod >=4.5.4 <4.6.0`, `engines.node >=22.13.0`, `license: MIT` |
 | `zod-cow-v3` | `packages/zod-cow-v3/` | no (`private`) | The frozen zod3 line, its unit and differential tests, its own `tests/harness.ts`. `exports` points at `./src/index.ts` (no build; `tsx` transpiles through the workspace link). devDependency `zod@3.24.1` |
-| `bench-v4` | `packages/bench-v4/` | no | `bench.ts` and `demo.ts` written against the published API; depends on `zod-cow-v4` (`workspace:*`), `zod@4.5.4`, `arktype`. Imports `compile` from `"zod-cow-v4"`, so it needs the build first |
+| `bench-v4` | `packages/bench-v4/` | no | `bench.ts` (the S1 to S7 scenarios, zod and ArkType schemas side by side), `harness.ts` (measurement: warmup, interleaved gc-separated rounds, `N/A` candidates, summary tables), `gates.ts` (equivalence gates run before timing) and `demo.ts`, written against the published API; depends on `zod-cow-v4` (`workspace:*`), `zod@4.5.4`, `arktype`. Imports `compile` from `"zod-cow-v4"`, so it needs the build first |
 | `bench-v3` | `packages/bench-v3/` | no | `bench.ts` and the zod3 `demo.ts` (reads `.pure`, shows the `DeepReadonly` view); depends on `zod-cow-v3` (`workspace:*`), `zod@3.24.1`, `arktype` |
 
 Each package installs exactly one `zod` at the right major and imports it by its real specifier (`zod`, `zod/v4/core`); there is no `zod4` alias anywhere.
@@ -69,7 +69,7 @@ Environment knobs:
 
 - `SEEDS` / `CASES` set the differential fuzz size. Code defaults are 200 × 100 = 20 000 cases (the 50 000-case figures in README/docs were larger runs). Use `SEEDS=20 CASES=50 pnpm run test:v4` for a quick pass.
 - `REPRO=seed:case` re-runs exactly one failing differential case and dumps the schema/input/generated code (zod4 tests only, e.g. `REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`).
-- `BENCH_N` sets the benchmark record count (default 500 000; the CI bench workflow uses 50 000).
+- `BENCH_N` sets the benchmark record count (default 500 000; the CI bench workflow uses 50 000). `BENCH_PASSES` sets the number of timed rounds per candidate in `bench-v4` (default 3, after 2 warmup rounds).
 
 ## Architecture
 
@@ -125,6 +125,7 @@ The zod4 line depends on `zod/v4/core`, a public permalink subpath whose compile
 
 - Any change to purity rules or a container skeleton must be validated with the differential fuzzer for that line (`packages/zod-cow-v4/tests/differential-z4.test.ts` for the zod4 line), not only the smoke tests. Report the reference-sharing rate it prints; a drop indicates a lost CoW path.
 - Benchmarks in the README/docs come from a Benchmarks workflow run (node v24, `BENCH_N=50 000`, 3-run medians), cited by run id next to each table. When re-measuring, replace the tables and the run id rather than adding new tables, and move the superseded table to the CHANGELOG.
+- ArkType is a first-class column of `bench-v4`, not a reference line: every scenario either measures an ArkType schema built to the same constraints as the zod schema (checked before timing by the equivalence gate in `packages/bench-v4/gates.ts`, valid and invalid fixtures, outputs compared) or prints `N/A — <reason>`. Never weaken the ArkType schema to fill a cell, never label a hand-written validator "ArkType", and keep non-equivalent references (such as the S5 instanceof-only Map/Set schema) out of the ratios. Where an ArkType keyword accepts a superset of the zod constraint (`string.email`, `string.date.iso`), the zod pattern goes in as an ArkType regex constraint so the accepted sets match. A known semantic divergence (present-undefined defaults, tuple optional slots) is declared on the fixture, not hidden. The same rules apply to any further external baseline.
 - Architecture changes to the zod4 line belong in `docs/ARCHITECTURE-z4.md` (English; the `.zh-CN.md` snapshot stays untouched). User-facing changes (API, supported features, benchmark tables) go into both READMEs and the `Unreleased` section of `CHANGELOG.md`; install, usage, API and peer-policy text goes into `packages/zod-cow-v4/README.md` only, with the root READMEs linking to it.
 - A change to `tests/harness.ts` in one line package must be applied to the other copy in the same PR (`pnpm run check:harness`).
 - Anything that changes what `zod-cow-v4` ships (`exports`, `files`, the build config, `engines`) must keep `pnpm run smoke:pack` green; extend the smoke when a new promise is made to consumers.

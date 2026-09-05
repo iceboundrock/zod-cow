@@ -46,7 +46,7 @@ fast.code;                  // generated CoW skeleton source, for debugging (nul
 compile(User, { ownSymbolKeys: "ignore" }); // opt-in for data known to carry no symbol keys (JSON input): skips the own-symbol probe of every object, see CompileOptions
 ```
 
-Two consequences of structural sharing to keep in mind:
+Two consequences of structural sharing:
 
 - The output may alias the input. Parsing the same input twice returns the same reference, and modifying the output modifies the input. Treat parse results as read-only, or copy them yourself before mutating.
 - Refinements and transforms must not mutate their argument, because it may be the caller's object.

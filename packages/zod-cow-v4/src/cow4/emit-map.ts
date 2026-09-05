@@ -17,7 +17,7 @@ export function emitCoWMap(ctx: CodeCtx, schema: Node, accessor: string, seen: S
   ctx.write(`for (const [kIn, vIn] of ${accessor}) {`);
   ctx.indented(() => {
     // Key: a value position -- a pure key is validated by the validator and its name never changes; an impure key uses the parser product (returning the converted key name); async → await
-    const keyProduct = childProduct(def.keyType, childSeen);
+    const keyProduct = childProduct(def.keyType, childSeen, ctx.options);
     const kf = ctx.addConst(keyProduct.fn);
     const keyAsync = keyProduct.kind === "async";
     if (keyAsync) ctx.async = true;
@@ -31,7 +31,7 @@ export function emitCoWMap(ctx: CodeCtx, schema: Node, accessor: string, seen: S
       ctx.write(`if (${ko} === INVALID) return INVALID;`);
       keyExpr = ko;
     }
-    const product = childProduct(def.valueType, childSeen);
+    const product = childProduct(def.valueType, childSeen, ctx.options);
     const vf = ctx.addConst(product.fn);
     const vAsync = product.kind === "async";
     if (vAsync) ctx.async = true;

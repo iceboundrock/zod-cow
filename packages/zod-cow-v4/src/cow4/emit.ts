@@ -12,6 +12,7 @@ import { emitCoWRecord } from "./emit-record.js";
 import { emitCoWSet } from "./emit-set.js";
 import { emitCoWTuple } from "./emit-tuple.js";
 import { makeAsyncIsland, officialFn } from "./official.js";
+import { type CowOptions, DEFAULT_OPTIONS } from "./options.js";
 import { type Fn, isAsyncFn, isAsyncProduct, type Node, throwAsync } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
@@ -21,8 +22,8 @@ import { cowSafeContainerForChild, isPure } from "./purity.js";
  * Compile a subtree into a standalone product function (the recursion entry for container sub-skeletons); on failure → official product/island.
  * seen is passed down: compile-time cyclic-reference guard.
  */
-function subFn(schema: Node, seen: Set<Node>): Fn {
-  const ctx = new CodeCtx();
+function subFn(schema: Node, seen: Set<Node>, options: CowOptions): Fn {
+  const ctx = new CodeCtx(options);
   const acc = emitNode(ctx, schema, "input", true, new Set(seen));
   ctx.write(`return ${acc ?? "true"};`);
   return buildFn(ctx);
@@ -45,10 +46,10 @@ function productOf(fn: Fn, syncKind: "parser" | "cow"): ChildProduct {
  *   container (including an optional/nullable wrapper chain) → CoW sub-skeleton (strip semantics intact);
  *   pure leaf → official validator; everything else → official parser; async subtree → async island.
  */
-export function childProduct(child: Node, seen: Set<Node>): ChildProduct {
+export function childProduct(child: Node, seen: Set<Node>, options: CowOptions): ChildProduct {
   if (cowSafeContainerForChild(child)) {
     try {
-      return productOf(subFn(child, seen), "cow");
+      return productOf(subFn(child, seen, options), "cow");
     } catch (e) {
       if (e instanceof ZodCompileUnsupportedError) throw e; // recursion/exotic features: propagate upwards, an outer layer degrades
       // ZodCompileAsyncError and other product generation failures → official product (async is turned into an async island automatically)
@@ -70,7 +71,8 @@ export function childProduct(child: Node, seen: Set<Node>): ChildProduct {
 export function containerChecksFn(schema: Node): Fn | null {
   const checks: Node[] = schema._zod.def.checks ?? [];
   if (checks.length === 0) return null;
-  const ctx = new CodeCtx();
+  // A check subroutine emits no container skeleton, so the compile options never matter here
+  const ctx = new CodeCtx(DEFAULT_OPTIONS);
   for (const check of checks) {
     const d = check._zod?.def ?? check;
     if (d.check === "custom" && d.fn) {
@@ -126,9 +128,9 @@ export function containerChecksFn(schema: Node): Fn | null {
  * (strip is output-construction behavior and does not affect pass/fail), which loses the strip semantics.
  * The sub-skeleton handles strip/strict/loose in full and returns the original reference when clean.
  */
-export function containerChildFn(child: Node, seen: Set<Node>): Fn {
+export function containerChildFn(child: Node, seen: Set<Node>, options: CowOptions): Fn {
   try {
-    return subFn(child, seen);
+    return subFn(child, seen, options);
   } catch (e) {
     if (e instanceof ZodCompileUnsupportedError) throw e; // recursion and the like: propagate upwards, the outer layer picks the degradation level
     return officialFn(child, false); // official parser product (async is turned into an async island automatically), stock semantics, no loss of correctness

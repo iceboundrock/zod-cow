@@ -218,7 +218,21 @@ Point-by-point correspondence with the official dump:
 | `const v8 = { "id": v0, … }` in shape order, with the `mayOutputUndefined` / `dropsWhenAbsent` rules for conditional keys and a `for...in` append in passthrough mode | the same literal, from the captured locals, on the copy path | The copy is stock's output: shape order, the same key-presence rules, getters read once. Undeclared keys are dropped by construction, so the copy path needs no probe and no `delete` (the earlier `{ ...input }` plus `delete` copy kept the input's order, re-read every getter (#36) and turned the copy into a dictionary-mode object, which made strip parity (S8) slower than stock) |
 | `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found | Same inherited-enumerable semantics with faster monomorphic small-object membership; both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap bounds the generated code size (see the constant's comment for the measurement). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
 
-Cost of the clean path, measured per object on a 6-key primitive record (Node 24, single-record hot loop, see the calibration scenario of `bench-v4`): the own-symbol probe is about 36 ns of a 65 ns skeleton call, the `for...in` probe about 9 ns; the official parser of the same schema costs 24 ns, its validator 15 ns. The leaf validator calls are not a cost (V8 inlines them: one official validator call for all pure keys measured the same as six leaf calls). The symbol probe is what strip semantics cost: stock drops own symbol keys, so a pass-through has to prove there are none, and `Object.getOwnPropertySymbols` is the only way to ask. It stays; an opt-in mode for callers whose data is known to be JSON-shaped is a separate API proposal (issue #40).
+Cost of the clean path, measured per object on a 6-key primitive record (Node 24, single-record hot loop, see the calibration scenario of `bench-v4`): the own-symbol probe is about 36 ns of a 65 ns skeleton call, the `for...in` probe about 9 ns; the official parser of the same schema costs 24 ns, its validator 15 ns. The leaf validator calls are not a cost (V8 inlines them: one official validator call for all pure keys measured the same as six leaf calls). The symbol probe is what strip semantics cost: stock drops own symbol keys, so a pass-through has to prove there are none, and `Object.getOwnPropertySymbols` is the only way to ask (`Reflect.ownKeys` allocates every key). It stays on by default. `compile(schema, { ownSymbolKeys: "ignore" })` (#43) drops it: the options are resolved once in `compile`, carried by every `CodeCtx` of the tree (`subFn` creates a child context with its parent's options, so every nested strip object sees the same setting), and the object skeleton then emits the `for...in` string probe alone:
+
+```js
+if (!x0) {
+  let x8 = false;
+  for (const k in input) {
+    if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+  }
+  if (!x8) {
+    return input;                                          // no own-symbol probe: an own symbol key would survive here
+  }
+}
+```
+
+Under the option a clean input that does carry an undeclared own symbol key is returned by reference with the symbol kept, where stock's rebuild drops it: the behavior strict and loose objects already have (#42), now opt-in for strip mode. Everything else is unchanged: declared symbol keys are validated and written, the copy path drops undeclared symbols by construction, `validate()` is the official validator. The differential fuzzer runs a second pass with the option against a generator that emits no extra own symbol (§8). Measured locally on Node 24 (calibration parse, 2 000 000 operations per round): 75 ns per parse with the probe, 32 ns without it, `z.compile()` 24 to 29 ns; `bench-v4` reports the option as a separate, labelled row of the calibration section and keeps the default in the zod-cow-v4 column of every scenario.
 
 ### 3.2 The container's own checks: the two-path timing
 
@@ -507,7 +521,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
 
 ## 8. Correctness evidence
 
-- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (11 groups of behavioral assertions) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (12 groups of behavioral assertions, the last one the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons, rejects an unknown value with `TypeError`) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
@@ -517,6 +531,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
   - outputs identical under `deepStrictEqual` (Map/Set compared as entry sets)
   - zero input distortion (compared against a structuredClone snapshot)
   - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
+  - since #43 the suite runs every case a second time compiled with `ownSymbolKeys: "ignore"` against the same RNG stream minus the extra own symbol (the one input the option treats differently from stock), with the same three checks plus: no generated top-level skeleton carries `getOwnPropertySymbols`, and the pass shares at least as many top-level references as the default pass (at the 20 000-case default: 89.2% default, 89.6% with the option, 0 degradations in both)
 - Known misalignment (deliberately kept): with an async rest slot and a nullable null input, the stock runtime produces
   a sparse array and loses the null (deterministic repro: `z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length", slot 1 becomes a hole).
@@ -563,9 +578,10 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 
 | Module | Section of this doc | Holds |
 |---|---|---|
-| `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator` |
+| `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator`, `CompileOptions`, `resolveOptions` |
 | `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
-| `codectx.ts` | §3 | `CodeCtx`, `escKey`, `buildFn` |
+| `options.ts` | §3.1 | `CompileOptions` (public), the resolved `CowOptions`, `DEFAULT_OPTIONS`, `resolveOptions` (#43) |
+| `codectx.ts` | §3 | `CodeCtx` (carries the resolved options), `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
 | `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync` |

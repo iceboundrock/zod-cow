@@ -16,7 +16,7 @@ export function emitCoWSet(ctx: CodeCtx, schema: Node, accessor: string, seen: S
   ctx.write(`let ${out} = ${accessor}, ${dirty} = false;`);
   ctx.write(`for (const vIn of ${accessor}) {`);
   ctx.indented(() => {
-    const product = childProduct(def.valueType, childSeen);
+    const product = childProduct(def.valueType, childSeen, ctx.options);
     const f = ctx.addConst(product.fn);
     if (product.kind === "validator") {
       ctx.write(`if (${f}(vIn) === INVALID) return INVALID;`);

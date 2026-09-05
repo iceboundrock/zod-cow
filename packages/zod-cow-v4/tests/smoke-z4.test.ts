@@ -355,4 +355,74 @@ import { compile } from "../src/index.js";
   console.log("  loose copy keeps undeclared keys after the shape keys ✓");
 }
 
+/* ── 12. ownSymbolKeys: the opt-in that skips the own-symbol probe of strip-mode objects (#43) ── */
+{
+  console.log("\n── ownSymbolKeys option ──");
+  const S = z.object({ a: z.string(), b: z.number().default(1) });
+  const sym = Symbol("undeclared");
+  const withSymbol = { a: "x", b: 2, [sym]: true };
+
+  // Default and explicit "probe": stock semantics, the undeclared symbol forces a copy that drops it
+  for (const C of [compile(S), compile(S, {}), compile(S, { ownSymbolKeys: "probe" })]) {
+    const out = C.parse(withSymbol);
+    assert.notEqual(out, withSymbol);
+    assert.ok(!(sym in out));
+    assert.ok(C.code!.includes("getOwnPropertySymbols"));
+  }
+  console.log('  default / "probe": undeclared symbol still forces a copy ✓');
+
+  // "ignore": no probe in the generated code; a clean input keeps its own symbol by reference (the
+  // documented divergence from stock, the same one strict and loose objects have, #42)
+  const I = compile(S, { ownSymbolKeys: "ignore" });
+  assert.ok(!I.stock);
+  assert.ok(!I.code!.includes("getOwnPropertySymbols"));
+  assert.equal(I.parse(withSymbol), withSymbol);
+  assert.ok(sym in S.parse(withSymbol) === false, "stock drops the undeclared symbol");
+  console.log('  "ignore": clean input with an own symbol returned by reference ✓');
+
+  // Still strip semantics for string keys, and the copy path still drops the symbol like stock
+  const extraString = { a: "x", b: 2, extra: 1, [sym]: true };
+  const stripped = I.parse(extraString);
+  assert.notEqual(stripped, extraString);
+  assert.deepEqual(stripped, S.parse(extraString));
+  assert.ok(!("extra" in stripped) && !(sym in stripped));
+  const defaulted = { a: "x", [sym]: true };
+  const copied = I.parse(defaulted);
+  assert.notEqual(copied, defaulted);
+  assert.deepEqual(copied, S.parse(defaulted));
+  assert.ok(!(sym in copied));
+  console.log('  "ignore": undeclared string keys and the copy path unchanged ✓');
+
+  // Declared symbol keys are still validated and copied
+  const declared = Symbol("declared");
+  const D = compile(z.object({ a: z.string(), [declared]: z.number() }), {
+    ownSymbolKeys: "ignore",
+  });
+  const dIn = { a: "x", [declared]: 1 };
+  assert.equal(D.parse(dIn), dIn);
+  assert.equal(D.safeParse({ a: "x", [declared]: "no" }).success, false);
+  const dCopy = D.parse({ a: "x", [declared]: 1, extra: 1 });
+  assert.equal((dCopy as Record<symbol, unknown>)[declared], 1);
+  console.log('  "ignore": declared symbol keys still validated and written ✓');
+
+  // The option reaches nested sub-skeletons: a clean nested object with an own symbol is shared
+  const Nested = z.object({
+    inner: z.object({ v: z.string() }),
+    list: z.array(z.object({ w: z.number() })),
+  });
+  const NI = compile(Nested, { ownSymbolKeys: "ignore" });
+  const nIn = { inner: { v: "x", [sym]: 1 }, list: [{ w: 1, [sym]: 2 }] };
+  assert.equal(NI.parse(nIn), nIn);
+  const NP = compile(Nested);
+  const nOut = NP.parse(nIn) as typeof nIn;
+  assert.notEqual(nOut, nIn);
+  assert.notEqual(nOut.inner, nIn.inner);
+  assert.notEqual(nOut.list[0], nIn.list[0]);
+  console.log('  "ignore": propagates into nested object skeletons ✓');
+
+  // An unknown value is a programming error, reported at compile time
+  assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), TypeError);
+  console.log("  unknown value throws TypeError ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

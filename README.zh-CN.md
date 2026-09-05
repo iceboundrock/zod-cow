@@ -199,7 +199,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
-- symbol 键 / getter：strict 或 loose 对象按原引用返回时会保留 stock 重建会丢弃的自有可枚举 symbol 键（strip 模式会探测并拷贝）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
+- symbol 键 / getter：strict 或 loose 对象按原引用返回时会保留 stock 重建会丢弃的自有可枚举 symbol 键（strip 模式会探测并拷贝）；骨架做出的拷贝会像 stock 一样丢弃它们，所以结果取决于对象是否为脏（#42）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
 - 刻意不对齐的 stock quirk：tuple 带 async rest 槽且 nullable 槽输入为 `null` 时，stock zod4 runtime 产生稀疏数组并丢掉 `null`；骨架输出稠密数组。差分生成器规避该组合，复现见上游 issue 草稿。
 
 ## 目录

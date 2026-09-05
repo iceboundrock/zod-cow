@@ -220,6 +220,30 @@ Point-by-point correspondence with the official dump:
 
 Cost of the clean path, measured per object on a 6-key primitive record (Node 24, single-record hot loop, see the calibration scenario of `bench-v4`): the own-symbol probe is about 36 ns of a 65 ns skeleton call, the `for...in` probe about 9 ns; the official parser of the same schema costs 24 ns, its validator 15 ns. The leaf validator calls are not a cost (V8 inlines them: one official validator call for all pure keys measured the same as six leaf calls). The symbol probe is what strip semantics cost: stock drops own symbol keys, so a pass-through has to prove there are none, and `Object.getOwnPropertySymbols` is the only way to ask. It stays; an opt-in mode for callers whose data is known to be JSON-shaped is a separate API proposal (issue #40).
 
+### 3.2 The container's own checks: the two-path timing
+
+When `.refine()` / `.min()` is attached to a container, the stock semantics is "run the checks on the output after the output
+is constructed". zc-z4 compiles the checks into a separate validation subroutine and **calls it on both paths**:
+
+```js
+const cChecks = /* the containerChecksFn product */;
+if (!x0) {
+  /* strip probes */
+  if (!x8) {
+    if (cChecks(input) === INVALID) return INVALID;   // clean: output === input
+    return input;
+  }
+}
+const out = { "id": x1, /* … the captured locals in shape order */ };
+if (cChecks(out) === INVALID) return INVALID;       // dirty: aligned with stock's "run the checks on the output"
+return out;
+```
+
+Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
+`min_length/max_length/length_equals` (`.length` read directly) + map/set's
+`min_size/max_size/size_equals` (`.size` read directly). Everything else (superRefine rewriting
+`ctx.value`, overwrite, a custom `when`) → the whole node degrades to the official parser product.
+
 ## 4. Purity analysis: the whitelist and the three traps
 
 Definition: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.

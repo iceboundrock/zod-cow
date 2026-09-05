@@ -34,7 +34,6 @@ import {
   fail,
   N,
   PublicAccount,
-  type RawAccount,
   sample,
   TupleRow,
   variantOne,
@@ -428,6 +427,3 @@ export async function runFailures(): Promise<ScenarioRun[]> {
 
   return runs;
 }
-
-// The failure datasets derive from the S1 rows; keep the row type visible for readers of this file
-export type { RawAccount };

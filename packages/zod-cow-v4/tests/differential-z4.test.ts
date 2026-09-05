@@ -343,8 +343,9 @@ function bObject(rng: RNG, depth: number): Built {
         if (v !== ABSENT) out[f.key] = v;
       }
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
-      // Extra own symbol, strip mode only: strict does not probe own symbols and loose passes them
-      // through by reference while stock's rebuild drops them (both listed under known limitations)
+      // Extra own symbol, strip mode only: strict and loose do not probe own symbols, so a clean
+      // input keeps its symbol by reference where stock's rebuild drops it (a copy made by the
+      // skeleton drops it like stock); both listed under known limitations
       if (modeRoll >= 2 && r.chance(0.1)) out[EXTRA_SYMBOL] = true;
       return out;
     },

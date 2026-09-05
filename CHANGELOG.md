@@ -76,6 +76,24 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - `bench/bench-z4.ts` S4: the zc-z4 side was compiled from the array schema but called once per account, so `validate()` rejected every input at the type check and the reported time was the cost of the rejections, not of validation (this also affects the S4 rows of the v0.3 and v0.5 tables below, marked there). Both validators now take the whole S1 array, the run asserts that both accept it, and every timed call throws on a rejection. S4 now reads level with the official `assertOnly` validator, which `validate()` wraps (#25).
 - The zod4 record skeleton's declaration-driven path (`z.record(z.enum(...), v)`) compared `for...in` keys against the raw enum values, so a numeric enum (`z.enum({ A: 1, B: 2 })`) rejected every enumerated key inside the skeleton and every parse fell back to stock: correct output, never the input reference. The probe now compares against the stringified declared keys through the same `unknownStringKeyExpr` helper the object skeleton uses (comparison chain up to 16 keys, hoisted `Set` above). Loose enum records (`z.looseRecord(z.enum(...), v)`) took the same fallback on any undeclared key; the skeleton now keeps undeclared keys as stock does, so a clean loose input is returned by reference. The copy path of this branch is assembled from the captured locals like the object skeleton (declaration order, then the undeclared keys in loose mode) instead of spreading the input, so getters are read once and the key order is stock's. The differential fuzzer generates string-enum, numeric-enum and loose enum-key records, with 18-key enums for the `Set` probe (#37).
 
+### Superseded table (run 33992895288)
+
+zod3 line, [Benchmarks workflow run 33992895288](https://github.com/iceboundrock/zod-cow/actions/runs/33992895288): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `BENCH_N=50 000`, the generated skeletons of the zod3 line at 982cf7b, before the second and third review rounds of #63 changed the object copy path, the record / map / set rebuild and the array / tuple hole handling. Replaced in the README by run 33998778811 at the head of #63; the S4 ArkType ratio of this table compared zod-cow-v3's full parse runtime with ArkType's validation-only `allows` and is no longer computed.
+
+| Scenario | stock Zod 3 | zod-cow-v3 | ArkType | stock / zod-cow | ArkType / zod-cow |
+|---|---:|---:|---:|---:|---:|
+| S1 clean-input parse | 254 ms (+75.5 MB / +17.7 MB) | **24 ms (0 / 0)** | 23 ms | 10.75x | 0.99x |
+| S2 10% default | 268 ms | **27 ms** | 819 ms (morph) | 10.12x | 30.89x |
+| S3 0% / 25% / 50% / 100% dirty | 259 / 272 / 271 / 270 ms | **25 / 29 / 33 / 40 ms** | 828 / 833 / 852 / 819 ms | 10.44x to 6.78x | 33.40x to 20.55x |
+| S4 validate (same runtime as parse) | N/A | **27 ms** | 25 ms (`allows`) | n/a | 0.93x |
+| S5 record / map / set, clean / 10% dirty | 200 / 230 ms | **12 / 15 ms** | N/A (instanceof-only) | 16.23x / 15.33x | n/a |
+| S6 tuple, clean / 50% dirty | 129 / 142 ms | **3 / 7 ms** | 2 ms / N/A | 39.39x / 21.05x | 0.69x |
+| S7 sync transform, every row / no-op | 228 / 223 ms | **17 / 10 ms** | 398 / 391 ms | 13.60x / 22.06x | 23.77x / 38.61x |
+| S8 strip-unknown parity | 278 ms | **37 ms (+23.7 MB / +9.5 MB)** | 1 113 ms | 7.52x | 30.14x |
+| S9 per-row parse, 1% / 10% / 50% / 100% invalid | 265 / 273 / 299 / 340 ms | **33 / 37 / 58 / 79 ms** | 36 / 104 / 301 / 474 ms | 8.02x to 4.29x | 1.08x to 5.99x |
+| calibration parse, 6-field record | 2 123 ns | **107 ns** | 80 ns | 19.8x | 0.75x |
+| S9 failure hot loops (first / last / nested / 3 siblings / array / tuple) | 6.5 / 6.5 / 6.3 / 8.1 / 6.4 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.6 / 1.4 / 0.9 µs** | 7.3 / 12.4 / 7.5 / 20.3 / 7.9 / 6.3 µs | 3.1x to 4.9x | 5.2x to 9.4x |
+
 ### Superseded table (run 33940596453)
 
 zod4 line, [Benchmarks workflow run 33940596453](https://github.com/iceboundrock/zod-cow/actions/runs/33940596453): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, the built `zod-cow-v4` package, warmup and timed rounds in complete rotations of the candidate order (4 plus 4 with four candidates), medians. "official JIT" is the internal `compileFn` parser product (the `assertOnly` validator in S4); the engine of that run copied a dirty object with `{ ...input }` plus `delete`, which the S3 100% row shows.

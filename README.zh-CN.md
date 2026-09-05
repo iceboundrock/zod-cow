@@ -165,23 +165,23 @@ zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock
 - validate 快路径：`validate()` 就是同一 array schema 的官方整树 `assertOnly` 产物，所以 S4 按构造与 `z.validate` 持平（18 ms 对 17 ms，0.93x）。它的价值是纯校验成本：18 ms / 50 000 = 每账户 360 ns，gc 后零驻留。
 - S1 的 +3.1 MB 是 strip 模式探测产生的短命分配：每个对象恰好一个空的自有 symbol 数组（32 字节），这里是 10 万个对象，用来证明该对象可以按原引用返回。这个探测（`Object.getOwnPropertySymbols`）也是骨架每个对象的固定开销：本地 Node 24 上对一个 6 字段记录测得骨架调用 65 ns，其中约 36 ns 是它，`for...in` 探测约 9 ns，叶子 validator 调用测不出开销，同一 schema 的编译 parser 是 24 ns。它默认保留，因为 stock 会丢弃自有 symbol 键，透传必须证明没有。数据确定不带 symbol 键的调用方可以用 `compile(schema, { ownSymbolKeys: "ignore" })` 关闭它（#43，见[包 README](packages/zod-cow-v4/README.md#compileoptions)）；基准把它作为 calibration 一节里单独标注的可选行来测量，各场景的 zod-cow-v4 列仍使用默认值。本地 Node 24、每轮 2 000 000 次操作下，calibration parse 带探测为 75 ns，不带为 32 ns，`z.compile()` 为 24 到 29 ns。
 
-zod3 线有自己的套件 `bench-v3`（`pnpm run bench:v3`），方法相同，ArkType 按 zod3 的约束构建。数据来自 [Benchmarks workflow run 33992895288](https://github.com/iceboundrock/zod-cow/actions/runs/33992895288)（同类 runner，node 24，`BENCH_N=50 000`，zod3 线的生成骨架）：
+zod3 线有自己的套件 `bench-v3`（`pnpm run bench:v3`），方法相同，ArkType 按 zod3 的约束构建。数据来自 [Benchmarks workflow run 33998778811](https://github.com/iceboundrock/zod-cow/actions/runs/33998778811)（同类 runner，node 24，`BENCH_N=50 000`，zod3 线的生成骨架，#63 的最终提交）：
 
 | 场景 | stock Zod 3 | zod-cow-v3 | ArkType | stock / zod-cow | ArkType / zod-cow |
 |---|---:|---:|---:|---:|---:|
-| S1 干净输入 parse | 254 ms（+75.5 MB / +17.7 MB） | **24 ms（0 / 0）** | 23 ms | 10.75x | 0.99x |
-| S2 10% 默认值 | 268 ms | **27 ms** | 819 ms（morph） | 10.12x | 30.89x |
-| S3 0% / 25% / 50% / 100% 脏 | 259 / 272 / 271 / 270 ms | **25 / 29 / 33 / 40 ms** | 828 / 833 / 852 / 819 ms | 10.44x～6.78x | 33.40x～20.55x |
-| S4 validate（与 parse 同一运行时） | N/A | **27 ms** | 25 ms（`allows`） | n/a | 0.93x |
-| S5 record / map / set，干净 / 10% 脏 | 200 / 230 ms | **12 / 15 ms** | N/A（仅 instanceof） | 16.23x / 15.33x | n/a |
-| S6 tuple，干净 / 50% 脏 | 129 / 142 ms | **3 / 7 ms** | 2 ms / N/A | 39.39x / 21.05x | 0.69x |
-| S7 同步 transform，每行都变 / 空操作 | 228 / 223 ms | **17 / 10 ms** | 398 / 391 ms | 13.60x / 22.06x | 23.77x / 38.61x |
-| S8 strip 未声明键 | 278 ms | **37 ms（+23.7 MB / +9.5 MB）** | 1 113 ms | 7.52x | 30.14x |
-| S9 逐行 parse，1% / 10% / 50% / 100% 无效 | 265 / 273 / 299 / 340 ms | **33 / 37 / 58 / 79 ms** | 36 / 104 / 301 / 474 ms | 8.02x～4.29x | 1.08x～5.99x |
-| 校准 parse，6 字段记录 | 2 123 ns | **107 ns** | 80 ns | 19.8x | 0.75x |
-| S9 失败热循环（首键 / 末键 / 嵌套 / 三个兄弟 / 数组 / tuple） | 6.5 / 6.5 / 6.3 / 8.1 / 6.4 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.6 / 1.4 / 0.9 µs** | 7.3 / 12.4 / 7.5 / 20.3 / 7.9 / 6.3 µs | 3.1x～4.9x | 5.2x～9.4x |
+| S1 干净输入 parse | 249 ms（+75.4 MB / +17.7 MB） | **27 ms（0 / 0）** | 23 ms | 9.40x | 0.87x |
+| S2 10% 默认值 | 262 ms | **28 ms** | 801 ms（morph） | 9.23x | 28.19x |
+| S3 0% / 25% / 50% / 100% 脏 | 260 / 259 / 264 / 273 ms | **27 / 28 / 28 / 30 ms** | 791 / 808 / 802 / 782 ms | 9.72x～9.09x | 29.59x～26.09x |
+| S4 validate（与 parse 同一运行时） | N/A | **28 ms** | 24 ms（`allows`，非等价参照） | n/a | n/a |
+| S5 record / map / set，干净 / 10% 脏 | 193 / 219 ms | **13 / 16 ms** | N/A（仅 instanceof） | 14.62x / 13.41x | n/a |
+| S6 tuple，干净 / 50% 脏 | 124 / 132 ms | **5 / 8 ms** | 2 ms / N/A | 23.03x / 16.41x | 0.42x |
+| S7 同步 transform，每行都变 / 空操作 | 216 / 222 ms | **17 / 16 ms** | 373 / 381 ms | 12.51x / 13.94x | 21.54x / 23.90x |
+| S8 strip 未声明键 | 266 ms | **36 ms（+16.0 MB / +8.8 MB）** | 1 080 ms | 7.28x | 29.59x |
+| S9 逐行 parse，1% / 10% / 50% / 100% 无效 | 253 / 266 / 304 / 330 ms | **33 / 37 / 56 / 78 ms** | 35 / 101 / 291 / 454 ms | 7.64x～4.23x | 1.05x～5.81x |
+| 校准 parse，6 字段记录 | 2 049 ns | **127 ns** | 80 ns | 16.2x | 0.63x |
+| S9 失败热循环（首键 / 末键 / 嵌套 / 三个兄弟 / 数组 / tuple） | 6.4 / 6.4 / 6.2 / 7.9 / 6.2 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.5 / 1.4 / 0.9 µs** | 7.0 / 12.1 / 7.5 / 19.8 / 7.6 / 6.1 µs | 3.1x～4.9x | 5.0x～9.4x |
 
-怎么读：zod3 线在干净 parse 上与 ArkType 持平（S1 0.99x，在这个规模下属 runner 噪声；S4 把同一个 parse 运行时放在 ArkType 仅做校验的 `allows` 旁边，读作 0.93x，每行做的工作量并不相同），叶子与 tuple 扫描也持平；深嵌套与长数组落后（该次运行的规模扫描：嵌套深度 5 为 195 ns 对 79 ns，100 元素数组 643 ns 对 170 ns，每个嵌套骨架和每个元素各一次单态调用）；凡 ArkType 的 morph 重建整棵树之处（S2、S3、S7、S8）则大幅领先。失败路径携带 stock 的 issue 列表（该次运行的一致性小节：16 / 16 个 fixture 顺序与每个属性完全一致；未声明的差异会中止运行），成本为 stock 的五分之一。本轮之前 zod3 线在 S1 上对 stock 为 3.2x～3.7x（本地 50 万行：572 ms 对 2 101 ms），失败热循环慢于 stock；50 万行的前后对照表见 [CHANGELOG](CHANGELOG.md#unreleased)。run 33940596453 与 33837195401 的被取代表格和更早的本地 50 万记录表格（含 v0.5 的 zod4 表、已移除的 v0.2 前端与 v0.3 的表）见 [CHANGELOG](CHANGELOG.md)。
+怎么读：zod3 线在干净 parse 上接近 ArkType（S1 0.87x，27 ms 对 23 ms；同一套件的上一次运行读作 0.99x、24 ms，两次运行之间规模扫描里每个对象行都慢了约 25 ns/对象而叶子、tuple 与 ArkType 行不变，本地对两个提交做 A/B 复现不出这个差异，所以属这个规模下的 runner 波动；S4 把同一个 parse 运行时放在 ArkType 仅做校验的 `allows` 旁边作为非等价参照，28 ms 对 24 ms，不出比值），叶子与 tuple 扫描持平；深嵌套与长数组落后（该次运行的规模扫描：嵌套深度 5 为 305 ns 对 79 ns，100 元素数组 380 ns 对 168 ns，每个嵌套骨架和每个元素各一次单态调用）；凡 ArkType 的 morph 重建整棵树之处（S2、S3、S7、S8）则大幅领先。失败路径携带 stock 的 issue 列表（该次运行的一致性小节：16 / 16 个 fixture 顺序与每个属性完全一致；未声明的差异会中止运行），成本为 stock 的五分之一。本轮之前 zod3 线在 S1 上对 stock 为 3.2x～3.7x（本地 50 万行：572 ms 对 2 101 ms），失败热循环慢于 stock；50 万行的前后对照表见 [CHANGELOG](CHANGELOG.md#unreleased)。run 33992895288、33940596453 与 33837195401 的被取代表格和更早的本地 50 万记录表格（含 v0.5 的 zod4 表、已移除的 v0.2 前端与 v0.3 的表）见 [CHANGELOG](CHANGELOG.md)。
 
 ### 跨库对比
 

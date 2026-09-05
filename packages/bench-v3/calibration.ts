@@ -267,20 +267,22 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
     42.5,
   );
 
-  // object width: N string keys
+  // object width: N string keys. The inputs go through JSON.parse so they are fast-mode objects
+  // like a parsed payload: an object that gains more than a dozen properties one by one falls
+  // into V8's dictionary mode, which costs every implementation several times more per key and
+  // would measure the fixture, not the validators (checked with %HasFastProperties).
   for (const width of [1, 5, 10, 20, 50]) {
     const shape: Record<string, z.ZodString> = {};
     const arkShape: Record<string, "string"> = {};
-    const input: Record<string, string> = {};
+    const built: Record<string, unknown> = {};
     for (let i = 0; i < width; i++) {
       shape[`k${i}`] = z.string();
       arkShape[`k${i}`] = "string";
-      input[`k${i}`] = `v${i}`;
+      built[`k${i}`] = `v${i}`;
     }
-    await sweep(`object width ${width} keys`, z.object(shape), type(arkShape), input, {
-      ...input,
-      k0: 1,
-    });
+    const input = JSON.parse(JSON.stringify(built));
+    const invalid = JSON.parse(JSON.stringify({ ...built, k0: 1 }));
+    await sweep(`object width ${width} keys`, z.object(shape), type(arkShape), input, invalid);
   }
 
   // nesting depth: { v: string, child: { v, child: ... } }

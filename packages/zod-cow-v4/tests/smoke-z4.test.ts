@@ -532,6 +532,93 @@ import { compile } from "../src/index.js";
     delete proto.ownSymbolKeys;
   }
   console.log("  ownSymbolKeys inherited from Object.prototype is ignored ✓");
+
+  // The same holds for a rejected *value*: its description never runs the value's own code
+  // (no `JSON.stringify`, which would call a `toJSON` or a Proxy `get` trap), and every kind of
+  // value has a description of its own instead of JSON's throw or "undefined"
+  const throwingToJSON = {
+    toJSON() {
+      throw new Error("toJSON ran");
+    },
+  };
+  assert.throws(() => compile(S, { ownSymbolKeys: throwingToJSON as never }), {
+    name: "TypeError",
+    message: /got a plain object$/,
+  });
+  const throwingGet = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("get trap ran");
+      },
+    },
+  );
+  assert.throws(() => compile(S, { ownSymbolKeys: throwingGet as never }), TypeError);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  assert.throws(() => compile(S, { ownSymbolKeys: circular as never }), {
+    name: "TypeError",
+    message: /got a plain object$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: 1n as never }), {
+    name: "TypeError",
+    message: /got 1n$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: Symbol("s") as never }), {
+    name: "TypeError",
+    message: /got a symbol$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: (() => "probe") as never }), {
+    name: "TypeError",
+    message: /got a function$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: new Date() as never }), {
+    name: "TypeError",
+    message: /got an instance of Date$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), {
+    name: "TypeError",
+    message: /got "drop"$/,
+  });
+  console.log("  a rejected value is described without running its code ✓");
+
+  // Reading the option off a Proxy options object runs its traps (that read is the caller's own
+  // object doing what it was built to do); a trap that throws still surfaces as the promised
+  // TypeError, with the trap's error as `cause`, and a Proxy that behaves is an ordinary options object
+  const proxied = new Proxy({ ownSymbolKeys: "ignore" as const }, {});
+  assert.ok(!compile(S, proxied).code!.includes("getOwnPropertySymbols"));
+  const throwingDescriptorTrap = new Proxy(
+    {},
+    {
+      getOwnPropertyDescriptor() {
+        throw new Error("getOwnPropertyDescriptor trap ran");
+      },
+    },
+  );
+  assert.throws(
+    () => compile(S, throwingDescriptorTrap),
+    (e: unknown) =>
+      e instanceof TypeError && (e.cause as Error).message === "getOwnPropertyDescriptor trap ran",
+  );
+  const throwingGetTrap = new Proxy(
+    { ownSymbolKeys: "ignore" as const },
+    {
+      get() {
+        throw new Error("get trap ran");
+      },
+    },
+  );
+  assert.throws(
+    () => compile(S, throwingGetTrap),
+    (e: unknown) => e instanceof TypeError && (e.cause as Error).message === "get trap ran",
+  );
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  assert.throws(() => compile(S, revocable.proxy), {
+    name: "TypeError",
+    message: /got a revoked Proxy$/,
+  });
+  console.log("  a Proxy options object whose trap throws still gives TypeError ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

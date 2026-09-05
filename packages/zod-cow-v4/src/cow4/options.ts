@@ -35,19 +35,35 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
   if (!isPlainObject(options)) {
     throw new TypeError(`compile options must be a plain object, got ${describe(options)}`);
   }
-  // Only an own property counts: a value inherited from `Object.prototype` (prototype pollution)
-  // must not turn `compile(schema, {})` into something other than `compile(schema)`. An own
-  // `undefined` is an absent property; anything else, `null` included, is checked as a value
-  const ownSymbolKeys =
-    Object.hasOwn(options, "ownSymbolKeys") && options.ownSymbolKeys !== undefined
-      ? options.ownSymbolKeys
-      : DEFAULT_OPTIONS.ownSymbolKeys;
-  if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys)) {
+  // An absent property (undefined) is the default; anything else, `null` included, is a value
+  const read = readOption(options, "ownSymbolKeys");
+  const ownSymbolKeys = read === undefined ? DEFAULT_OPTIONS.ownSymbolKeys : read;
+  if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys as CowOptions["ownSymbolKeys"])) {
     throw new TypeError(
-      `compile option ownSymbolKeys must be one of ${OWN_SYMBOL_KEYS.map((v) => JSON.stringify(v)).join(", ")}, got ${JSON.stringify(ownSymbolKeys)}`,
+      `compile option ownSymbolKeys must be one of ${OWN_SYMBOL_KEYS.map((v) => JSON.stringify(v)).join(", ")}, got ${describe(ownSymbolKeys)}`,
     );
   }
-  return ownSymbolKeys === DEFAULT_OPTIONS.ownSymbolKeys ? DEFAULT_OPTIONS : { ownSymbolKeys };
+  return ownSymbolKeys === DEFAULT_OPTIONS.ownSymbolKeys
+    ? DEFAULT_OPTIONS
+    : { ownSymbolKeys: ownSymbolKeys as CowOptions["ownSymbolKeys"] };
+}
+
+/**
+ * The value of one option, `undefined` when absent. Only an own property counts: a value inherited
+ * from `Object.prototype` (prototype pollution) must not turn `compile(schema, {})` into something
+ * other than `compile(schema)`. An own `undefined` is an absent property; anything else, `null`
+ * included, is returned for the value check. The read runs the options object's own code (an
+ * accessor, a Proxy trap): a throw there is reported as the promised `TypeError`, with the caller's
+ * error as its `cause`
+ */
+function readOption(options: object, key: keyof CompileOptions): unknown {
+  try {
+    return Object.hasOwn(options, key) ? (options as Record<string, unknown>)[key] : undefined;
+  } catch (cause) {
+    throw new TypeError(`compile option ${key} could not be read from the options object`, {
+      cause,
+    });
+  }
 }
 
 /** A plain object: `Object.prototype` or a null prototype; any other prototype is rejected rather than searched */
@@ -69,12 +85,40 @@ function prototypeOf(value: object): object | null | undefined {
   }
 }
 
-/** Formats the rejected options argument for the `TypeError` message */
+/**
+ * Formats a rejected options argument or option value for the `TypeError` message without running
+ * the value's own code: no `JSON.stringify` (a `toJSON` method or a Proxy `get` trap would run,
+ * and a bigint or a cycle would make JSON throw its own error), no `toString`, no `valueOf`
+ */
 function describe(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "an array";
-  if (typeof value !== "object") return typeof value;
-  const name = constructorName(value);
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value); // a primitive string has no toJSON to call
+    case "number":
+    case "boolean":
+    case "undefined":
+      return String(value);
+    case "bigint":
+      return `${value}n`;
+    case "symbol":
+      return "a symbol";
+    case "function":
+      return "a function";
+    default:
+      return value === null ? "null" : describeObject(value as object);
+  }
+}
+
+function describeObject(value: object): string {
+  try {
+    if (Array.isArray(value)) return "an array";
+  } catch {
+    return "a revoked Proxy"; // the one way `Array.isArray` throws
+  }
+  const proto = prototypeOf(value);
+  if (proto === null) return "a null-prototype object";
+  if (proto === Object.prototype) return "a plain object";
+  const name = constructorName(proto);
   return name === undefined
     ? "an object whose prototype is neither Object.prototype nor null"
     : `an instance of ${name}`;
@@ -87,9 +131,8 @@ function describe(value: unknown): string {
  * promised `TypeError`) inside the formatting of an error message. Anything unusual (an accessor,
  * an inherited `constructor`, a Proxy trap) gives up the name and falls back to the generic text
  */
-function constructorName(value: object): string | undefined {
-  const proto = prototypeOf(value);
-  if (proto === null || proto === undefined) return undefined;
+function constructorName(proto: object | undefined): string | undefined {
+  if (proto === undefined) return undefined;
   const ctor = ownDataProperty(proto, "constructor");
   if (typeof ctor !== "function") return undefined;
   const name = ownDataProperty(ctor, "name");

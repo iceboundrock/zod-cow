@@ -422,7 +422,9 @@ import { compile } from "../src/index.js";
 
   // An unknown value is a programming error, reported at compile time
   assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), TypeError);
-  console.log("  unknown value throws TypeError ✓");
+  assert.throws(() => compile(S, [] as never), TypeError);
+  assert.throws(() => compile(S, null as never), TypeError);
+  console.log("  unknown value, array or null options throw TypeError ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

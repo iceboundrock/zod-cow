@@ -208,16 +208,33 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
       output: (i) => Z4Lax.parse(i),
     },
   ];
+  const withSymbolKey = { ...rec, [symbolKey]: 1 };
   await gate('calibration parse, ownSymbolKeys "ignore"', laxImpls, [
     ...fixtures,
     {
       name: "valid record with an own symbol key",
-      input: { ...rec, [symbolKey]: 1 },
+      input: withSymbolKey,
       accept: true,
       outputDiffers:
         'zod strips the undeclared own symbol key into a copy; ownSymbolKeys: "ignore" returns the input by reference with the symbol kept (the documented divergence of the option)',
     },
   ]);
+  // The declared divergence, stated and asserted per implementation (an `outputDiffers` fixture
+  // skips the output comparison, so the shape of the difference is pinned here, as S8 does):
+  // every zod parser strips the symbol, the opt-in alone keeps it, and it does so by reference.
+  {
+    const has = (o: unknown) => Object.getOwnPropertySymbols(o as object).length > 0;
+    const outputs = laxImpls.map((i) => [i, i.output!(withSymbolKey)] as const);
+    console.log(
+      `  calibration own symbol key → ${outputs.map(([i, o]) => `${i.label}: ${has(o) ? "kept" : "stripped"}`).join(" · ")}`,
+    );
+    for (const [i, o] of outputs) {
+      if (i.column === "zc")
+        assert.equal(o, withSymbolKey, `${i.label} must return the input by reference`);
+      else assert.ok(!has(o), `${i.label} must strip the undeclared symbol key`);
+    }
+    assert.ok(has(withSymbolKey), "the symbol-key fixture was mutated");
+  }
   const laxRun = await runScenario(
     'calibration parse, ownSymbolKeys "ignore" (opt-in)',
     `the same record parsed ${K.toLocaleString()} times per round by zod-cow-v4 compiled with the opt-in that skips the own-symbol probe`,

@@ -31,8 +31,10 @@ const OWN_SYMBOL_KEYS = ["probe", "ignore"] as const;
 /** Fills in the defaults; an unknown value is a programming error and throws (compile-time, not at parse time) */
 export function resolveOptions(options: CompileOptions | undefined): CowOptions {
   if (options === undefined) return DEFAULT_OPTIONS;
-  if (typeof options !== "object" || options === null) {
-    throw new TypeError(`compile options must be an object, got ${typeof options}`);
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw new TypeError(
+      `compile options must be a plain object, got ${options === null ? "null" : Array.isArray(options) ? "an array" : typeof options}`,
+    );
   }
   const ownSymbolKeys = options.ownSymbolKeys ?? DEFAULT_OPTIONS.ownSymbolKeys;
   if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys)) {

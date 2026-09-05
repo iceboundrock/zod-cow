@@ -38,7 +38,7 @@ import type { CowOptions } from "./options.js";
 import type { Fn, Node } from "./product.js";
 
 export { officialValidator } from "./official.js";
-export { type CompileOptions, type CowOptions, resolveOptions } from "./options.js";
+export { type CompileOptions, resolveOptions } from "./options.js";
 export { type Fn, isAsyncProduct, ZC_ASYNC } from "./product.js";
 
 /* ═══════════════════ Top-level compilation ═══════════════════ */

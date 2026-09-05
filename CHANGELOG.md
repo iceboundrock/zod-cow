@@ -16,7 +16,7 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 - The zod4 engine was split from one file into cohesive modules under `src/cow4/` (product contract, code context, copied predicates, purity analysis, official-product wrappers, codegen core, one skeleton module per container). Section 11 of `docs/ARCHITECTURE-z4.md` maps modules to document sections (#5, #20).
 - Package management moved to pnpm 11 with a Node.js >= 22.13.0 floor (#11).
 - All code comments and test/bench output strings were translated to English (#6, #21, #22, #23, #24). The README, the architecture document and this changelog followed in #7; the Chinese README is `README.zh-CN.md` and the Chinese architecture text is kept as a frozen snapshot in `docs/ARCHITECTURE-z4.zh-CN.md`.
-- The benchmark tables in both READMEs and `docs/ARCHITECTURE-z4.md` §7 quote [Benchmarks workflow run 33940596453](https://github.com/iceboundrock/zod-cow/actions/runs/33940596453) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, the built package, medians over complete rotations of the candidate order), with an ArkType column in every scenario. They previously quoted [run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (same runner and record count, measured from source before the package split, one ArkType reference line on a weaker schema); that table is kept at the end of this section. The superseded v0.5 local table is kept below under 0.5.0.
+- The benchmark tables in both READMEs and `docs/ARCHITECTURE-z4.md` §7 quote [Benchmarks workflow run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973) (GitHub-hosted `ubuntu-latest` runner, node 24, `BENCH_N=50 000`, the built package, medians over complete rotations of the candidate order), with the public `z.compile()` column, an ArkType column in every scenario and the S8 / calibration / S9 / S10 rows (#40). They previously quoted [run 33940596453](https://github.com/iceboundrock/zod-cow/actions/runs/33940596453) (same configuration, the internal `compileFn` product as the compiled column, S1 to S7 only), kept below under "Superseded table (run 33940596453)", and before that [run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401) (same runner and record count, measured from source before the package split, one ArkType reference line on a weaker schema); that table is kept at the end of this section. The superseded v0.5 local table is kept below under 0.5.0.
 - The zod4 object skeleton specializes unknown-string-key probes at compile time: shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) string keys emit direct comparisons instead of a `Set.has()` call per enumerated property, while larger shapes retain the constant-time `Set` path. The known-key `Set` is hoisted only when a large shape or a declared symbol key references it, the strip probe reads the own-symbol array once and the dirty deletion path reuses that array and the same comparisons. The differential fuzzer now also generates 17- to 20-key shapes, declared symbol keys and extra own symbols, and snapshots inputs with a symbol-preserving copy for its mutation check. The allocation notes in both READMEs and the architecture document attribute S1's short-lived allocation to the probe's one empty symbol array per object, not to the leaf products (#33).
 
 ### Added
@@ -35,6 +35,28 @@ The v0.1 to v0.5 history below was developed as a local worklog and imported int
 ### Fixed
 
 - `bench/bench-z4.ts` S4: the zc-z4 side was compiled from the array schema but called once per account, so `validate()` rejected every input at the type check and the reported time was the cost of the rejections, not of validation (this also affects the S4 rows of the v0.3 and v0.5 tables below, marked there). Both validators now take the whole S1 array, the run asserts that both accept it, and every timed call throws on a rejection. S4 now reads level with the official `assertOnly` validator, which `validate()` wraps (#25).
+
+### Superseded table (run 33940596453)
+
+zod4 line, [Benchmarks workflow run 33940596453](https://github.com/iceboundrock/zod-cow/actions/runs/33940596453): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, the built `zod-cow-v4` package, warmup and timed rounds in complete rotations of the candidate order (4 plus 4 with four candidates), medians. "official JIT" is the internal `compileFn` parser product (the `assertOnly` validator in S4); the engine of that run copied a dirty object with `{ ...input }` plus `delete`, which the S3 100% row shows.
+
+| Scenario | stock zod4 | official JIT | **zod-cow-v4** | ArkType |
+|---|---|---|---|---|
+| S1 pure validation parse | 55 ms | 20 ms | **22 ms** | 22 ms |
+| S1 allocation pressure / retained after GC | +20.9 MB / +12.3 MB | +11.0 MB / +10.8 MB | **+3.1 MB / 0.0 MB** | +5.4 MB / 0.0 MB |
+| S2 10% default injection | 57 ms | 24 ms | **26 ms** | 729 ms |
+| S2 allocation pressure / retained | +19.9 MB / +11.7 MB | +18.2 MB / +11.6 MB | **+4.4 MB / +1.0 MB** | +91.3 MB / +11.6 MB |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 55 / 58 / 57 / 55 ms | 24 / 24 / 29 / 25 ms | **24 / 28 / 31 / 36 ms** | 723 / 715 / 724 / 704 ms |
+| S3 retained after GC | +11.6 to +12.3 MB | +11.6 MB constant | **0.0 / 1.8 / 3.2 / 6.1 MB** | +11.6 MB constant |
+| S4 validation only | N/A | 18 ms (`assertOnly` validator) | **18 ms** (`validate()`) | 23 ms (`.allows()`) |
+| S5 record / map / set | 74 ms | 44 ms | **25 ms** | N/A (`Map` / `Set` are instanceof-only) |
+| S5 allocation pressure / retained | +53.7 MB / +21.7 MB | +61.3 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | N/A |
+| S6 tuple | 33 ms | 14 ms | **4 ms** | 2 ms |
+| S6 allocation pressure / retained | +54.5 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | +0.0 MB / 0.0 MB |
+| S7 async transform (5 000 rows) | 10 ms (safeParseAsync) | N/A (compileFn refuses async) | **6 ms (safeParseAsync)** | N/A (no native async morph) |
+| S7 allocation pressure | +12.8 MB | N/A | **+9.5 MB** | N/A |
+
+Ratios against zod-cow-v4: stock 2.50x (S1), 2.15x (S2), 2.30x / 2.08x / 1.84x / 1.56x (S3), 2.99x (S5), 7.90x (S6), 1.83x (S7); official JIT 0.90x (S1), 0.91x (S2), 1.00x / 0.88x / 0.94x / 0.70x (S3), 0.99x (S4), 1.77x (S5), 3.34x (S6); ArkType 1.00x (S1), 27.51x (S2), 30.27x / 25.81x / 23.51x / 19.81x (S3), 1.26x (S4), 0.43x (S6).
 
 ### Superseded table (run 33837195401)
 

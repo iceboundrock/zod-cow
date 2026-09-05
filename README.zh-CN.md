@@ -14,15 +14,15 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 - 不 fork zod、不改 Zod API：zod schema 原样消费（读取 `.def` 树），类型推断继续用 `z.infer`
 - 编译期一次性解析 shape / keys / checks，生成特化校验代码
-- 本层自身绝不改动输入：不在输入上原地删除或改写任何东西。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。唯一能落到输入上的原地写入是 `readonly` 的 `Object.freeze`：zod4 线只在 stock zod 4 自己也会冻结输入的位置冻结，即 `any` / `unknown` 这类透传叶子（见[何时被迫拷贝](#何时被迫拷贝)与 #28）；zod3 线则在每个 `readonly` 节点上原地冻结（#27）
-- 失败路径不自带 issue 数据：编译产物返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`
+- 本层自身绝不改动输入：不在输入上原地删除或改写任何东西。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。唯一能落到输入上的原地写入是 `readonly` 的 `Object.freeze`，两条线都只在 stock 自己也会冻结输入的位置冻结，即 `any` / `unknown` 这类透传叶子（stock 直接返回输入；见[何时被迫拷贝](#何时被迫拷贝)，zod4 线见 #28，zod3 线见 #27）；作用于容器时被冻结的是副本
+- zod4 线的失败路径不自带 issue 数据：编译产物返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。zod3 线在遍历时自行构造 `ZcError`，消息经由 zod 自己的 error map 生成，issue 列表（code、path、message、params）与 stock 一致，由其差分模糊验证
 
 ## 两条编译线
 
 | 线 | 入口 | 引擎 | 状态 |
 |---|---|---|---|
 | zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | 主线：发布的包，新特性都在这里 |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | 持续维护：CoW 思路的起点和对比基线，保持测试通过并继续优化；不发布 |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` + `codegen.ts` | 自研编译器：叶子与包装节点是闭包树，object / array / tuple 骨架按 schema 生成（`new Function`，叶子检查内联为谓词），`new Function` 不可用时回退到闭包骨架；string 格式正则逐字拷贝自 zod 3.24.1 | 持续维护：CoW 思路的起点和对比基线，保持测试通过并继续优化；不发布 |
 
 两条线各自是一个 workspace 包，各装各的 zod：`packages/zod-cow-v4`（以 [`zod-cow-v4`](packages/zod-cow-v4/README.md) 发布）对 zod 4.5.4，`packages/zod-cow-v3`（私有）对 zod 3.24.1；两者都用真实的 `zod` 说明符引入。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
 
@@ -34,10 +34,10 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 pnpm install
 pnpm run build       # 构建 zod-cow-v4（ESM + 类型声明，输出到 packages/zod-cow-v4/dist）
 pnpm run test:v4     # zod4 线：版本金丝 + 冒烟测试 + 20000 case 差分模糊（对比 stock zod4）
-pnpm run test:v3     # zod3 线：27 个单元测试 + 20000 case 差分模糊（对比 stock zod3）
+pnpm run test:v3     # zod3 线：38 个单元测试 + 20000 case 差分模糊（对比 stock zod3，含 issue 列表），生成骨架与闭包骨架各跑一遍
 pnpm run smoke:pack  # 打包 zod-cow-v4，并在临时消费者项目中验证 tarball
 pnpm run bench:v4    # zod4 基准，对构建产物测量，50 万条记录（需 node --expose-gc，脚本已配置）
-pnpm run bench:v3    # zod3 基准
+pnpm run bench:v3    # zod3 基准：S1～S9、单记录校准与规模扫描，ArkType 为一列
 pnpm run probe:v4    # 勘察 stock zod4 的 def 结构与行为
 pnpm run probe:v3    # 实测 stock zod3 的边界语义（zod3 线）
 pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的承诺
@@ -75,7 +75,7 @@ zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `ben
 | 特性 | 何时拷贝 |
 |---|---|
 | string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / any / unknown | 永不 |
-| readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线在每个 `readonly` 节点上原地冻结输入并返回原引用（#27） |
+| readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线通过对内层 schema 的静态分析得到同样的结果：stock zod3 会重建的地方（容器、`date`、transform）冻结副本，只有 `any` / `unknown` 之上原地冻结输入（#27） |
 | object / array / tuple / record / map / set | 所有子值未变则永不：返回输入原引用 |
 | union / discriminatedUnion | 所有分支都是叶子（或 optional / nullable 包裹的叶子）且命中分支返回其输入则永不。带容器分支（object / array / tuple / record / map / set，含 optional / nullable 包裹）的 union 整体交给官方 parser，命中的容器按 stock 的方式重建，因此总会拷贝；保留 CoW 路径的 union 骨架是后续工作（#47） |
 | default | 仅当 `undefined` 实际被替换 |
@@ -87,9 +87,9 @@ zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `ben
 
 由此约束每一处改动：
 
-- 绝不修改输入。strip 绝不能在输入对象上 `delete`。唯一的原地写入是 `readonly` 的 `Object.freeze`：zod4 线对容器冻结副本，对透传叶子则与 stock 一样原地冻结（#28）；zod3 线在每个 `readonly` 节点上原地冻结输入（#27）。
+- 绝不修改输入。strip 绝不能在输入对象上 `delete`。唯一的原地写入是 `readonly` 的 `Object.freeze`：两条线都对容器冻结副本，对透传叶子则与 stock 一样原地冻结（zod4 线见 #28，zod3 线见 #27）。
 - 输出可能与输入别名，所以 refine 不得修改值。
-- 失败路径只返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。
+- zod4 线的失败路径只返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`。zod3 线自己保留 stock 的两种失败：类型不符即 abort（哨兵），检查失败即 dirty（记录 issue 后值继续向上传，后续检查、祖先 refine 与 union 的行为与 stock 一致）。
 
 ## zod4 线如何与 stock 保持一致
 
@@ -103,7 +103,7 @@ zod4 线不重新实现 zod 的语义。zod4（>= 4.1）自带 JIT 编译器（`
 
 本层依赖 `zod/v4/core`（一个公开的 permalink 子路径，但其中的编译器导出 `compileFn`、`assertOnly`、`INVALID` 和产物协议不受支持）和几处手工照抄的谓词，锚定 zod 4.5.4，即包的 peer 范围下界：`packages/zod-cow-v4/tests/canary-z4.test.ts` 断言编译器所假设的 stock 行为，升级时测试先红而不是静默漂移。[docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) 是请求 zod 上游把这一面公开的 issue 草稿。
 
-zod3 线则靠探针对齐（`packages/zod-cow-v3/src/probe.ts` 在运行时实测 stock zod3 的边界语义）：缺席 optional 键不物化、present-undefined 键保留、默认值要过内层校验、失败后继续收集兄弟字段的 issue、`readonly` 浅冻结。
+zod3 线则靠探针对齐（`packages/zod-cow-v3/src/probe.ts` 在运行时实测 stock zod3 的边界语义）：缺席 optional 键不物化、present-undefined 键保留、默认值要过内层校验、失败后继续收集兄弟字段的 issue、`readonly` 浅冻结。它的 issue 消息来自 zod 自己的 error map（`defaultErrorMap`、`z.setErrorMap` 覆盖与 schema 的创建参数 map），所以 `required_error` / `invalid_type_error` / 自定义消息与 stock 一致。它的 object、array、tuple 骨架按 schema 生成（`packages/zod-cow-v3/src/codegen.ts`）：具名属性读取、每个子节点一个单态调用点、叶子检查内联为谓词（仅在谓词失败时才把值交给叶子闭包）、未声明键探针先把每个枚举到的键与该位置期望的 shape 键比较再查键集合，且没有 refine / transform 的子树在成功路径上不做任何 path 记录（容器把自己的键拼接到子节点留下的 issue 上）。`compile.ts` 里的闭包骨架实现同一算法，在 `new Function` 不可用时使用。
 
 完整设计（生成代码与官方产物并排 dump）见 [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md)。
 
@@ -187,7 +187,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union（普通 union 取 2 到 3 个随机分支，因此会出现带未声明键的 object 分支；另有两个 object 分支的 discriminatedUnion；生成器自 #47 起才生成 union，此前尽管列表如此写，却从未生成过），套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（加入 union 生成器与 #47 的 union 规则后，默认规模下成功 case 中分别为 85.6% 与 86.2%；此前为 88.8% 与 89.4%，#43）。
 - 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式与 record 三路径下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
-- zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`），顶层引用共享率约 92%。
+- zod3 线有 38 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`）：随机的 object / array / tuple / record / map / set / union / discriminatedUnion schema，配 optional / nullable / default / catch / readonly / refine / transform 包装、创建参数 error map 以及 string 的 `length` / `includes` / `startsWith` 检查，对比 stock zod3 的成败一致性、`deepStrictEqual` 输出、零输入改动（structuredClone 快照）、输入与输出的冻结状态，并在每个失败 case 上比较完整的 issue 列表（数量、code、path、message 以及双方都携带的 params，含 union 的嵌套错误）。它跑两遍：生成骨架与闭包回退（`--no-codegen`）。成功 case 的顶层引用共享率在这个生成器下约 88%（在之前较小的生成器下为 92.1%，与本轮工作之前相同）。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
 
 ## 已知限制（原型范围）
@@ -198,7 +198,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。zod4 对象骨架做出的拷贝按 shape 序排列，与 stock 一致。
 - 不支持，明确失败而非静默漂移：
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
-  - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
+  - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`。编译期抛 `ZcNotSupportedError`；async refine / transform / preprocess（回调返回 thenable）在 parse 时抛出。
 - 带容器分支的 union 总会拷贝：分支全为叶子的 union 按原引用返回输入，但只要有一个 object / array / tuple / record / map / set 分支（含 optional / nullable 包裹），整个 union 就交给官方 parser，因为分支拿不到自己的骨架，而官方 validator 会保留 stock 会剥掉的未声明键（#47）。stock 的 parser 会重建命中的容器，所以该 union 的值以及到根的路径每次 parse 都会拷贝。按顺序尝试各分支 CoW 产物的 union 骨架能恢复共享，是后续工作。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
 - symbol 键 / getter：stock 的重建在每条路径上都会丢弃未声明的自有 symbol 键（无论其是否可枚举），对象的所有模式与 record 皆然。默认情况下骨架先证明没有这样的键再按原引用返回输入，否则拷贝：对象骨架在所有模式下探测（strip 自 #33 起，strict 与 loose 自 #42 起），enum 键的 record 以同样方式探测，遍历键的 record 像 stock 一样把可枚举的 symbol 键当作键来校验，并在其键循环里把不可枚举的 symbol 键判脏（#51）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过这些探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于容器是否为脏（#43）。zod4 对象骨架与 enum 键 record 骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、遍历键的 record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
@@ -224,15 +224,16 @@ packages/zod-cow-v4/        以 zod-cow-v4 发布（主线）；peer zod >=4.5.4
   scripts/pack-smoke.ts     tarball 冒烟（文件清单、manifest、import、require、消费者 typecheck）
 packages/zod-cow-v3/        私有的 zod-cow-v3；导出 TypeScript 源码，不构建
   src/index.ts              compile() API
-  src/compile.ts            闭包树编译器
-  src/internal.ts           协议：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
+  src/compile.ts            编译器：叶子与包装节点的闭包树、作为 codegen 回退的闭包骨架、纯度分析
+  src/codegen.ts            生成的 object / array / tuple 骨架（new Function，叶子谓词内联）
+  src/internal.ts           协议：FAILED 哨兵 / Ctx / 经 zod error map 的 issue 构造 / safeSet
   src/regexes.ts            zod 3.24.1 内部格式正则的逐字拷贝
   src/probe.ts              stock zod3 行为探针
   tests/harness.ts          测试框架的另一份副本（另有 harness.test.ts 自测）
-  tests/unit.test.ts        zod3 单元测试（27 项）
-  tests/differential.test.ts   zod3 差分模糊（20000 case）
+  tests/unit.test.ts        zod3 单元测试（38 项）
+  tests/differential.test.ts   zod3 差分模糊（20000 case，比较 issue 列表，--no-codegen 跑闭包回退）
 packages/bench-v4/          bench.ts（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5 容器 / S6 tuple / S7 async，ArkType 为一列）、harness.ts（测量）、gates.ts（等价性门）与 demo.ts，对构建后的 zod-cow-v4 运行
-packages/bench-v3/          bench.ts（50 万账户）与 zod3 的 demo.ts
+packages/bench-v3/          bench.ts（S1 干净 / S2 默认值 / S3 脏比例 / S4 validate / S5 容器 / S6 tuple / S7 transform / S8 strip，ArkType 为一列）、calibration.ts（单记录热循环、规模扫描）、failures.ts（S9，先比 issue 一致性）、schemas.ts、harness.ts、gates.ts 与 zod3 的 demo.ts
 docs/ARCHITECTURE-z4.md     zod4 引擎架构深度走读（英文，权威版本；docs/ARCHITECTURE-z4.zh-CN.md 是其中文对应版本）
 docs/upstream-issue-draft.md   给 zod 上游的 issue 草稿：请求公开 compileFn / assertOnly / INVALID
 docs/adr/0001-package-layout.md   ADR：每个 zod 大版本一个包的 pnpm workspace 布局、发布名 `zod-cow-v4`、benchmark 按线拆分、peer 依赖策略、zod3 线不发布

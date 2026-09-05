@@ -3,27 +3,36 @@
  *
  * Differences from stock zod (an interpreter):
  *   1. No more { status, value } wrapper objects / ParseStatus merging — the return value goes straight through;
- *   2. No new ParseContext and path array per node — a single mutable ctx + a lazy path;
+ *      a failed check pushes its issue and hands the value on (stock's "dirty"), a type mismatch returns FAILED
+ *      (stock's "aborted"), and the parse fails at the top whenever ctx.issues is non-empty;
+ *   2. No new ParseContext and path array per node — a single mutable ctx + a lazy path (see prefixIssues);
  *   3. No rebuilding of the output tree — CoW: return the original reference when no child value changed, shallow-copy only at the first change point
  *      (path-copying: changing one leaf copies only the single path from it to the root, all sibling subtrees stay shared);
  *   4. shape() / keys / checks / options are resolved once at compile time (stock re-reads them on every parse).
  *
+ * Issue construction follows stock's makeIssue: an explicit check message wins, otherwise zod's own error maps run
+ * (default map, `z.setErrorMap` override, the schema's create-param map), so messages, params and paths match stock.
+ *
  * Compile-time cache: a global WeakMap<schema, validator>, so the same schema instance is compiled only once;
  * the z.lazy getter is resolved lazily on the first parse, which together with "placeholder first, compile later" supports recursive schemas.
  */
-import { z } from "zod";
+import { z, type ZodErrorMap } from "zod";
 import {
   type Ctx,
   FAILED,
+  floatSafeRemainder,
   type Issue,
+  type IssueData,
   type PathSegment,
   type Validator,
+  ZcError,
   ZcNotSupportedError,
   parsedType,
   pushInvalidType,
   pushIssue,
   safeSet,
 } from "./internal.js";
+import { CODEGEN_AVAILABLE, genArray, genObject, genTuple } from "./codegen.js";
 import { PROBE } from "./probe.js";
 import {
   BASE64_REGEX,
@@ -45,78 +54,173 @@ import {
   timeRegex,
 } from "./regexes.js";
 
-/** Compilation of format-style string checks: kind → predicate (regexes come from regexes.ts, verbatim from stock) */
-function formatStringStep(c: any): StringStep {
+const hop = Object.prototype.hasOwnProperty;
+
+/**
+ * Lazy issue paths. A container whose subtree holds no ZodEffects node does not maintain
+ * `ctx.path` while it walks its children (no push/pop on the success path): when a child leaves
+ * issues behind, the container splices its key into the path of every issue pushed since the call,
+ * at the depth of the eager prefix (`ctx.path.length`, constant inside a lazy subtree). Containers
+ * with an effect below them stay eager (push/pop), because the effect's `ctx.path` getter and
+ * `addIssue({ path })` need the absolute path while the callback runs. Eagerness is closed under
+ * ancestors, so the eager containers form a prefix of the tree and every lazy container sits in a
+ * complete lazy subtree; the two schemes compose into the same absolute paths as stock zod.
+ */
+function prefixIssues(ctx: Ctx, from: number, key: PathSegment, to = ctx.issues.length): void {
+  const issues = ctx.issues;
+  const at = ctx.path.length;
+  for (let i = from; i < to; i++) prefixIssue(issues[i]!, at, key);
+}
+
+/** Splice one key into an issue's path; a union's nested errors were created at the same depth and follow */
+function prefixIssue(issue: Issue, at: number, key: PathSegment): void {
+  issue.path.splice(at, 0, key);
+  const nested = issue.unionErrors as ZcError[] | undefined;
+  if (nested !== undefined) {
+    for (const e of nested) for (const ni of e.issues) prefixIssue(ni, at, key);
+  }
+}
+
+/** Whether the subtree holds a ZodEffects node (preprocess / refinement / transform), the nodes whose callbacks observe `ctx.path` */
+function subtreeHasEffect(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
+  if (seen.has(schema)) return false; // back edge of a z.lazy cycle: the rest of the cycle is visited from the query root
+  seen.add(schema);
+  const def: any = (schema as any)._def;
+  switch (def.typeName) {
+    case "ZodEffects":
+      return true;
+    case "ZodObject":
+      return Object.values(def.shape() as Record<string, z.ZodTypeAny>).some((c) =>
+        subtreeHasEffect(c, seen),
+      );
+    case "ZodArray":
+      return subtreeHasEffect(def.type, seen);
+    case "ZodTuple":
+      return (def.items as z.ZodTypeAny[]).some((it) => subtreeHasEffect(it, seen));
+    case "ZodRecord":
+    case "ZodMap":
+      return subtreeHasEffect(def.keyType, seen) || subtreeHasEffect(def.valueType, seen);
+    case "ZodSet":
+      return subtreeHasEffect(def.valueType, seen);
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return (def.options as z.ZodTypeAny[]).some((o) => subtreeHasEffect(o, seen));
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+    case "ZodCatch":
+    case "ZodReadonly":
+      return subtreeHasEffect(def.innerType, seen);
+    case "ZodPipeline":
+      return subtreeHasEffect(def.in, seen) || subtreeHasEffect(def.out, seen);
+    case "ZodBranded":
+      return subtreeHasEffect(def.type, seen);
+    case "ZodLazy":
+      return subtreeHasEffect(def.getter(), seen);
+    default:
+      return false;
+  }
+}
+
+/* ════════════════════════════ ZodString ════════════════════════════ */
+
+/**
+ * One string check: pushes its issue and returns the value on failure (stock's dirty status, the
+ * remaining checks still run), returns the possibly rewritten value on success (trim etc.).
+ */
+type StringStep = (v: string, ctx: Ctx) => string;
+
+/** Stock zod's isValidJWT: the regex, then the decoded header must carry `typ` and `alg` (matching `alg` when given) */
+function isValidJWT(jwt: string, alg?: string): boolean {
+  if (!JWT_REGEX.test(jwt)) return false;
+  try {
+    const [header] = jwt.split(".");
+    if (!header) return false;
+    const base64 = header
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(header.length + ((4 - (header.length % 4)) % 4), "=");
+    const decoded = JSON.parse(atob(base64));
+    if (typeof decoded !== "object" || decoded === null) return false;
+    if (!decoded.typ || !decoded.alg) return false;
+    if (alg && decoded.alg !== alg) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The RegExp behind a string check, for the format kinds that are one regex test (and `.regex()` itself); null otherwise */
+function checkRegex(c: any): RegExp | null {
   const kind: string = c.kind;
-  const message = (): string => c.message ?? `Invalid ${kind === "email" ? "email" : kind}`;
-  const re = (() => {
-    switch (kind) {
-      case "email":
-        return EMAIL_REGEX;
-      case "uuid":
-        return UUID_REGEX;
-      case "cuid":
-        return CUID_REGEX;
-      case "cuid2":
-        return CUID2_REGEX;
-      case "ulid":
-        return ULID_REGEX;
-      case "nanoid":
-        return NANOID_REGEX;
-      case "jwt":
-        return JWT_REGEX;
-      case "duration":
-        return DURATION_REGEX;
-      case "date":
-        return DATE_REGEX;
-      case "time":
-        return timeRegex(c.precision ?? null);
-      case "datetime":
-        return datetimeRegex({
-          precision: c.precision ?? null,
-          offset: !!c.offset,
-          local: !!c.local,
-        });
-      case "base64":
-        return BASE64_REGEX;
-      case "base64url":
-        return BASE64URL_REGEX;
-      default:
-        return null;
-    }
-  })();
+  switch (kind) {
+    case "regex":
+      return c.regex;
+    case "email":
+      return EMAIL_REGEX;
+    case "uuid":
+      return UUID_REGEX;
+    case "cuid":
+      return CUID_REGEX;
+    case "cuid2":
+      return CUID2_REGEX;
+    case "ulid":
+      return ULID_REGEX;
+    case "nanoid":
+      return NANOID_REGEX;
+    case "duration":
+      return DURATION_REGEX;
+    case "date":
+      return DATE_REGEX;
+    case "time":
+      return timeRegex(c.precision ?? null);
+    case "datetime":
+      return datetimeRegex({
+        precision: c.precision ?? null,
+        offset: !!c.offset,
+        local: !!c.local,
+      });
+    case "base64":
+      return BASE64_REGEX;
+    case "base64url":
+      return BASE64URL_REGEX;
+    case "emoji":
+      // zod builds it lazily: ^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$ (u flag)
+      return /^(\p{Extended_Pictographic}|\p{Emoji_Component})+$/u;
+    default:
+      return null;
+  }
+}
+
+/** Format-style string checks: kind → predicate (regexes come from regexes.ts, verbatim from stock) */
+function formatStringStep(c: any, em: ZodErrorMap | undefined): StringStep {
+  const kind: string = c.kind;
+  const message: string | undefined = c.message;
+  const re = checkRegex(c);
 
   if (re !== null) {
     return (v, ctx) => {
-      if (!re.test(v)) {
-        pushIssue(ctx, "invalid_string", message(), { validation: kind });
-        return FAILED;
-      }
+      if (!re.test(v)) pushIssue(ctx, v, em, { code: "invalid_string", validation: kind, message });
       return v;
     };
   }
 
   // Non-regex predicates (identical to stock's predicate functions)
   switch (kind) {
-    case "url": {
+    case "url":
       return (v, ctx) => {
         try {
           new URL(v);
         } catch {
-          pushIssue(ctx, "invalid_string", message(), { validation: "url" });
-          return FAILED;
+          pushIssue(ctx, v, em, { code: "invalid_string", validation: "url", message });
         }
         return v;
       };
-    }
-    case "emoji": {
-      // zod builds it lazily: ^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$ (u flag)
-      const emojiRe = /^(\p{Extended_Pictographic}|\p{Emoji_Component})+$/u;
+    case "jwt": {
+      const alg: string | undefined = c.alg;
       return (v, ctx) => {
-        if (!emojiRe.test(v)) {
-          pushIssue(ctx, "invalid_string", message(), { validation: "emoji" });
-          return FAILED;
-        }
+        if (!isValidJWT(v, alg))
+          pushIssue(ctx, v, em, { code: "invalid_string", validation: "jwt", message });
         return v;
       };
     }
@@ -127,10 +231,7 @@ function formatStringStep(c: any): StringStep {
           (version === "v4" || !version) && IPV4_REGEX.test(v)
             ? true
             : (version === "v6" || !version) && IPV6_REGEX.test(v);
-        if (!ok) {
-          pushIssue(ctx, "invalid_string", message(), { validation: "ip" });
-          return FAILED;
-        }
+        if (!ok) pushIssue(ctx, v, em, { code: "invalid_string", validation: "ip", message });
         return v;
       };
     }
@@ -141,10 +242,7 @@ function formatStringStep(c: any): StringStep {
           (version === "v4" || !version) && IPV4_CIDR_REGEX.test(v)
             ? true
             : (version === "v6" || !version) && IPV6_CIDR_REGEX.test(v);
-        if (!ok) {
-          pushIssue(ctx, "invalid_string", message(), { validation: "cidr" });
-          return FAILED;
-        }
+        if (!ok) pushIssue(ctx, v, em, { code: "invalid_string", validation: "cidr", message });
         return v;
       };
     }
@@ -153,81 +251,99 @@ function formatStringStep(c: any): StringStep {
   }
 }
 
-/* ════════════════════════════ ZodString ════════════════════════════ */
-
-type StringStep = (v: string, ctx: Ctx) => string | typeof FAILED;
-
-function stringStep(c: any): StringStep {
+function stringStep(c: any, em: ZodErrorMap | undefined): StringStep {
+  const message: string | undefined = c.message;
   switch (c.kind) {
     case "min": {
       const n: number = c.value;
-      const inclusive = c.inclusive !== false;
       return (v, ctx) => {
-        if (inclusive ? v.length < n : v.length <= n) {
-          pushIssue(
-            ctx,
-            "too_small",
-            c.message ??
-              (inclusive
-                ? `String must contain at least ${n} character(s)`
-                : `String must contain more than ${n} character(s)`),
-            { minimum: n, type: "string", inclusive },
-          );
-          return FAILED;
-        }
+        if (v.length < n)
+          pushIssue(ctx, v, em, {
+            code: "too_small",
+            minimum: n,
+            type: "string",
+            inclusive: true,
+            exact: false,
+            message,
+          });
         return v;
       };
     }
     case "max": {
       const n: number = c.value;
-      const inclusive = c.inclusive !== false;
       return (v, ctx) => {
-        if (inclusive ? v.length > n : v.length >= n) {
-          pushIssue(
-            ctx,
-            "too_big",
-            c.message ??
-              (inclusive
-                ? `String must contain at most ${n} character(s)`
-                : `String must contain fewer than ${n} character(s)`),
-            { maximum: n, type: "string", inclusive },
-          );
-          return FAILED;
-        }
+        if (v.length > n)
+          pushIssue(ctx, v, em, {
+            code: "too_big",
+            maximum: n,
+            type: "string",
+            inclusive: true,
+            exact: false,
+            message,
+          });
+        return v;
+      };
+    }
+    case "length": {
+      const n: number = c.value;
+      return (v, ctx) => {
+        if (v.length > n)
+          pushIssue(ctx, v, em, {
+            code: "too_big",
+            maximum: n,
+            type: "string",
+            inclusive: true,
+            exact: true,
+            message,
+          });
+        else if (v.length < n)
+          pushIssue(ctx, v, em, {
+            code: "too_small",
+            minimum: n,
+            type: "string",
+            inclusive: true,
+            exact: true,
+            message,
+          });
         return v;
       };
     }
     case "regex": {
       const re: RegExp = c.regex;
       return (v, ctx) => {
-        if (!re.test(v)) {
-          pushIssue(ctx, "invalid_string", c.message ?? "Invalid", { validation: "regex" });
-          return FAILED;
-        }
+        // Same as stock: reset lastIndex so a global/sticky regex starts from 0 on every test
+        re.lastIndex = 0;
+        if (!re.test(v))
+          pushIssue(ctx, v, em, { code: "invalid_string", validation: "regex", message });
+        return v;
+      };
+    }
+    case "includes": {
+      const p: string = c.value;
+      const position: number | undefined = c.position;
+      return (v, ctx) => {
+        if (!v.includes(p, position))
+          pushIssue(ctx, v, em, {
+            code: "invalid_string",
+            validation: { includes: p, position },
+            message,
+          });
         return v;
       };
     }
     case "startsWith": {
       const p: string = c.value;
       return (v, ctx) => {
-        if (!v.startsWith(p)) {
-          pushIssue(ctx, "invalid_string", c.message ?? `Invalid input: must start with "${p}"`, {
-            validation: "startsWith",
-          });
-          return FAILED;
-        }
+        if (!v.startsWith(p))
+          pushIssue(ctx, v, em, { code: "invalid_string", validation: { startsWith: p }, message });
         return v;
       };
     }
     case "endsWith": {
       const p: string = c.value;
       return (v, ctx) => {
-        if (!v.endsWith(p)) {
-          pushIssue(ctx, "invalid_string", c.message ?? `Invalid input: must end with "${p}"`, {
-            validation: "endsWith",
-          });
-          return FAILED;
-        }
+        if (!v.endsWith(p))
+          pushIssue(ctx, v, em, { code: "invalid_string", validation: { endsWith: p }, message });
         return v;
       };
     }
@@ -241,101 +357,119 @@ function stringStep(c: any): StringStep {
       return (v) => v.toUpperCase();
     default:
       // Format checks (email/uuid/datetime/…) — regexes are verbatim from stock
-      return formatStringStep(c);
+      return formatStringStep(c, em);
   }
 }
 
 function makeString(def: any): Validator {
-  const steps: StringStep[] = (def.checks ?? []).map(stringStep);
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const coerce = !!def.coerce;
+  const steps: StringStep[] = (def.checks ?? []).map((c: any) => stringStep(c, em));
+  const n = steps.length;
+  // Specialized closures for the common step counts: no step array loop on the hot path
+  if (n === 0) {
+    return (data, ctx) => {
+      if (coerce) data = String(data);
+      if (typeof data !== "string") {
+        pushInvalidType(ctx, data, em, "string");
+        return FAILED;
+      }
+      return data;
+    };
+  }
+  if (n === 1) {
+    const s0 = steps[0]!;
+    return (data, ctx) => {
+      if (coerce) data = String(data);
+      if (typeof data !== "string") {
+        pushInvalidType(ctx, data, em, "string");
+        return FAILED;
+      }
+      return s0(data, ctx);
+    };
+  }
+  if (n === 2) {
+    const s0 = steps[0]!;
+    const s1 = steps[1]!;
+    return (data, ctx) => {
+      if (coerce) data = String(data);
+      if (typeof data !== "string") {
+        pushInvalidType(ctx, data, em, "string");
+        return FAILED;
+      }
+      return s1(s0(data, ctx), ctx);
+    };
+  }
   return (data, ctx) => {
+    if (coerce) data = String(data);
     if (typeof data !== "string") {
-      pushInvalidType(ctx, "string", parsedType(data));
+      pushInvalidType(ctx, data, em, "string");
       return FAILED;
     }
-    let v: string | typeof FAILED = data;
-    for (let i = 0; i < steps.length; i++) {
-      v = steps[i](v, ctx);
-      if (v === FAILED) return FAILED;
-    }
+    let v: string = data;
+    for (let i = 0; i < n; i++) v = steps[i]!(v, ctx);
     return v;
   };
 }
 
 /* ════════════════════════════ ZodNumber ════════════════════════════ */
 
-type NumberStep = (v: number, ctx: Ctx) => number | typeof FAILED;
+/** One number check: pushes its issue on failure (dirty), never rewrites the value */
+type NumberStep = (v: number, ctx: Ctx) => void;
 
-function numberStep(c: any): NumberStep {
+function numberStep(c: any, em: ZodErrorMap | undefined): NumberStep {
+  const message: string | undefined = c.message;
   switch (c.kind) {
     case "min": {
       const n: number = c.value;
       const inclusive = c.inclusive !== false;
       return (v, ctx) => {
-        if (inclusive ? v < n : v <= n) {
-          pushIssue(
-            ctx,
-            "too_small",
-            c.message ??
-              (inclusive
-                ? `Number must be greater than or equal to ${n}`
-                : `Number must be greater than ${n}`),
-            { minimum: n, type: "number", inclusive },
-          );
-          return FAILED;
-        }
-        return v;
+        if (inclusive ? v < n : v <= n)
+          pushIssue(ctx, v, em, {
+            code: "too_small",
+            minimum: n,
+            type: "number",
+            inclusive,
+            exact: false,
+            message,
+          });
       };
     }
     case "max": {
       const n: number = c.value;
       const inclusive = c.inclusive !== false;
       return (v, ctx) => {
-        if (inclusive ? v > n : v >= n) {
-          pushIssue(
-            ctx,
-            "too_big",
-            c.message ??
-              (inclusive
-                ? `Number must be less than or equal to ${n}`
-                : `Number must be less than ${n}`),
-            { maximum: n, type: "number", inclusive },
-          );
-          return FAILED;
-        }
-        return v;
+        if (inclusive ? v > n : v >= n)
+          pushIssue(ctx, v, em, {
+            code: "too_big",
+            maximum: n,
+            type: "number",
+            inclusive,
+            exact: false,
+            message,
+          });
       };
     }
     case "int":
       return (v, ctx) => {
-        if (!Number.isInteger(v)) {
-          pushIssue(ctx, "invalid_type", c.message ?? "Expected integer, received number", {
+        if (!Number.isInteger(v))
+          pushIssue(ctx, v, em, {
+            code: "invalid_type",
             expected: "integer",
-            received: "number",
+            received: "float",
+            message,
           });
-          return FAILED;
-        }
-        return v;
       };
-    case "multipleOf":
+    case "multipleOf": {
+      const step: number = c.value;
       return (v, ctx) => {
-        if (v % c.value !== 0) {
-          pushIssue(
-            ctx,
-            "not_multiple_of",
-            c.message ?? `Number must be a multiple of ${c.value}`,
-            { multipleOf: c.value, type: "number" },
-          );
-          return FAILED;
-        }
-        return v;
+        if (floatSafeRemainder(v, step) !== 0)
+          pushIssue(ctx, v, em, { code: "not_multiple_of", multipleOf: step, message });
       };
+    }
     case "finite":
       return (v, ctx) => {
-        if (!Number.isFinite(v)) {
-          pushIssue(ctx, "not_finite", c.message ?? "Number must be finite");
-          return FAILED;
-        }
-        return v;
+        if (!Number.isFinite(v)) pushIssue(ctx, v, em, { code: "not_finite", message });
       };
     default:
       throw new ZcNotSupportedError(`ZodNumber check kind "${c.kind}"`);
@@ -343,80 +477,150 @@ function numberStep(c: any): NumberStep {
 }
 
 function makeNumber(def: any): Validator {
-  const steps: NumberStep[] = (def.checks ?? []).map(numberStep);
-  return (data, ctx) => {
-    if (typeof data !== "number") {
-      pushInvalidType(ctx, "number", parsedType(data));
-      return FAILED;
-    }
-    if (Number.isNaN(data)) {
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const coerce = !!def.coerce;
+  const steps: NumberStep[] = (def.checks ?? []).map((c: any) => numberStep(c, em));
+  const n = steps.length;
+  if (n === 0) {
+    return (data, ctx) => {
+      if (coerce) data = Number(data);
       // Same as stock: z.number() rejects NaN (received: 'nan')
-      pushInvalidType(ctx, "number", "nan");
+      if (typeof data !== "number" || Number.isNaN(data)) {
+        pushInvalidType(ctx, data, em, "number");
+        return FAILED;
+      }
+      return data;
+    };
+  }
+  if (n === 1) {
+    const s0 = steps[0]!;
+    return (data, ctx) => {
+      if (coerce) data = Number(data);
+      if (typeof data !== "number" || Number.isNaN(data)) {
+        pushInvalidType(ctx, data, em, "number");
+        return FAILED;
+      }
+      s0(data, ctx);
+      return data;
+    };
+  }
+  return (data, ctx) => {
+    if (coerce) data = Number(data);
+    if (typeof data !== "number" || Number.isNaN(data)) {
+      pushInvalidType(ctx, data, em, "number");
       return FAILED;
     }
-    for (let i = 0; i < steps.length; i++) {
-      if (steps[i](data, ctx) === FAILED) return FAILED;
-    }
+    for (let i = 0; i < n; i++) steps[i]!(data, ctx);
     return data; // Primitive value: returning it is pass-through
   };
 }
 
 /* ════════════════════════════ Leaf nodes ════════════════════════════ */
 
-function makeDate(def: any): Validator {
+function makeBigInt(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const coerce = !!def.coerce;
   const checks: any[] = def.checks ?? [];
+  for (const c of checks) {
+    if (c.kind !== "min" && c.kind !== "max" && c.kind !== "multipleOf")
+      throw new ZcNotSupportedError(`ZodBigInt check kind "${c.kind}"`);
+  }
   return (data, ctx) => {
-    if (!(data instanceof Date)) {
-      pushInvalidType(ctx, "date", parsedType(data));
-      return FAILED;
+    if (coerce) {
+      try {
+        data = BigInt(data);
+      } catch {
+        pushInvalidType(ctx, data, em, "bigint");
+        return FAILED;
+      }
     }
-    if (Number.isNaN(data.getTime())) {
-      pushIssue(ctx, "invalid_date", "Invalid date");
+    if (typeof data !== "bigint") {
+      pushInvalidType(ctx, data, em, "bigint");
       return FAILED;
     }
     for (const c of checks) {
-      if (c.kind === "min" && data.getTime() < c.value.getTime()) {
-        pushIssue(
-          ctx,
-          "too_small",
-          c.message ?? `Date must be greater than or equal to ${c.value.toISOString()}`,
-          { minimum: c.value.getTime(), type: "date", inclusive: true },
-        );
-        return FAILED;
-      }
-      if (c.kind === "max" && data.getTime() > c.value.getTime()) {
-        pushIssue(
-          ctx,
-          "too_big",
-          c.message ?? `Date must be less than or equal to ${c.value.toISOString()}`,
-          { maximum: c.value.getTime(), type: "date", inclusive: true },
-        );
-        return FAILED;
+      if (c.kind === "min") {
+        const inclusive = c.inclusive !== false;
+        if (inclusive ? data < c.value : data <= c.value)
+          pushIssue(ctx, data, em, {
+            code: "too_small",
+            type: "bigint",
+            minimum: c.value,
+            inclusive,
+            message: c.message,
+          });
+      } else if (c.kind === "max") {
+        const inclusive = c.inclusive !== false;
+        if (inclusive ? data > c.value : data >= c.value)
+          pushIssue(ctx, data, em, {
+            code: "too_big",
+            type: "bigint",
+            maximum: c.value,
+            inclusive,
+            message: c.message,
+          });
+      } else if (data % c.value !== BigInt(0)) {
+        pushIssue(ctx, data, em, {
+          code: "not_multiple_of",
+          multipleOf: c.value,
+          message: c.message,
+        });
       }
     }
     return data;
   };
 }
 
-function literalDisplay(v: unknown): string {
-  if (typeof v === "bigint") return `${v}n`;
-  try {
-    return JSON.stringify(v) ?? String(v);
-  } catch {
-    return String(v);
+function makeDate(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const coerce = !!def.coerce;
+  const checks: any[] = def.checks ?? [];
+  for (const c of checks) {
+    if (c.kind !== "min" && c.kind !== "max")
+      throw new ZcNotSupportedError(`ZodDate check kind "${c.kind}"`);
   }
+  return (data, ctx) => {
+    if (coerce) data = new Date(data);
+    if (!(data instanceof Date)) {
+      pushInvalidType(ctx, data, em, "date");
+      return FAILED;
+    }
+    if (Number.isNaN(data.getTime())) {
+      pushIssue(ctx, data, em, { code: "invalid_date" });
+      return FAILED;
+    }
+    for (const c of checks) {
+      if (c.kind === "min") {
+        if (data.getTime() < c.value)
+          pushIssue(ctx, data, em, {
+            code: "too_small",
+            message: c.message,
+            inclusive: true,
+            exact: false,
+            minimum: c.value,
+            type: "date",
+          });
+      } else if (data.getTime() > c.value) {
+        pushIssue(ctx, data, em, {
+          code: "too_big",
+          message: c.message,
+          inclusive: true,
+          exact: false,
+          maximum: c.value,
+          type: "date",
+        });
+      }
+    }
+    return data;
+  };
 }
 
 function makeLiteral(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const value = def.value;
   return (data, ctx) => {
     if (data !== value) {
-      pushIssue(
-        ctx,
-        "invalid_literal",
-        `Invalid literal value, expected ${literalDisplay(value)}`,
-        { expected: String(value), received: parsedType(data) },
-      );
+      pushIssue(ctx, data, em, { code: "invalid_literal", expected: value, received: data });
       return FAILED;
     }
     return data;
@@ -424,17 +628,17 @@ function makeLiteral(def: any): Validator {
 }
 
 function makeEnum(def: any): Validator {
-  const values: (string | number)[] = def.values;
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const values: string[] = def.values;
   const set = new Set<unknown>(values);
-  const expected = values.map((v) => `'${String(v)}'`).join(" | ");
+  const expected = values.map((v) => `'${v}'`).join(" | ");
   return (data, ctx) => {
+    if (typeof data !== "string") {
+      pushIssue(ctx, data, em, { code: "invalid_type", expected, received: parsedType(data) });
+      return FAILED;
+    }
     if (!set.has(data)) {
-      pushIssue(
-        ctx,
-        "invalid_enum_value",
-        `Invalid enum value. Expected ${expected}, received '${String(data)}'`,
-        { received: String(data) },
-      );
+      pushIssue(ctx, data, em, { code: "invalid_enum_value", received: data, options: values });
       return FAILED;
     }
     return data;
@@ -442,23 +646,22 @@ function makeEnum(def: any): Validator {
 }
 
 function makeNativeEnum(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const obj = def.values;
-  const set = new Set<unknown>();
   // Same as stock: skip the reverse mapping of numeric enums (keys that are numeric strings)
+  const values: (string | number)[] = [];
   for (const k in obj) {
-    if (Object.hasOwn(obj, k) && Number.isNaN(Number(k))) {
-      set.add(obj[k]);
-    }
+    if (hop.call(obj, k) && Number.isNaN(Number(k))) values.push(obj[k]);
   }
-  const expected = [...set].map((v) => `'${String(v)}'`).join(" | ");
+  const set = new Set<unknown>(values);
+  const expected = values.map((v) => (typeof v === "string" ? `'${v}'` : v)).join(" | ");
   return (data, ctx) => {
+    if (typeof data !== "string" && (typeof data !== "number" || Number.isNaN(data))) {
+      pushIssue(ctx, data, em, { code: "invalid_type", expected, received: parsedType(data) });
+      return FAILED;
+    }
     if (!set.has(data)) {
-      pushIssue(
-        ctx,
-        "invalid_enum_value",
-        `Invalid enum value. Expected ${expected}, received '${String(data)}'`,
-        { received: String(data) },
-      );
+      pushIssue(ctx, data, em, { code: "invalid_enum_value", received: data, options: values });
       return FAILED;
     }
     return data;
@@ -478,6 +681,7 @@ function isUndefStable(s: z.ZodTypeAny): boolean {
 }
 
 function makeObject(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const mode: "strip" | "strict" | "passthrough" = def.unknownKeys ?? "strip";
   const catchall = def.catchall;
   if (catchall && !(catchall instanceof z.ZodNever)) {
@@ -489,14 +693,19 @@ function makeObject(def: any): Validator {
   // Resolve shape / keys / child compilers / undefined-stability once at compile time
   const shape: Record<string, z.ZodTypeAny> = def.shape();
   const keys = Object.keys(shape);
-  const children: Validator[] = new Array(keys.length);
-  const undefStable: boolean[] = new Array(keys.length);
-  for (let i = 0; i < keys.length; i++) {
+  const n = keys.length;
+  const children: Validator[] = new Array(n);
+  const undefStable: boolean[] = new Array(n);
+  let eager = false;
+  for (let i = 0; i < n; i++) {
     const child = shape[keys[i]!]!;
     children[i] = go(child);
     undefStable[i] = isUndefStable(child);
+    if (subtreeHasEffect(child)) eager = true;
   }
-  const keySet = new Set(keys);
+  // Key → shape index, for the undeclared-key probe below
+  const keyIndex = new Map<string, number>();
+  for (let i = 0; i < n; i++) keyIndex.set(keys[i]!, i);
 
   // Probe-driven version compatibility. Measured on zod 3.24.1: an absent optional key is not materialized (output {}),
   // and present-undefined is kept — both agree naturally with pass-through semantics, so the branches below usually do not fire.
@@ -505,9 +714,24 @@ function makeObject(def: any): Validator {
   const keepPresentUndef =
     mode === "passthrough" ? PROBE.presentUndefKeptPassthrough : PROBE.presentUndefKeptStrip;
 
+  // Generated skeleton (codegen.ts) where `new Function` is available and the probe flags are the
+  // measured zod 3.24.1 ones; the closure below is the same algorithm and stays as the fallback
+  if (CODEGEN_AVAILABLE && !matAbsent && keepPresentUndef) {
+    return genObject({
+      keys,
+      children: keys.map((k, i) => ({ schema: shape[k]!, validator: children[i]! })),
+      undefStable,
+      mode,
+      eager,
+      errorMap: em,
+      regexOf: checkRegex,
+      prefixIssues,
+    });
+  }
+
   return (data, ctx): any => {
     if (data === null || typeof data !== "object" || Array.isArray(data)) {
-      pushInvalidType(ctx, "object", parsedType(data));
+      pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
 
@@ -517,12 +741,12 @@ function makeObject(def: any): Validator {
     let absentUndef: number[] | null = null; // Keys needing an explicit undefined (older-zod compatibility)
     let presentDrop: number[] | null = null; // Keys needing a delete (older-zod compatibility)
 
-    for (let i = 0; i < keys.length; i++) {
+    for (let i = 0; i < n; i++) {
       const k = keys[i]!;
       const inVal = data[k];
 
       if (inVal === undefined && undefStable[i]) {
-        const present = Object.hasOwn(data, k);
+        const present = hop.call(data, k);
         if (!present && matAbsent) {
           absentUndef ??= [];
           absentUndef.push(i);
@@ -533,9 +757,16 @@ function makeObject(def: any): Validator {
         continue; // Behavior already covered by pass-through: do nothing (zero cost)
       }
 
-      ctx.path.push(k);
-      const outVal = children[i]!(inVal, ctx);
-      ctx.path.pop();
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(k);
+        outVal = children[i]!(inVal, ctx);
+        ctx.path.pop();
+      } else {
+        const before = ctx.issues.length;
+        outVal = children[i]!(inVal, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, k);
+      }
       if (outVal === FAILED) {
         // Keep walking the remaining fields after a failure — same as stock, one parse collects every issue
         anyFailed = true;
@@ -551,61 +782,65 @@ function makeObject(def: any): Validator {
         out[k] = outVal;
       }
     }
-    if (anyFailed) return FAILED;
+    // An aborted child aborts the object, after the strict probe below has had its say (stock parses
+    // every pair, then reports the unrecognized keys, then returns INVALID)
+    if (anyFailed && mode !== "strict") return FAILED;
 
     if (mode !== "passthrough") {
-      // strip: only needs to know "whether there is" an extra key (zero-allocation for-in + Set, stops at the first hit)
-      // strict: collects every extra key for the error
+      // Undeclared-key probe. strip only needs to know whether an extra own key exists (stops at the
+      // first hit); strict collects every extra key for the error. The enumeration order of a plain
+      // object usually follows the shape (JSON payloads, literals), so each enumerated key is first
+      // compared against the shape key expected at that position (one string compare, no hash) and
+      // the index map is consulted only on a mismatch; `hasOwnProperty.call` is folded away by V8
+      // inside a `for...in` over the enum cache, where `Object.hasOwn` is not.
       let extras: string[] | null = null;
+      let hint = 0;
       for (const k in data) {
-        if (!Object.hasOwn(data, k)) continue;
-        if (!keySet.has(k)) {
-          if (mode === "strict") {
-            extras ??= [];
-            extras.push(k);
-          } else {
-            extras = [k];
-            break;
-          }
+        if (k === keys[hint]) {
+          hint++;
+          continue;
+        }
+        const j = keyIndex.get(k);
+        if (j !== undefined) {
+          hint = j + 1;
+          continue;
+        }
+        if (!hop.call(data, k)) continue;
+        if (mode === "strict") {
+          extras ??= [];
+          extras.push(k);
+        } else {
+          extras = [k];
+          break;
         }
       }
       if (extras !== null) {
-        if (mode === "strict") {
-          pushIssue(
-            ctx,
-            "unrecognized_keys",
-            `Unrecognized key(s) in object: ${extras.map((k) => `'${k}'`).join(", ")}`,
-            { keys: extras },
-          );
-          return FAILED;
+        // strict: the issue, then the value goes on as dirty (stock keeps parsing, the output holds the shape keys)
+        if (mode === "strict")
+          pushIssue(ctx, data, em, { code: "unrecognized_keys", keys: extras });
+        if (anyFailed) return FAILED;
+        // strip: a clean copy is needed only when extra keys really exist (never a delete on the
+        // input, never a delete on the copy either: the output is assembled from the shape keys)
+        const src = out;
+        out = {};
+        for (let i = 0; i < n; i++) {
+          const k = keys[i]!;
+          // Aligned with alwaysSet semantics: stock keeps only keys that are "not undefined or present in the input"
+          if (src[k] !== undefined || hop.call(data, k)) out[k] = src[k];
         }
-        // strip: a clean copy is needed only when extra keys really exist (note: never delete in place, the input stays intact)
-        if (!dirty) {
-          dirty = true;
-          out = {};
-          for (let i = 0; i < keys.length; i++) {
-            const k = keys[i]!;
-            // Aligned with alwaysSet semantics: stock keeps only keys that are "not undefined or present in the input"
-            if (data[k] !== undefined || Object.hasOwn(data, k)) {
-              out[k] = data[k];
-            }
-          }
-        } else {
-          for (const k in data) {
-            if (!keySet.has(k)) delete out[k];
-          }
-        }
+        dirty = true;
       }
     }
+    if (anyFailed) return FAILED;
 
-    if (absentUndef !== null && !anyFailed) {
+    if (absentUndef !== null) {
       if (!dirty) {
         dirty = true;
         out = { ...data };
       }
       for (const i of absentUndef) out[keys[i]!] = undefined;
     }
-    if (presentDrop !== null && !anyFailed) {
+    if (presentDrop !== null) {
       if (!dirty) {
         dirty = true;
         out = { ...data };
@@ -620,53 +855,83 @@ function makeObject(def: any): Validator {
 /* ════════════════════════════ ZodArray / ZodTuple ════════════════════════════ */
 
 function makeArray(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const el = go(def.type);
-  const min = def.minLength?.value ?? null;
-  const max = def.maxLength?.value ?? null;
-  const exact = def.exactLength?.value ?? null;
+  const eager = subtreeHasEffect(def.type);
+  const min: { value: number; message?: string } | null = def.minLength ?? null;
+  const max: { value: number; message?: string } | null = def.maxLength ?? null;
+  const exact: { value: number; message?: string } | null = def.exactLength ?? null;
+  if (CODEGEN_AVAILABLE) {
+    return genArray({
+      element: { schema: def.type, validator: el },
+      eager,
+      errorMap: em,
+      min,
+      max,
+      exact,
+      regexOf: checkRegex,
+      prefixIssues,
+    });
+  }
   return (data, ctx): any => {
     if (!Array.isArray(data)) {
-      pushInvalidType(ctx, "array", parsedType(data));
+      pushInvalidType(ctx, data, em, "array");
       return FAILED;
     }
-    if (min !== null && data.length < min) {
-      pushIssue(ctx, "too_small", `Array must contain at least ${min} element(s)`, {
-        minimum: min,
+    // Length checks are dirty, not aborting: the elements are still parsed (same order as stock: exact, min, max)
+    if (exact !== null && data.length !== exact.value) {
+      const tooBig = data.length > exact.value;
+      pushIssue(ctx, data, em, {
+        code: tooBig ? "too_big" : "too_small",
+        minimum: tooBig ? undefined : exact.value,
+        maximum: tooBig ? exact.value : undefined,
         type: "array",
         inclusive: true,
+        exact: true,
+        message: exact.message,
       });
-      return FAILED;
     }
-    if (max !== null && data.length > max) {
-      pushIssue(ctx, "too_big", `Array must contain at most ${max} element(s)`, {
-        maximum: max,
+    if (min !== null && data.length < min.value) {
+      pushIssue(ctx, data, em, {
+        code: "too_small",
+        minimum: min.value,
         type: "array",
         inclusive: true,
+        exact: false,
+        message: min.message,
       });
-      return FAILED;
     }
-    if (exact !== null && data.length !== exact) {
-      pushIssue(
-        ctx,
-        data.length < exact ? "too_small" : "too_big",
-        `Array must contain exactly ${exact} element(s)`,
-        { minimum: exact, maximum: exact, type: "array", inclusive: true },
-      );
-      return FAILED;
+    if (max !== null && data.length > max.value) {
+      pushIssue(ctx, data, em, {
+        code: "too_big",
+        maximum: max.value,
+        type: "array",
+        inclusive: true,
+        exact: false,
+        message: max.message,
+      });
     }
 
     let out: any[] = data;
     let dirty = false;
     let anyFailed = false;
     for (let i = 0; i < data.length; i++) {
-      ctx.path.push(i);
-      const outVal = el(data[i], ctx);
-      ctx.path.pop();
+      const inVal = data[i];
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(i);
+        outVal = el(inVal, ctx);
+        ctx.path.pop();
+      } else {
+        const before = ctx.issues.length;
+        outVal = el(inVal, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+      }
       if (outVal === FAILED) {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
         continue;
       }
-      if (outVal !== data[i] && !anyFailed) {
+      if (outVal !== inVal && !anyFailed) {
         if (!dirty) {
           dirty = true;
           out = data.slice(); // slice only at the first "forced" change — the other elements stay shared
@@ -681,40 +946,66 @@ function makeArray(def: any): Validator {
 
 function makeTuple(def: any): Validator {
   if (def.rest) throw new ZcNotSupportedError("ZodTuple with rest schema");
+  const em: ZodErrorMap | undefined = def.errorMap;
   const items: Validator[] = def.items.map(go);
+  const n = items.length;
+  const eager = (def.items as z.ZodTypeAny[]).some((it) => subtreeHasEffect(it));
+  if (CODEGEN_AVAILABLE) {
+    return genTuple({
+      items: (def.items as z.ZodTypeAny[]).map((it, i) => ({ schema: it, validator: items[i]! })),
+      eager,
+      errorMap: em,
+      regexOf: checkRegex,
+      prefixIssues,
+    });
+  }
   return (data, ctx): any => {
     if (!Array.isArray(data)) {
-      pushInvalidType(ctx, "array", parsedType(data));
+      pushInvalidType(ctx, data, em, "array");
       return FAILED;
     }
-    if (data.length < items.length) {
-      pushIssue(ctx, "too_small", `Array must contain at least ${items.length} element(s)`, {
-        minimum: items.length,
-        type: "array",
+    if (data.length < n) {
+      pushIssue(ctx, data, em, {
+        code: "too_small",
+        minimum: n,
         inclusive: true,
-      });
-      return FAILED;
-    }
-    if (data.length > items.length) {
-      pushIssue(ctx, "too_big", `Array must contain at most ${items.length} element(s)`, {
-        maximum: items.length,
+        exact: false,
         type: "array",
-        inclusive: true,
       });
       return FAILED;
     }
     let out: any[] = data;
     let dirty = false;
+    if (data.length > n) {
+      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
+      pushIssue(ctx, data, em, {
+        code: "too_big",
+        maximum: n,
+        inclusive: true,
+        exact: false,
+        type: "array",
+      });
+      out = data.slice(0, n);
+      dirty = true;
+    }
     let anyFailed = false;
-    for (let i = 0; i < items.length; i++) {
-      ctx.path.push(i);
-      const outVal = items[i](data[i], ctx);
-      ctx.path.pop();
+    for (let i = 0; i < n; i++) {
+      const inVal = data[i];
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(i);
+        outVal = items[i]!(inVal, ctx);
+        ctx.path.pop();
+      } else {
+        const before = ctx.issues.length;
+        outVal = items[i]!(inVal, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+      }
       if (outVal === FAILED) {
         anyFailed = true;
         continue;
       }
-      if (outVal !== data[i] && !anyFailed) {
+      if (outVal !== inVal && !anyFailed) {
         if (!dirty) {
           dirty = true;
           out = data.slice();
@@ -730,25 +1021,37 @@ function makeTuple(def: any): Validator {
 /* ════════════════════════════ ZodRecord / ZodMap / ZodSet ════════════════════════════ */
 
 function makeRecord(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const keyV = go(def.keyType);
   const valV = go(def.valueType);
+  const eager = subtreeHasEffect(def.keyType) || subtreeHasEffect(def.valueType);
   return (data, ctx): any => {
     if (data === null || typeof data !== "object" || Array.isArray(data)) {
-      pushInvalidType(ctx, "object", parsedType(data));
+      pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
     let out: any = data;
     let dirty = false;
     let anyFailed = false;
     for (const k in data) {
-      if (!Object.hasOwn(data, k)) continue;
+      if (!hop.call(data, k)) continue;
       const inVal = data[k];
-      ctx.path.push(k);
-      const outKey = keyV(k, ctx);
-      const outVal = outKey === FAILED ? FAILED : valV(inVal, ctx);
-      ctx.path.pop();
+      // Key and value are both parsed (same as stock: a failing key does not skip the value's issues)
+      let outKey: any;
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(k);
+        outKey = keyV(k, ctx);
+        outVal = valV(inVal, ctx);
+        ctx.path.pop();
+      } else {
+        const before = ctx.issues.length;
+        outKey = keyV(k, ctx);
+        outVal = valV(inVal, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, k);
+      }
       if (outKey === FAILED || outVal === FAILED) {
-        anyFailed = true; // Key and value parsing do not affect each other, keep collecting (same as stock)
+        anyFailed = true;
         continue;
       }
       if ((outKey !== k || outVal !== inVal) && !anyFailed) {
@@ -766,21 +1069,39 @@ function makeRecord(def: any): Validator {
 }
 
 function makeMap(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const keyV = go(def.keyType);
   const valV = go(def.valueType);
+  const eager = subtreeHasEffect(def.keyType) || subtreeHasEffect(def.valueType);
   return (data, ctx): any => {
     if (!(data instanceof Map)) {
-      pushInvalidType(ctx, "map", parsedType(data));
+      pushInvalidType(ctx, data, em, "map");
       return FAILED;
     }
     let out: Map<any, any> = data;
     let dirty = false;
     let anyFailed = false;
+    let i = 0;
     for (const [k, v] of data) {
-      ctx.path.push(k);
-      const outKey = keyV(k, ctx);
-      const outVal = outKey === FAILED ? FAILED : valV(v, ctx);
-      ctx.path.pop();
+      // Issue paths follow stock: [index, "key"] and [index, "value"]; both sides are always parsed
+      let outKey: any;
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(i, "key");
+        outKey = keyV(k, ctx);
+        ctx.path[ctx.path.length - 1] = "value";
+        outVal = valV(v, ctx);
+        ctx.path.length -= 2;
+      } else {
+        const before = ctx.issues.length;
+        outKey = keyV(k, ctx);
+        const mid = ctx.issues.length;
+        outVal = valV(v, ctx);
+        if (mid !== before) prefixIssues(ctx, before, "key", mid);
+        if (ctx.issues.length !== mid) prefixIssues(ctx, mid, "value");
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+      }
+      i++;
       if (outKey === FAILED || outVal === FAILED) {
         anyFailed = true;
         continue;
@@ -800,45 +1121,54 @@ function makeMap(def: any): Validator {
 }
 
 function makeSet(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const valV = go(def.valueType);
-  const min = def.minSize?.value ?? null;
-  const max = def.maxSize?.value ?? null;
-  const exact = def.size?.value ?? null;
+  const eager = subtreeHasEffect(def.valueType);
+  const min: { value: number; message?: string } | null = def.minSize ?? null;
+  const max: { value: number; message?: string } | null = def.maxSize ?? null;
   return (data, ctx): any => {
     if (!(data instanceof Set)) {
-      pushInvalidType(ctx, "set", parsedType(data));
+      pushInvalidType(ctx, data, em, "set");
       return FAILED;
     }
-    if (min !== null && data.size < min) {
-      pushIssue(ctx, "too_small", `Set must contain at least ${min} element(s)`, {
-        minimum: min,
+    // Size checks are dirty, not aborting: the members are still parsed
+    if (min !== null && data.size < min.value) {
+      pushIssue(ctx, data, em, {
+        code: "too_small",
+        minimum: min.value,
         type: "set",
         inclusive: true,
+        exact: false,
+        message: min.message,
       });
-      return FAILED;
     }
-    if (max !== null && data.size > max) {
-      pushIssue(ctx, "too_big", `Set must contain at most ${max} element(s)`, {
-        maximum: max,
+    if (max !== null && data.size > max.value) {
+      pushIssue(ctx, data, em, {
+        code: "too_big",
+        maximum: max.value,
         type: "set",
         inclusive: true,
+        exact: false,
+        message: max.message,
       });
-      return FAILED;
-    }
-    if (exact !== null && data.size !== exact) {
-      pushIssue(
-        ctx,
-        data.size < exact ? "too_small" : "too_big",
-        `Set must contain exactly ${exact} element(s)`,
-        { minimum: exact, maximum: exact, type: "set", inclusive: true },
-      );
-      return FAILED;
     }
     let out: Set<any> = data;
     let dirty = false;
     let anyFailed = false;
+    let i = 0;
     for (const item of data) {
-      const outVal = valV(item, ctx);
+      // Issue path is the member index, as in stock
+      let outVal: any;
+      if (eager) {
+        ctx.path.push(i);
+        outVal = valV(item, ctx);
+        ctx.path.pop();
+      } else {
+        const before = ctx.issues.length;
+        outVal = valV(item, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+      }
+      i++;
       if (outVal === FAILED) {
         anyFailed = true;
         continue;
@@ -859,67 +1189,62 @@ function makeSet(def: any): Validator {
 
 /* ════════════════════════════ Union / DiscriminatedUnion ════════════════════════════ */
 
-function makeUnion(options: z.ZodTypeAny[]): Validator {
-  const opts = options.map(go);
+function makeUnion(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
+  const opts: Validator[] = (def.options as z.ZodTypeAny[]).map(go);
+  const n = opts.length;
   return (data, ctx): any => {
     const base = ctx.issues.length;
-    for (let i = 0; i < opts.length; i++) {
-      const r = opts[i](data, ctx);
-      if (r !== FAILED) return r;
-      ctx.issues.length = base; // Truncate the issues produced by this branch
+    // Same as stock: the first valid option wins; failing that, the first dirty option (a value with
+    // issues) is the result and its issues stay; failing that, invalid_union with every option's issues
+    let dirtyValue: any = FAILED;
+    let dirtyIssues: Issue[] | null = null;
+    let unionIssues: Issue[][] | null = null;
+    for (let i = 0; i < n; i++) {
+      const r = opts[i]!(data, ctx);
+      if (ctx.issues.length === base) {
+        if (r !== FAILED) return r;
+        continue; // an option that aborted without an issue cannot happen; keep looking
+      }
+      const issues = ctx.issues.splice(base); // Truncate the issues produced by this option
+      if (r !== FAILED && dirtyIssues === null) {
+        dirtyValue = r;
+        dirtyIssues = issues;
+      }
+      unionIssues ??= [];
+      unionIssues.push(issues);
     }
-    pushIssue(ctx, "invalid_union", "Invalid input");
+    if (dirtyIssues !== null) {
+      for (const iss of dirtyIssues) ctx.issues.push(iss);
+      return dirtyValue;
+    }
+    pushIssue(ctx, data, em, {
+      code: "invalid_union",
+      unionErrors: (unionIssues ?? []).map((iss) => new ZcError(iss)),
+    });
     return FAILED;
   };
 }
 
 function makeDiscriminated(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const disc: string = def.discriminator;
-  const options: z.ZodTypeAny[] = def.options;
+  // Stock resolves every option's discriminator value when the schema is built (`optionsMap`)
+  const optionsMap: Map<unknown, z.ZodTypeAny> = def.optionsMap;
   const map = new Map<unknown, Validator>();
-  let fast = options.length > 0;
-  for (const opt of options) {
-    const od: any = (opt as any)._def;
-    if (od.typeName !== "ZodObject") {
-      fast = false;
-      break;
-    }
-    const dSchema = od.shape()[disc];
-    if (dSchema instanceof z.ZodLiteral) {
-      map.set(dSchema._def.value, go(opt));
-    } else if (dSchema instanceof z.ZodEnum) {
-      for (const v of dSchema._def.values) map.set(v, go(opt));
-    } else {
-      fast = false;
-      break;
-    }
-  }
-  if (!fast) return makeUnion(options);
-
-  const discValues = new Set(map.keys());
-  const expected = [...discValues].map((v) => `'${String(v)}'`).join(" | ");
+  for (const [v, opt] of optionsMap) map.set(v, go(opt));
+  const options = [...optionsMap.keys()];
   return (data, ctx): any => {
     if (data === null || typeof data !== "object" || Array.isArray(data)) {
-      pushInvalidType(ctx, "object", parsedType(data));
+      pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
-    const key = data[disc];
-    if (!discValues.has(key)) {
-      ctx.path.push(disc);
-      pushIssue(
-        ctx,
-        "invalid_union_discriminator",
-        `Invalid input: expected one of ${expected}, received '${String(key)}'`,
-      );
-      ctx.path.pop();
+    const option = map.get(data[disc]);
+    if (option === undefined) {
+      pushIssue(ctx, data, em, { code: "invalid_union_discriminator", options, path: [disc] });
       return FAILED;
     }
-    const base = ctx.issues.length;
-    const r = map.get(key)!(data, ctx);
-    if (r !== FAILED) return r;
-    ctx.issues.length = base;
-    pushIssue(ctx, "invalid_union", "Invalid input");
-    return FAILED;
+    return option(data, ctx); // The option's result passes through as it is, issues included (same as stock)
   };
 }
 
@@ -931,68 +1256,88 @@ interface EffectShim {
   addIssue(arg: any): void;
 }
 
-function makeShim(holder: { ctx: Ctx | null }): EffectShim {
+interface EffectHolder {
+  ctx: Ctx | null;
+  /** The effect node's input, handed to the error maps as `data` (same as stock) */
+  data: unknown;
+  /** Set by `addIssue({ fatal: true })`: the refinement aborts instead of going on dirty */
+  fatal: boolean;
+}
+
+function makeShim(holder: EffectHolder, em: ZodErrorMap | undefined): EffectShim {
   return {
     get path() {
       return holder.ctx ? holder.ctx.path.slice() : [];
     },
     addIssue(arg: any) {
       const ctx = holder.ctx!;
-      if (typeof arg === "string") {
-        pushIssue(ctx, "custom", arg);
-        return;
-      }
-      const path: PathSegment[] = [...ctx.path, ...(arg?.path ?? [])];
-      const issue: Issue = {
-        code: arg?.code ?? "custom",
-        message: arg?.message ?? "Invalid input.",
-        path,
-      };
-      if (arg?.expected !== undefined) issue.expected = String(arg.expected);
-      if (arg?.received !== undefined) issue.received = String(arg.received);
-      ctx.issues.push(issue);
+      const issue: IssueData =
+        typeof arg === "string" ? { code: "custom", message: arg } : { ...arg };
+      if (issue.code === undefined) issue.code = "custom";
+      pushIssue(ctx, holder.data, em, issue);
+      if (issue.fatal) holder.fatal = true;
     },
   };
 }
 
+function isThenable(v: unknown): boolean {
+  return v !== null && typeof v === "object" && typeof (v as any).then === "function";
+}
+
 function makeEffects(def: any): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
   const inner = go(def.schema);
   const eff = def.effect;
+  const holder: EffectHolder = { ctx: null, data: undefined, fatal: false };
+  const shim = makeShim(holder, em);
 
   if (eff.type === "preprocess") {
-    const holder: { ctx: Ctx | null } = { ctx: null };
-    const shim = makeShim(holder);
     return (data, ctx) => {
       holder.ctx = ctx;
+      holder.data = data;
       const mapped = eff.transform(data, shim); // May throw (same as stock, propagates upward)
+      if (isThenable(mapped)) {
+        throw new ZcNotSupportedError(
+          "async preprocess (the sync compiler only accepts sync data)",
+        );
+      }
+      // Same as stock: with any issue on the context at this point the raw input goes on as dirty
+      if (ctx.issues.length !== 0) return data;
       return inner(mapped, ctx);
     };
   }
 
   if (eff.type === "transform") {
-    const holder: { ctx: Ctx | null } = { ctx: null };
-    const shim = makeShim(holder);
     return (data, ctx) => {
+      const base = ctx.issues.length;
       const r = inner(data, ctx);
       if (r === FAILED) return FAILED;
+      if (ctx.issues.length !== base) return r; // dirty: stock does not run the transform
       holder.ctx = ctx;
-      return eff.transform(r, shim); // Returns a new value → the parent's reference comparison marks dirty automatically
+      holder.data = data;
+      const t = eff.transform(r, shim); // Returns a new value → the parent's reference comparison marks dirty automatically
+      if (isThenable(t)) {
+        throw new ZcNotSupportedError(
+          "async transforms (the sync compiler only accepts sync data)",
+        );
+      }
+      return t;
     };
   }
 
   // refinement: a pure predicate. By contract the callback must not modify the input (the premise of CoW, explained in the README).
-  const holder: { ctx: Ctx | null } = { ctx: null };
-  const shim = makeShim(holder);
+  // Same as stock, it also runs on a dirty inner value (a failed check), only an aborted inner skips it.
   return (data, ctx) => {
     const r = inner(data, ctx);
     if (r === FAILED) return FAILED;
-    const base = ctx.issues.length;
     holder.ctx = ctx;
+    holder.data = data;
+    holder.fatal = false;
     const ret = eff.refinement(r, shim);
-    if (ret && typeof (ret as any).then === "function") {
+    if (isThenable(ret)) {
       throw new ZcNotSupportedError("async refinements (the sync compiler only accepts sync data)");
     }
-    return ctx.issues.length > base ? FAILED : r;
+    return holder.fatal ? FAILED : r;
   };
 }
 
@@ -1010,37 +1355,101 @@ function makeDefault(def: any): Validator {
 
 function makeCatch(def: any): Validator {
   const inner = go(def.innerType);
-  const catchValue: (p: { input: unknown; issues: Issue[] }) => unknown = def.catchValue;
+  const catchValue: (p: { error: ZcError; input: unknown }) => unknown = def.catchValue;
   return (data, ctx) => {
     const base = ctx.issues.length;
-    try {
-      const r = inner(data, ctx);
-      if (r !== FAILED) return r;
-    } catch {
-      /* Swallow the exception → fall through to the catch value (same behavior as stock) */
-    }
-    ctx.issues.length = base; // Discard the inner issues (stock uses a separate ctx and likewise does not surface them)
-    return catchValue({ input: data, issues: [] });
+    const r = inner(data, ctx); // A throwing callback propagates, as in stock (no try/catch)
+    if (r !== FAILED && ctx.issues.length === base) return r;
+    // Aborted or dirty: the inner issues are dropped (stock parses into a separate context) and
+    // handed to the catch callback, which gets the input too
+    const issues = ctx.issues.splice(base);
+    return catchValue({
+      get error() {
+        return new ZcError(issues);
+      },
+      input: data,
+    });
   };
+}
+
+/**
+ * Whether stock zod builds a fresh container for this schema's valid output (object / array /
+ * tuple / record / map / set, or a wrapper around one), so that `readonly` freezes a copy there
+ * and leaves the caller's input untouched. A pass-through leaf (`any` / `unknown`) returns the
+ * input itself in stock and is frozen in place there too; a Date is rebuilt by stock as well.
+ * Transforms are treated as rebuilding:
+ * the callback saw a different reference in stock, so freezing a copy is the safe direction.
+ */
+function stockRebuilds(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
+  if (seen.has(schema)) return true;
+  seen.add(schema);
+  const def: any = (schema as any)._def;
+  switch (def.typeName) {
+    case "ZodObject":
+    case "ZodArray":
+    case "ZodTuple":
+    case "ZodRecord":
+    case "ZodMap":
+    case "ZodSet":
+    case "ZodDate": // stock returns `new Date(input.getTime())`
+      return true;
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return (def.options as z.ZodTypeAny[]).some((o) => stockRebuilds(o, seen));
+    case "ZodEffects":
+      return def.effect.type === "transform" ? true : stockRebuilds(def.schema, seen);
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+    case "ZodCatch":
+    case "ZodReadonly":
+      return stockRebuilds(def.innerType, seen);
+    case "ZodPipeline":
+      return stockRebuilds(def.out, seen);
+    case "ZodBranded":
+      return stockRebuilds(def.type, seen);
+    case "ZodLazy":
+      return stockRebuilds(def.getter(), seen);
+    default:
+      return false;
+  }
+}
+
+function shallowCopy(v: object): object {
+  if (Array.isArray(v)) return v.slice();
+  if (v instanceof Date) return new Date(v.getTime());
+  if (v instanceof Map) return new Map(v);
+  if (v instanceof Set) return new Set(v);
+  return { ...v };
 }
 
 function makeReadonly(def: any): Validator {
   const inner = go(def.innerType);
+  const copyBeforeFreeze = stockRebuilds(def.innerType);
   return (data, ctx) => {
-    const r = inner(data, ctx);
+    const base = ctx.issues.length;
+    let r = inner(data, ctx);
     if (r === FAILED) return FAILED;
-    // Same as stock: a shallow freeze. Under CoW this is actually an advantage — frozen shared structure is naturally tamper-proof.
-    if (r !== null && (typeof r === "object" || typeof r === "function")) Object.freeze(r);
+    if (ctx.issues.length !== base) return r; // dirty: stock does not freeze a dirty value
+    if (r !== null && (typeof r === "object" || typeof r === "function")) {
+      // Stock freezes the output it built. Where that output would be a fresh container, freeze a
+      // copy so the caller's input is not frozen in place (#27); a pass-through leaf is frozen in
+      // place, exactly as stock does.
+      if (r === data && copyBeforeFreeze) r = shallowCopy(r);
+      Object.freeze(r);
+    }
     return r;
   };
 }
 
 function makePipe(def: any): Validator {
-  const a = go(def.in ?? def.a);
-  const b = go(def.out ?? def.b);
+  const a = go(def.in);
+  const b = go(def.out);
   return (data, ctx) => {
+    const base = ctx.issues.length;
     const r = a(data, ctx);
     if (r === FAILED) return FAILED;
+    if (ctx.issues.length !== base) return r; // dirty: stock stops before the `out` side
     return b(r, ctx); // The dirty mark propagates naturally along the chain
   };
 }
@@ -1067,76 +1476,53 @@ export function go(schema: z.ZodTypeAny): Validator {
   return real;
 }
 
+function leaf(def: any, expected: string, test: (data: any) => boolean): Validator {
+  const em: ZodErrorMap | undefined = def.errorMap;
+  return (data, ctx) => {
+    if (!test(data)) {
+      pushInvalidType(ctx, data, em, expected);
+      return FAILED;
+    }
+    return data;
+  };
+}
+
 function build(def: any): Validator {
   switch (def.typeName) {
     case "ZodString":
       return makeString(def);
     case "ZodNumber":
       return makeNumber(def);
-    case "ZodBoolean":
+    case "ZodBoolean": {
+      const em: ZodErrorMap | undefined = def.errorMap;
+      const coerce = !!def.coerce;
       return (data, ctx) => {
+        if (coerce) data = Boolean(data);
         if (typeof data !== "boolean") {
-          pushInvalidType(ctx, "boolean", parsedType(data));
+          pushInvalidType(ctx, data, em, "boolean");
           return FAILED;
         }
         return data;
       };
+    }
     case "ZodBigInt":
-      return (data, ctx) => {
-        if (typeof data !== "bigint") {
-          pushInvalidType(ctx, "bigint", parsedType(data));
-          return FAILED;
-        }
-        return data;
-      };
+      return makeBigInt(def);
     case "ZodSymbol":
-      return (data, ctx) => {
-        if (typeof data !== "symbol") {
-          pushInvalidType(ctx, "symbol", parsedType(data));
-          return FAILED;
-        }
-        return data;
-      };
+      return leaf(def, "symbol", (d) => typeof d === "symbol");
     case "ZodNull":
-      return (data, ctx) => {
-        if (data !== null) {
-          pushInvalidType(ctx, "null", parsedType(data));
-          return FAILED;
-        }
-        return data;
-      };
+      return leaf(def, "null", (d) => d === null);
     case "ZodUndefined":
-      return (data, ctx) => {
-        if (data !== undefined) {
-          pushInvalidType(ctx, "undefined", parsedType(data));
-          return FAILED;
-        }
-        return data;
-      };
+      return leaf(def, "undefined", (d) => d === undefined);
     case "ZodVoid":
-      return (data, ctx) => {
-        if (data !== undefined) {
-          pushInvalidType(ctx, "void", parsedType(data));
-          return FAILED;
-        }
-        return data;
-      };
+      return leaf(def, "void", (d) => d === undefined);
     case "ZodAny":
     case "ZodUnknown":
       return (data) => data; // Accepts everything, pure pass-through
     case "ZodNever":
-      return (data, ctx) => {
-        pushInvalidType(ctx, "never", parsedType(data));
-        return FAILED;
-      };
+      return leaf(def, "never", () => false);
     case "ZodNaN":
-      return (data, ctx) => {
-        if (typeof data !== "number" || !Number.isNaN(data)) {
-          pushInvalidType(ctx, "nan", parsedType(data));
-          return FAILED;
-        }
-        return data; // Note NaN !== NaN is always true → the parent always marks dirty (output is still correct, just one extra copy)
-      };
+      // Note NaN !== NaN is always true → the parent always marks dirty (output is still correct, just one extra copy)
+      return leaf(def, "nan", (d) => typeof d === "number" && Number.isNaN(d));
     case "ZodDate":
       return makeDate(def);
     case "ZodLiteral":
@@ -1158,7 +1544,7 @@ function build(def: any): Validator {
     case "ZodSet":
       return makeSet(def);
     case "ZodUnion":
-      return makeUnion(def.options);
+      return makeUnion(def);
     case "ZodDiscriminatedUnion":
       return makeDiscriminated(def);
     case "ZodEffects":
@@ -1205,6 +1591,7 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
   if (seen.has(schema)) return true; // z.lazy cycle: nodes on the cycle count as pure (the caller guarantees their expansion)
   seen.add(schema);
   const def: any = (schema as any)._def;
+  if (def.coerce) return false;
   switch (def.typeName) {
     case "ZodString":
       return (def.checks ?? []).every(
@@ -1249,8 +1636,10 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
       return def.effect.type === "refinement" && isStaticPure(def.schema, seen);
     case "ZodOptional":
     case "ZodNullable":
-    case "ZodReadonly":
       return isStaticPure(def.innerType, seen);
+    case "ZodReadonly":
+      // Frozen copy for containers (#27): only a pass-through leaf keeps the reference
+      return !stockRebuilds(def.innerType) && isStaticPure(def.innerType, seen);
     case "ZodPipeline":
       return isStaticPure(def.in, seen) && isStaticPure(def.out, seen);
     case "ZodBranded":

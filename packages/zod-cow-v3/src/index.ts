@@ -52,6 +52,22 @@ export interface Compiled<T extends z.ZodTypeAny> {
   safeParse(data: unknown): SafeParseResult<z.output<T>>;
 }
 
+/**
+ * Failure result with a lazy `error`: the `ZcError` (an `Error`, so a stack capture plus the joined
+ * message) is built on first access, as stock zod's `safeParse` does. A caller that only reads
+ * `success` pays for the issues alone.
+ */
+function failure<T>(issues: Issue[]): SafeParseResult<T> {
+  let error: ZcError | undefined;
+  return {
+    success: false,
+    get error(): ZcError {
+      error ??= new ZcError(issues);
+      return error;
+    },
+  };
+}
+
 export function compile<T extends z.ZodTypeAny>(schema: T): Compiled<T> {
   const validator = go(schema);
   const pure = isStaticPure(schema);
@@ -63,7 +79,8 @@ export function compile<T extends z.ZodTypeAny>(schema: T): Compiled<T> {
     parse(data: unknown): z.output<T> {
       const ctx = { issues: [], path: [] as (string | number)[] };
       const r = validator(data, ctx);
-      if (r === FAILED) throw new ZcError(ctx.issues as Issue[]);
+      // FAILED = aborted; a value with issues = dirty (a failed check): both are a failed parse, as in stock
+      if (r === FAILED || ctx.issues.length !== 0) throw new ZcError(ctx.issues as Issue[]);
       return r as z.output<T>;
     },
 
@@ -74,7 +91,7 @@ export function compile<T extends z.ZodTypeAny>(schema: T): Compiled<T> {
     safeParse(data: unknown): SafeParseResult<z.output<T>> {
       const ctx = { issues: [], path: [] as (string | number)[] };
       const r = validator(data, ctx);
-      if (r === FAILED) return { success: false, error: new ZcError(ctx.issues as Issue[]) };
+      if (r === FAILED || ctx.issues.length !== 0) return failure(ctx.issues as Issue[]);
       return { success: true, data: r as z.output<T> };
     },
   };

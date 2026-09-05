@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx tests/harness.test.ts && tsx tests/unit.test.ts && tsx tests/differential.test.ts",
+    "test": "tsx tests/harness.test.ts && tsx tests/unit.test.ts && tsx tests/differential.test.ts && tsx tests/differential.test.ts --no-codegen",
     "probe": "tsx src/probe.ts"
   },
   "devDependencies": {

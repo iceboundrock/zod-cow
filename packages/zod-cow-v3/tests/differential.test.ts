@@ -2,14 +2,22 @@
  * Differential fuzz test — random schema + data, comparing the compiled layer against stock zod:
  *   1. Success/failure parity
  *   2. On success, output values are deepStrictEqual (key-set semantics aligned: absent optional keys, present-undefined, etc.)
- *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place
+ *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place,
+ *      and never freeze the input (readonly freezes a copy, #27)
+ *   4. On failure, the issue lists agree on count, codes, paths and messages (the params beyond
+ *      those are compared for the fields stock and this line both carry)
  * Extra statistic: top-level reference sharing rate (CoW hit rate).
  *
  * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro.
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
-import { compile } from "../src/index.js";
+
+// `--no-codegen` runs the same cases through the closure skeletons (the fallback used where
+// `new Function` is unavailable); the flag must be set before the compiler module loads
+const noCodegen = process.argv.includes("--no-codegen");
+if (noCodegen) process.env.ZC_V3_CODEGEN = "0";
+const { compile } = await import("../src/index.js");
 
 /* ─────────────────────────── deterministic RNG ─────────────────────────── */
 
@@ -113,6 +121,19 @@ function bString(rng: RNG): Built {
     s = s.email();
     desc += ".email()";
   }
+  if (rng.chance(0.06)) {
+    const n = rng.pick([1, 3, 5] as const);
+    s = s.length(n);
+    desc += `.length(${n})`;
+  }
+  if (rng.chance(0.06)) {
+    s = s.includes("b");
+    desc += '.includes("b")';
+  }
+  if (rng.chance(0.05)) {
+    s = s.startsWith("a", "must start with a");
+    desc += '.startsWith("a", msg)';
+  }
   if (rng.chance(0.1)) {
     s = s.trim();
     desc += ".trim()";
@@ -137,8 +158,13 @@ function bNumber(rng: RNG): Built {
   }
   if (rng.chance(0.3)) {
     const n = rng.pick([1, 2, 5, 10] as const);
-    s = s.min(n);
-    desc += `.min(${n})`;
+    if (rng.chance(0.3)) {
+      s = s.min(n, { message: `at least ${n}` });
+      desc += `.min(${n}, msg)`;
+    } else {
+      s = s.min(n);
+      desc += `.min(${n})`;
+    }
   }
   if (rng.chance(0.3)) {
     const n = rng.pick([3, 8, 50, 1000] as const);
@@ -157,7 +183,7 @@ function bNumber(rng: RNG): Built {
 }
 
 function bLeaf(rng: RNG): Built {
-  const which = rng.int(7);
+  const which = rng.int(9);
   switch (which) {
     case 0:
       return bString(rng);
@@ -183,8 +209,35 @@ function bLeaf(rng: RNG): Built {
     }
     case 5:
       return { schema: z.bigint(), desc: "bigint", gen: (r) => r.pick(BIGINTS) };
+    case 6:
+      return {
+        schema: z.date(),
+        desc: "date",
+        // A fresh Date per case: a readonly over a date freezes the instance in place (stock too)
+        gen: (r) => {
+          const v = r.pick(DATES);
+          return v instanceof Date ? new Date(v.getTime()) : v;
+        },
+      };
+    case 7: {
+      const E = { A: "a", B: "b", C: 3 } as const;
+      return {
+        schema: z.nativeEnum(E),
+        desc: "nativeEnum(A|B|C=3)",
+        gen: (r) =>
+          r.chance(0.25) ? r.pick(["z", 4, null, true] as const) : r.pick(["a", "b", 3] as const),
+      };
+    }
     default:
-      return { schema: z.date(), desc: "date", gen: (r) => r.pick(DATES) };
+      // create params: a required_error / invalid_type_error map on a plain string
+      return {
+        schema: z.string({
+          required_error: "name required",
+          invalid_type_error: "name must be text",
+        }),
+        desc: "string({required_error, invalid_type_error})",
+        gen: (r) => (r.chance(0.3) ? r.pick(NON_STRINGS) : r.pick(STRINGS)),
+      };
   }
 }
 
@@ -198,7 +251,7 @@ function validValueFor(b: Built, rng: RNG): unknown {
 }
 
 function bWrap(rng: RNG, inner: Built): Built {
-  const which = rng.int(5);
+  const which = rng.int(7);
   if (which === 0) {
     return {
       schema: inner.schema.optional(),
@@ -229,6 +282,21 @@ function bWrap(rng: RNG, inner: Built): Built {
     return {
       schema: inner.schema.refine((v: unknown) => v !== "forbidden", "value is forbidden"),
       desc: `${inner.desc}.refine(≠forbidden)`,
+      gen: inner.gen,
+    };
+  }
+  if (which === 5) {
+    const cv = validValueFor(inner, rng);
+    return {
+      schema: inner.schema.catch(cv as never),
+      desc: `${inner.desc}.catch(${repr(cv)})`,
+      gen: inner.gen,
+    };
+  }
+  if (which === 6) {
+    return {
+      schema: inner.schema.readonly(),
+      desc: `${inner.desc}.readonly()`,
       gen: inner.gen,
     };
   }
@@ -320,6 +388,95 @@ function bRecord(rng: RNG, depth: number): Built {
   };
 }
 
+function bTuple(rng: RNG, depth: number): Built {
+  const a = bChild(rng, depth);
+  const b = bChild(rng, depth);
+  return {
+    schema: z.tuple([a.schema, b.schema]),
+    desc: `tuple(${a.desc}, ${b.desc})`,
+    gen: (r) => {
+      const roll = r.next();
+      const va = a.gen(r);
+      const vb = b.gen(r);
+      const items = [va === ABSENT ? undefined : va, vb === ABSENT ? undefined : vb];
+      if (roll < 0.1) return items.slice(0, 1);
+      if (roll < 0.2) return [...items, 1];
+      if (roll < 0.25) return r.pick(["x", 1, null, {}] as const);
+      return items;
+    },
+  };
+}
+
+function bMap(rng: RNG, depth: number): Built {
+  const inner = bChild(rng, depth);
+  return {
+    schema: z.map(z.string().min(1), inner.schema),
+    desc: `map(string.min(1), ${inner.desc})`,
+    gen: (r) => {
+      if (r.chance(0.1)) return r.pick([{}, [], "x"] as const);
+      const m = new Map<unknown, unknown>();
+      const n = r.int(4);
+      for (let i = 0; i < n; i++) {
+        const v = inner.gen(r);
+        m.set(r.chance(0.1) ? "" : r.chance(0.1) ? i : `k${i}`, v === ABSENT ? undefined : v);
+      }
+      return m;
+    },
+  };
+}
+
+function bSet(rng: RNG, depth: number): Built {
+  const inner = bChild(rng, depth);
+  let schema = z.set(inner.schema);
+  let desc = `set(${inner.desc})`;
+  if (rng.chance(0.3)) {
+    schema = schema.max(2);
+    desc += ".max(2)";
+  }
+  return {
+    schema,
+    desc,
+    gen: (r) => {
+      if (r.chance(0.1)) return r.pick([[], {}, 1] as const);
+      const out = new Set<unknown>();
+      const n = r.int(4);
+      for (let i = 0; i < n; i++) {
+        const v = inner.gen(r);
+        out.add(v === ABSENT ? undefined : v);
+      }
+      return out;
+    },
+  };
+}
+
+function bDiscriminated(rng: RNG, depth: number): Built {
+  const a = bChild(rng, depth);
+  const b = bChild(rng, depth);
+  const A = z.object({ kind: z.literal("a"), v: a.schema });
+  const B = z.object({ kind: z.literal("b"), w: b.schema });
+  return {
+    schema: z.discriminatedUnion("kind", [A, B]),
+    desc: `discriminatedUnion(kind, {a, v: ${a.desc}}, {b, w: ${b.desc}})`,
+    gen: (r) => {
+      const roll = r.next();
+      if (roll < 0.1) return { kind: "c" };
+      if (roll < 0.15) return r.pick([null, 1, "a"] as const);
+      const out: Record<string, unknown> = {};
+      if (roll < 0.575) {
+        out.kind = "a";
+        const v = a.gen(r);
+        if (v !== ABSENT) out.v = v;
+      } else {
+        out.kind = "b";
+        const v = b.gen(r);
+        if (v !== ABSENT) out.w = v;
+      }
+      if (r.chance(0.2)) out.extra = 1;
+      return out;
+    },
+  };
+}
+
 function bUnion(rng: RNG, _depth: number): Built {
   const n = 2 + rng.int(2);
   const branches: Built[] = [];
@@ -350,11 +507,15 @@ function bChild(rng: RNG, depth: number): Built {
 function bAny(rng: RNG, depth: number): Built {
   const roll = rng.next();
   if (depth <= 0) return bLeaf(rng);
-  if (roll < 0.45) return bLeaf(rng);
-  if (roll < 0.65) return bObject(rng, depth);
-  if (roll < 0.77) return bArray(rng, depth);
-  if (roll < 0.85) return bRecord(rng, depth);
-  if (roll < 0.93) return bUnion(rng, depth);
+  if (roll < 0.4) return bLeaf(rng);
+  if (roll < 0.58) return bObject(rng, depth);
+  if (roll < 0.68) return bArray(rng, depth);
+  if (roll < 0.74) return bRecord(rng, depth);
+  if (roll < 0.8) return bUnion(rng, depth);
+  if (roll < 0.85) return bTuple(rng, depth);
+  if (roll < 0.89) return bMap(rng, depth);
+  if (roll < 0.93) return bSet(rng, depth);
+  if (roll < 0.96) return bDiscriminated(rng, depth);
   return bWrap(rng, bLeaf(rng));
 }
 
@@ -367,7 +528,29 @@ let bothOk = 0;
 let bothFail = 0;
 let refShared = 0;
 let refSharedSuccess = 0;
+let issueMismatches = 0;
 const failures: string[] = [];
+
+/**
+ * Canonical view of an issue list: code, path and message per issue, plus the params both sides
+ * carry (a union's nested errors are compared by their own issue views), sorted so the order of
+ * collection does not matter.
+ */
+function issueView(issues: readonly any[]): string {
+  const one = (i: any): string => {
+    const params: Record<string, unknown> = {};
+    for (const k of Object.keys(i).sort()) {
+      if (k === "code" || k === "path" || k === "message" || k === "fatal") continue;
+      if (k === "unionErrors") {
+        params[k] = i[k].map((e: any) => issueView(e.issues));
+        continue;
+      }
+      params[k] = i[k];
+    }
+    return `${i.code}@${repr(i.path)} ${repr(i.message)} ${repr(params)}`;
+  };
+  return issues.map(one).sort().join(" ; ");
+}
 
 for (let seed = 1; seed <= SEEDS; seed++) {
   const rng = makeRng(seed);
@@ -387,11 +570,14 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     }
 
     const snapshot = structuredClone(input);
+    // Stock parses its own clone: a readonly over a pass-through leaf freezes the input in place on
+    // both sides (stock behavior), so frozenness is compared between the two inputs afterwards
+    const stockInput = structuredClone(input);
 
     let stock: z.SafeParseReturnType<unknown, unknown> | null = null;
     let stockThrew: Error | null = null;
     try {
-      stock = built.schema.safeParse(input as never);
+      stock = built.schema.safeParse(stockInput as never);
     } catch (e) {
       stockThrew = e as Error;
     }
@@ -431,8 +617,32 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       continue;
     }
 
+    // Never freeze the caller's input where stock does not (readonly freezes a copy for containers, #27)
+    if (
+      input !== null &&
+      typeof input === "object" &&
+      Object.isFrozen(input) !== Object.isFrozen(stockInput as object)
+    ) {
+      failures.push(
+        `INPUT FROZENNESS MISMATCH stock=${Object.isFrozen(stockInput as object)} ours=${Object.isFrozen(input)} → ${caseId}`,
+      );
+      continue;
+    }
+
     if (stock!.success) {
       bothOk++;
+      const so = stock!.data;
+      const oo = ours!.data;
+      if (
+        so !== null &&
+        typeof so === "object" &&
+        Object.isFrozen(so) !== Object.isFrozen(oo as object)
+      ) {
+        failures.push(
+          `FROZENNESS MISMATCH stock=${Object.isFrozen(so)} ours=${Object.isFrozen(oo as object)} → ${caseId}`,
+        );
+        continue;
+      }
       if (!assertDeepEqual(ours!.data, stock!.data)) {
         failures.push(
           `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}`,
@@ -443,11 +653,19 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       if (ours!.data === input) refShared++;
     } else {
       bothFail++;
+      const sv = issueView((stock as any).error.issues);
+      const ov = issueView((ours!.error as any).issues);
+      if (sv !== ov) {
+        issueMismatches++;
+        failures.push(`ISSUE MISMATCH\n      stock: ${sv}\n      ours:  ${ov}\n      ${caseId}`);
+      }
     }
   }
 }
 
-console.log(`differential: ${total} cases | success=${bothOk} fail=${bothFail}`);
+console.log(
+  `differential (${noCodegen ? "closure skeletons, --no-codegen" : "generated skeletons"}): ${total} cases | success=${bothOk} fail=${bothFail} | issue lists compared on every failing case (${issueMismatches} mismatches)`,
+);
 if (refSharedSuccess > 0) {
   console.log(
     `CoW top-level reference sharing: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +

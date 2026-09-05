@@ -342,6 +342,7 @@ test("preprocess / pipe / readonly / branded / optional / nullable / tuple", () 
   const roIn = { a: "x" };
   const roOut = RO.parse(roIn) as any;
   assert.equal(Object.isFrozen(roOut), true); // same as stock readonly: shallow freeze
+  assert.equal(Object.isFrozen(roIn), false); // of a copy, the caller's input is untouched (#27)
 
   const BR = compile(z.object({ a: z.string() }).brand<"B">());
   const brIn = { a: "x" };
@@ -400,6 +401,202 @@ test("unsupported features: an explicit compile-time error (rather than a silent
 test("async refine → explicit runtime error", () => {
   const C = compile(z.string().refine(async () => true));
   assert.throws(() => C.parse("x" as never), ZcNotSupportedError);
+});
+
+console.log("── readonly (#27) ──");
+
+test("readonly freezes a copy where stock builds a new container, and the input in place where stock passes it through", () => {
+  for (const [S, input] of [
+    [z.object({ a: z.string() }).readonly(), { a: "x" }],
+    [z.array(z.number()).readonly(), [1, 2]],
+    [z.tuple([z.string()]).readonly(), ["a"]],
+    [z.record(z.string(), z.number()).readonly(), { k: 1 }],
+    [z.map(z.string(), z.number()).readonly(), new Map([["k", 1]])],
+    [z.set(z.number()).readonly(), new Set([1])],
+    [z.date().readonly(), new Date(0)],
+    [z.object({ a: z.string() }).optional().readonly(), { a: "x" }],
+  ] as const) {
+    const stockOut = S.parse(input as never) as object;
+    const out = compile(S as z.ZodTypeAny).parse(input) as object;
+    assert.equal(Object.isFrozen(input), false, `input frozen for ${S.constructor.name}`);
+    assert.equal(Object.isFrozen(out), true);
+    assert.notEqual(out, input);
+    assert.deepEqual(out, stockOut);
+  }
+  // Pass-through leaf: stock returns the input itself and freezes it in place; so does the compiled line
+  const anyIn = { a: 1 };
+  const stockIn = { a: 1 };
+  z.any().readonly().parse(stockIn);
+  compile(z.any().readonly()).parse(anyIn);
+  assert.equal(Object.isFrozen(stockIn), true);
+  assert.equal(Object.isFrozen(anyIn), true);
+  // A dirty value is not frozen (stock freezes valid results only)
+  const D = compile(z.object({ a: z.string().min(3) }).readonly());
+  assert.equal(D.safeParse({ a: "x" }).success, false);
+  assert.equal(compile(z.object({ a: z.string() }).readonly()).pure, false);
+});
+
+console.log("── failure semantics against stock (issue lists) ──");
+
+/** code, path and message of every issue, sorted */
+function issuesOf(r: { success: boolean; error?: { issues: any[] } }): string[] {
+  assert.equal(r.success, false);
+  return r.error!.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}:${i.message}`).sort();
+}
+function sameIssues(S: z.ZodTypeAny, input: unknown): void {
+  assert.deepEqual(issuesOf(compile(S).safeParse(input)), issuesOf(S.safeParse(input)));
+}
+
+test("a failed check is dirty: later checks still run and every issue is collected, as in stock", () => {
+  sameIssues(z.string().min(3).email(), "ab");
+  sameIssues(z.number().int().max(1), 1.5);
+  sameIssues(z.array(z.number()).max(1), [1, "x", 3]);
+  sameIssues(z.set(z.number()).max(1), new Set([1, 2, "x"]));
+  sameIssues(z.tuple([z.number(), z.number()]), [1, "x", 3]);
+  const two = compile(z.string().min(3).email()).safeParse("ab");
+  assert.equal(two.success ? 0 : two.error.issues.length, 2);
+});
+
+test("a refinement runs on a dirty value and its issue joins the list; a fatal issue aborts", () => {
+  let calls = 0;
+  const S = z.object({ a: z.string().min(3) }).refine(() => {
+    calls++;
+    return false;
+  }, "obj refine");
+  sameIssues(S, { a: "x" });
+  assert.equal(calls, 2); // stock and compiled both ran it once on the dirty object
+  const F = z.string().superRefine((_v, ctx) => {
+    ctx.addIssue({ code: "custom", message: "stop", fatal: true });
+  });
+  sameIssues(
+    z.object({ a: F }).refine(() => false, "never reached"),
+    { a: "x" },
+  );
+});
+
+test("union: a dirty option is the result and its issues stay; otherwise invalid_union carries every option's errors", () => {
+  sameIssues(z.union([z.string().min(3), z.number()]), "ab");
+  sameIssues(z.union([z.string(), z.number()]), true);
+  const r = compile(z.object({ u: z.union([z.string(), z.number()]) })).safeParse({ u: true });
+  assert.equal(r.success, false);
+  const issue = r.error!.issues[0]! as any;
+  assert.equal(issue.code, "invalid_union");
+  assert.deepEqual(issue.path, ["u"]);
+  assert.deepEqual(
+    issue.unionErrors.map((e: any) => e.issues[0].path),
+    [["u"], ["u"]],
+  ); // nested issues carry the absolute path, as stock's ZodErrors do
+});
+
+test("discriminated union: the option's own issues pass through; a bad discriminator is invalid_union_discriminator", () => {
+  const S = z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("a"), x: z.number() }),
+    z.object({ kind: z.literal("b"), y: z.string() }),
+  ]);
+  sameIssues(S, { kind: "a", x: "no" });
+  sameIssues(S, { kind: "c" });
+  sameIssues(z.object({ d: S }), { d: { kind: "c" } });
+});
+
+test("strict object: unrecognized_keys is reported next to the children's issues", () => {
+  sameIssues(z.object({ a: z.string() }).strict(), { a: 1, b: 2, c: 3 });
+  sameIssues(z.object({ a: z.string().min(3) }).strict(), { a: "x", b: 2 });
+});
+
+test("paths: Map [index, key|value], Set [index], nested containers, lazy and eager subtrees agree with stock", () => {
+  sameIssues(
+    z.map(z.string(), z.number()),
+    new Map<unknown, unknown>([
+      ["a", "x"],
+      [1, 2],
+    ]),
+  );
+  sameIssues(z.set(z.number()), new Set([1, "x"]));
+  sameIssues(z.object({ list: z.array(z.object({ v: z.number() })) }), {
+    list: [{ v: 1 }, { v: "x" }],
+  });
+  // eager (an effect below) and lazy (none) variants of the same failure
+  sameIssues(z.object({ n: z.object({ m: z.string().refine(() => true) }) }), { n: { m: 1 } });
+  sameIssues(z.object({ n: z.object({ m: z.string() }) }), { n: { m: 1 } });
+  sameIssues(z.record(z.string().min(2), z.number()), { a: "x" });
+});
+
+test("messages and params follow stock: Required, integer received float, enum options, literal received, error maps", () => {
+  sameIssues(z.object({ a: z.string() }), {});
+  sameIssues(z.number().int(), 1.5);
+  sameIssues(z.enum(["a", "b"]), "c");
+  sameIssues(z.enum(["a", "b"]), 1);
+  sameIssues(z.nativeEnum({ A: 1, B: 2 } as const), 3);
+  sameIssues(z.literal("x"), 7);
+  sameIssues(z.string({ required_error: "need it", invalid_type_error: "text please" }), undefined);
+  sameIssues(z.string({ required_error: "need it", invalid_type_error: "text please" }), 5);
+  sameIssues(z.string().min(2, "custom min"), "a");
+  sameIssues(z.number().multipleOf(0.1), 0.35);
+  assert.equal(compile(z.number().multipleOf(0.1)).safeParse(0.3).success, true); // float-safe remainder
+  sameIssues(z.string().length(3), "ab");
+  sameIssues(z.string().includes("q", { position: 2 }), "abc");
+  sameIssues(z.date().min(new Date(1000)), new Date(0));
+  const stockInt = z.number().int().safeParse(1.5);
+  const ourInt = compile(z.number().int()).safeParse(1.5);
+  assert.ok(!stockInt.success && !ourInt.success);
+  if (!stockInt.success && !ourInt.success)
+    assert.deepEqual(ourInt.error.issues[0], stockInt.error.issues[0]); // params included (exact, received)
+});
+
+test("coerce, bigint checks, jwt alg: supported like stock", () => {
+  assert.equal(compile(z.coerce.string()).parse(5), "5");
+  assert.equal(compile(z.coerce.number()).parse("5"), 5);
+  assert.equal(compile(z.coerce.boolean()).parse(""), false);
+  assert.equal(compile(z.coerce.bigint()).parse("5"), 5n);
+  assert.equal(compile(z.coerce.date()).parse(0).getTime(), 0);
+  assert.equal(compile(z.coerce.string()).pure, false);
+  sameIssues(z.bigint().min(5n), 1n);
+  sameIssues(z.bigint().multipleOf(2n), 3n);
+  const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.x";
+  assert.equal(
+    compile(z.string().jwt()).safeParse(jwt).success,
+    z.string().jwt().safeParse(jwt).success,
+  );
+  assert.equal(
+    compile(z.string().jwt({ alg: "RS256" })).safeParse(jwt).success,
+    z.string().jwt({ alg: "RS256" }).safeParse(jwt).success,
+  );
+});
+
+test("catch receives the inner issues and does not swallow a throwing callback", () => {
+  let seen: unknown[] = [];
+  const C = compile(
+    z
+      .string()
+      .min(3)
+      .catch((c) => {
+        seen = c.error.issues;
+        return `fallback:${String(c.input)}`;
+      }),
+  );
+  assert.equal(C.parse("x" as never), "fallback:x");
+  assert.equal((seen[0] as any).code, "too_small");
+  const T = compile(
+    z
+      .string()
+      .refine(() => {
+        throw new Error("boom");
+      })
+      .catch("safe"),
+  );
+  assert.throws(() => T.parse("x" as never), /boom/);
+});
+
+test("safeParse builds the error lazily; async transform is rejected like an async refinement", () => {
+  const C = compile(z.object({ a: z.string() }));
+  const r = C.safeParse({ a: 1 });
+  assert.equal(r.success, false);
+  if (!r.success) {
+    assert.ok(r.error instanceof ZcError);
+    assert.equal(r.error, r.error); // memoized
+  }
+  const A = compile(z.string().transform(async (s) => s));
+  assert.throws(() => A.parse("x" as never), ZcNotSupportedError);
 });
 
 test("ZcError carries issues", () => {

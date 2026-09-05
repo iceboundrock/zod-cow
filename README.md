@@ -12,15 +12,15 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 - No fork of zod and no change to the Zod API: schemas are consumed as they are (the `.def` tree is read), type inference stays `z.infer`.
 - Shape, keys and checks are resolved once at compile time into specialized validation code.
-- The layer never mutates the input on its own: nothing is deleted or rewritten in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The one in-place write that can reach the input is the `Object.freeze` of `readonly`. The zod4 line performs it exactly where stock zod 4 does, on a pass-through leaf such as `any` / `unknown` (see [When a copy is forced](#when-a-copy-is-forced) and #28); the zod3 line performs it on every `readonly` node (#27).
-- Failure paths carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
+- The layer never mutates the input on its own: nothing is deleted or rewritten in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The one in-place write that can reach the input is the `Object.freeze` of `readonly`, and both lines perform it exactly where stock does: on a pass-through leaf such as `any` / `unknown`, where stock returns the input itself (see [When a copy is forced](#when-a-copy-is-forced), #28 for the zod4 line and #27 for the zod3 line); over a container the frozen value is a copy.
+- Failure paths of the zod4 line carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`. The zod3 line builds its own `ZcError` while it walks, through zod's own error maps, with stock's issue list (codes, paths, messages and params, verified by its differential fuzzer).
 
 ## Two compiler lines
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
 | zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | Primary line: the published package, where new features go |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | Maintained: the origin of the CoW idea and a comparison baseline, kept passing and still optimized; not published |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` + `codegen.ts` | Hand-written compiler: a closure tree for leaves and wrappers, with the object / array / tuple skeletons generated per schema (`new Function`, leaf checks inlined as predicates) and closure skeletons as the fallback where `new Function` is unavailable; string format regexes copied verbatim from zod 3.24.1 | Maintained: the origin of the CoW idea and a comparison baseline, kept passing and still optimized; not published |
 
 The lines live in two workspace packages, each installing its own zod: `packages/zod-cow-v4` (published as [`zod-cow-v4`](packages/zod-cow-v4/README.md)) against zod 4.5.4, `packages/zod-cow-v3` (private) against zod 3.24.1; both import `zod` by its real specifier. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
 
@@ -32,10 +32,10 @@ Requires Node.js >= 22.13.0 and pnpm 11.24.0.
 pnpm install
 pnpm run build       # build zod-cow-v4 (ESM + declarations into packages/zod-cow-v4/dist)
 pnpm run test:v4     # zod4 line: version canary + smoke tests + 20 000-case differential fuzz against stock zod4
-pnpm run test:v3     # zod3 line: 27 unit tests + 20 000-case differential fuzz against stock zod3
+pnpm run test:v3     # zod3 line: 38 unit tests + 20 000-case differential fuzz against stock zod3 (issue lists included), run with the generated and the closure skeletons
 pnpm run smoke:pack  # pack zod-cow-v4 and exercise the tarball from a temporary consumer project
 pnpm run bench:v4    # zod4 benchmark against the built package, 500 000 records (needs node --expose-gc, already in the script)
-pnpm run bench:v3    # zod3 benchmark
+pnpm run bench:v3    # zod3 benchmark: S1 to S9, single-record calibration and scaling sweeps, ArkType as a column
 pnpm run probe:v4    # survey stock zod4 def structure and behavior
 pnpm run probe:v3    # probe stock zod3 edge semantics (zod3 line)
 pnpm run demo        # 60-second demo of the CoW promises against the published zod-cow-v4 API
@@ -79,7 +79,7 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 | Feature | Copies when |
 |---|---|
 | string / number / boolean / bigint / date / literal / enum / instanceof, refine (pure predicate), optional / nullable / any / unknown | Never |
-| readonly | The zod4 line hands the subtree to the official parser (the purity analysis treats `Object.freeze` as a side effect), so it freezes exactly what stock zod 4 freezes. Over a container (`object` / `array` / `tuple` / `record` / `map` / `set`) that is a new container: the copy is frozen, the input stays unfrozen and unshared. Over a pass-through leaf (`any` / `unknown` / `custom`, or a wrapper of one) stock returns the input itself and freezes it in place, and so does this line (#28). The zod3 line freezes the input in place on every `readonly` node and returns it (#27) |
+| readonly | The zod4 line hands the subtree to the official parser (the purity analysis treats `Object.freeze` as a side effect), so it freezes exactly what stock zod 4 freezes. Over a container (`object` / `array` / `tuple` / `record` / `map` / `set`) that is a new container: the copy is frozen, the input stays unfrozen and unshared. Over a pass-through leaf (`any` / `unknown` / `custom`, or a wrapper of one) stock returns the input itself and freezes it in place, and so does this line (#28). The zod3 line does the same by static analysis of the inner schema: a frozen copy where stock zod3 rebuilds (containers, `date`, transforms), the input frozen in place only over `any` / `unknown` (#27) |
 | object / array / tuple / record / map / set | Never while every child is unchanged: the input reference is returned |
 | union / discriminatedUnion | Never while every option is a leaf (or an optional / nullable leaf) and the matching option returns its input. A union with a container option (object / array / tuple / record / map / set, possibly under optional / nullable) is handed to the official parser as a whole, so a matching container is rebuilt the way stock rebuilds it and always copies; a union skeleton that keeps the CoW path is future work (#47) |
 | default | Only when `undefined` is actually replaced |
@@ -91,9 +91,9 @@ A parent does its first shallow copy (`{...input}` / `slice()` / `new Map(input)
 
 Consequences that constrain every change:
 
-- Never mutate the input. Strip must never `delete` on the input object. The only in-place write is the `Object.freeze` of `readonly`: the zod4 line freezes a copy for containers and freezes a pass-through leaf in place exactly as stock does (#28); the zod3 line freezes the input in place on every `readonly` node (#27).
+- Never mutate the input. Strip must never `delete` on the input object. The only in-place write is the `Object.freeze` of `readonly`: both lines freeze a copy for containers and freeze a pass-through leaf in place exactly as stock does (#28 for the zod4 line, #27 for the zod3 line).
 - Output may alias input, so refines must not mutate.
-- Failure paths return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`.
+- Failure paths of the zod4 line return the sentinel; the caller falls back to stock `safeParse` for the full `ZodError`. The zod3 line keeps stock's two failure kinds itself: a type mismatch aborts (the sentinel), a failed check is dirty (the issue is recorded and the value goes on, so later checks, ancestor refinements and unions behave as in stock).
 
 ## How the zod4 line stays aligned with stock
 
@@ -107,7 +107,7 @@ The zod4 line does not re-implement zod's semantics. zod4 (>= 4.1) ships a JIT c
 
 The layer depends on `zod/v4/core`, a public permalink subpath whose compiler exports (`compileFn`, `assertOnly`, `INVALID`, the artifact protocol) are unsupported, and on a few hand-copied predicates. It is anchored to zod 4.5.4, the lower bound of the package's peer range: `packages/zod-cow-v4/tests/canary-z4.test.ts` asserts the stock behaviors the compiler assumes, so an upgrade turns the tests red instead of drifting silently. [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) asks zod upstream to make that surface public.
 
-The zod3 line aligns itself with probes instead (`packages/zod-cow-v3/src/probe.ts` measures stock zod3 edge semantics at runtime): absent optional keys are not materialized, present-undefined keys are kept, default values pass the inner validation, issues are collected across sibling fields, `readonly` freezes shallowly.
+The zod3 line aligns itself with probes instead (`packages/zod-cow-v3/src/probe.ts` measures stock zod3 edge semantics at runtime): absent optional keys are not materialized, present-undefined keys are kept, default values pass the inner validation, issues are collected across sibling fields, `readonly` freezes shallowly. Its issue messages come from zod's own error maps (`defaultErrorMap`, the `z.setErrorMap` override and the schema's create-param map), so `required_error` / `invalid_type_error` / custom messages read as in stock. Its object, array and tuple skeletons are generated per schema (`packages/zod-cow-v3/src/codegen.ts`): named property loads, one monomorphic call site per child, leaf checks inlined as predicates that hand the value to the leaf closure only when they fail, an undeclared-key probe that compares each enumerated key against the shape key expected at that position before consulting the key set, and no path bookkeeping on the success path of a subtree without refinements or transforms (the container splices its key into the issues a child left behind). The closure skeletons in `compile.ts` implement the same algorithm and are used where `new Function` is unavailable.
 
 The full design, with generated code dumped side by side against the official products, is in [docs/ARCHITECTURE-z4.md](docs/ARCHITECTURE-z4.md).
 
@@ -191,7 +191,7 @@ The ArkType column is measured only where arktype 2.2.3 expresses the same workl
 - Differential fuzzing (`packages/zod-cow-v4/tests/differential-z4.test.ts`): random nested object / array / tuple / record / map / set / union schemas (plain unions of 2 to 3 random options, so object branches with undeclared keys occur, and discriminated unions of two object branches; the generator emits unions since #47, before which no union was generated despite this list) with optional / nullable / default / refine / transform and async refine / transform wrappers, compared against stock zod4 on success parity, `deepStrictEqual` outputs (Map/Set compared as entry sets) and zero input mutation (structuredClone snapshot). The v0.5 run of 50 000 cases had 20 813 successes / 29 187 failures, a top-level reference-sharing rate of 89.1% on successful cases and 0 stock degradations. The code default is 200 × 100 = 20 000 cases. Every case runs twice: with the default options, then compiled with `ownSymbolKeys: "ignore"` against the same inputs minus the extra own symbol the option is documented to treat differently (the generator emits it in every object mode since #42), checking in addition that no generated top-level skeleton carries the probe and that the second pass shares at least as many references as the first (85.6% and 86.2% among successful cases at the default size since the union generator and the union rule of #47; 88.8% and 89.4% before them, #43).
 - Smoke tests (`packages/zod-cow-v4/tests/smoke-z4*.test.ts`): behavior assertions for the original reference, strip, strict, default, transform, nested sharing, array elements, optional, union, the degradation chain, the `ownSymbolKeys` option (both settings in strip, strict and loose mode and in the three record paths, nested propagation, the pinned divergence, the `TypeError`), the three record paths, map / set and size checks, tuple truncation / fill / rest / refine, and async through all containers, `lazy(async)` and union async branches.
 - Version canary (`packages/zod-cow-v4/tests/canary-z4.test.ts`): asserts the stock zod4 behaviors the compiler assumes (default short-circuits, catch does not swallow throws, optional hands undefined to a defaulted inner, …).
-- The zod3 line has 27 unit tests plus its own 20 000-case differential fuzzer (`packages/zod-cow-v3/tests/differential.test.ts`), with a top-level reference-sharing rate of about 92%.
+- The zod3 line has 38 unit tests plus its own 20 000-case differential fuzzer (`packages/zod-cow-v3/tests/differential.test.ts`): random object / array / tuple / record / map / set / union / discriminated-union schemas with optional / nullable / default / catch / readonly / refine / transform wrappers, create-param error maps and the string `length` / `includes` / `startsWith` checks, compared against stock zod3 on success parity, `deepStrictEqual` outputs, zero input mutation (structuredClone snapshot), frozenness of input and output, and on every failing case the full issue list (count, codes, paths, messages and the params both sides carry, a union's nested errors included). It runs twice, with the generated skeletons and with the closure fallback (`--no-codegen`). Top-level reference sharing among successful cases is about 88% with this generator (92.1% with the previous, smaller generator, unchanged from before this work).
 - Every one of the purity traps described in the architecture doc was found by the fuzzer, not by reading code. Purity analysis can only be proven complete by fuzzing, which is why any change to the purity rules or a container skeleton must be validated with the differential suite and its reference-sharing rate reported.
 
 ## Known limitations (prototype scope)
@@ -202,7 +202,7 @@ The ArkType column is measured only where arktype 2.2.3 expresses the same workl
 - Key order: pass-through preserves the input's key order; stock rebuilds in shape order (`deepStrictEqual` does not notice, snapshot tools might). A copy made by the zod4 object skeleton follows shape order, as stock does.
 - Unsupported, with an explicit failure rather than silent drift:
   - zod4 line: `intersection`, `file` / `templateLiteral` / `promise`, `string_format` without a `pattern` (such as `url`), recursive top-level schemas and schema-level `catchall`. The official `ZodCompileUnsupportedError` makes the tree degrade to stock (`compiled.stock === true`), which is correct but not CoW.
-  - zod3 line: `intersection`, `catchall`, tuple rest, `ZodPromise`, async refine. `ZcNotSupportedError` is thrown at compile time.
+  - zod3 line: `intersection`, `catchall`, tuple rest, `ZodPromise`. `ZcNotSupportedError` is thrown at compile time; an async refine, transform or preprocess (a callback returning a thenable) throws it at parse time.
 - Unions with a container option always copy: a union whose options are all leaves keeps the input by reference, but one with an object / array / tuple / record / map / set option (also under optional / nullable) goes to the official parser as a whole, because an option gets no skeleton of its own and the official validator would keep the undeclared keys that stock strips (#47). Stock's parser rebuilds the matching container, so the union's value, and with it the path to the root, is copied on every parse. A union skeleton that tries each option's CoW product in order would restore the sharing and is future work.
 - NaN: `z.nan()` is always judged dirty (`NaN !== NaN`); the output is still correct, at the cost of one extra copy.
 - Symbol keys / getters: stock's rebuild drops undeclared own symbol keys (enumerable or not) on every path, in every object mode and in records. By default the skeletons prove there are none before returning the input by reference and copy otherwise: the object skeleton probes in every mode (strip since #33, strict and loose since #42), an enum-keyed record probes the same way, and a record that iterates its keys validates an enumerable symbol key like stock and marks a non-enumerable one dirty inside its key loop (#51). Under `compile(schema, { ownSymbolKeys: "ignore" })` the probes are skipped: a clean input keeps its own symbol keys by reference, while a copy made by the skeleton still drops them like stock, so the outcome then depends on whether the container was dirty (#43). The zod4 object skeleton and the enum-keyed record skeleton read a getter once on both paths, like stock; the array, iterating record, map and set skeletons copy with `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` on the dirty path, which reads an accessor property a second time (#36).
@@ -228,15 +228,16 @@ packages/zod-cow-v4/        published as zod-cow-v4 (the primary line); peer zod
   scripts/pack-smoke.ts     packed-tarball smoke (listing, manifest, import, require, consumer typecheck)
 packages/zod-cow-v3/        private zod-cow-v3; exports the TypeScript source, no build
   src/index.ts              compile() API
-  src/compile.ts            closure-tree compiler
-  src/internal.ts           protocol: FAILED sentinel / Ctx / issue helpers / safeSet
+  src/compile.ts            compiler: closure tree for leaves and wrappers, closure skeletons as the codegen fallback, purity analysis
+  src/codegen.ts            generated object / array / tuple skeletons (new Function, inline leaf predicates)
+  src/internal.ts           protocol: FAILED sentinel / Ctx / issue construction through zod's error maps / safeSet
   src/regexes.ts            verbatim copy of zod 3.24.1's internal format regexes
   src/probe.ts              stock zod3 behavior probes
   tests/harness.ts          the other copy of the harness (+ harness.test.ts, its self-test)
-  tests/unit.test.ts        zod3 unit tests (27)
-  tests/differential.test.ts   zod3 differential fuzzer (20 000 cases)
+  tests/unit.test.ts        zod3 unit tests (38)
+  tests/differential.test.ts   zod3 differential fuzzer (20 000 cases, issue lists compared, --no-codegen for the closure fallback)
 packages/bench-v4/          bench.ts (S1 pure / S2 dirty / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 async, with ArkType as a column), harness.ts (measurement), gates.ts (equivalence gates) and demo.ts, against the built zod-cow-v4
-packages/bench-v3/          bench.ts (500 000 accounts) and the zod3 demo.ts
+packages/bench-v3/          bench.ts (S1 clean / S2 default / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 transforms / S8 strip, ArkType as a column), calibration.ts (single-record hot loops, scaling sweeps), failures.ts (S9, issue parity first), schemas.ts, harness.ts, gates.ts and the zod3 demo.ts
 docs/ARCHITECTURE-z4.md     architecture deep dive on the zod4 engine (English source of truth; docs/ARCHITECTURE-z4.zh-CN.md is its Chinese counterpart)
 docs/upstream-issue-draft.md   draft issue for zod upstream: make compileFn / assertOnly / INVALID public
 docs/adr/0001-package-layout.md   ADR: one package per zod major in a pnpm workspace, `zod-cow-v4` published name, benchmarks split per line, peer-dependency policy, zod3 line unpublished

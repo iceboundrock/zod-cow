@@ -1,6 +1,6 @@
 /** Record skeleton: key-name/value double reference comparison + conditional {...input} copy. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, escKey } from "./codectx.js";
+import { type CodeCtx, escKey, unknownStringKeyExpr } from "./codectx.js";
 import { childProduct, containerChecksFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
@@ -47,8 +47,11 @@ export function emitCoWRecord(
 
   if (keyValues) {
     /* ── Path A: declaration-driven ── */
-    /** Write-back plan for the copy branch: collected first, emitted together after the loop (after the out = {...input} assignment) */
-    const writebacks: { keyExpr: string; inVar: string; outVar: string | null }[] = [];
+    /** Copy plan: every declared key in declaration order, written from the locals captured during validation */
+    const writebacks: { keyExpr: string; valueVar: string }[] = [];
+    /** The declared keys as `for...in` yields them (numbers stringified), the form the unknown-key probe compares against (#37) */
+    const inputKeys: (string | symbol)[] = [];
+    const stringKeys: string[] = [];
 
     for (const kv of keyValues) {
       if (typeof kv !== "string" && typeof kv !== "number" && typeof kv !== "symbol") {
@@ -56,6 +59,8 @@ export function emitCoWRecord(
       }
       const inputKey: string | symbol = typeof kv === "number" ? kv.toString() : kv;
       if (inputKey === "__proto__") throw new ZodCompileUnsupportedError('record key "__proto__"');
+      inputKeys.push(inputKey);
+      if (typeof inputKey === "string") stringKeys.push(inputKey);
       const keyExpr = typeof inputKey === "symbol" ? ctx.addConst(inputKey) : escKey(inputKey);
       const inVar = ctx.var();
       // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
@@ -71,35 +76,49 @@ export function emitCoWRecord(
       if (product.kind === "validator") {
         ctx.write(`if (${f}(${inVar}) === INVALID) return INVALID;`);
         ctx.write(`if (${missing}) ${dirty} = true;`);
-        writebacks.push({ keyExpr, inVar, outVar: null });
+        // validator product: value = input (when present inVar is the original value; when missing inVar === undefined)
+        writebacks.push({ keyExpr, valueVar: inVar });
       } else {
         const outVar = ctx.var();
         ctx.write(`const ${outVar} = ${awaitKw}${f}(${inVar});`);
         ctx.write(`if (${outVar} === INVALID) return INVALID;`);
         ctx.write(`if (${outVar} !== ${inVar} || ${missing}) ${dirty} = true;`);
-        writebacks.push({ keyExpr, inVar, outVar });
+        writebacks.push({ keyExpr, valueVar: outVar });
       }
     }
-    // Unknown keys: the official enum record is strict (for...in → INVALID)
-    const knownConst = ctx.addConst(new Set(keyValues as Iterable<string | symbol>));
-    ctx.write(`for (const k in ${accessor}) {`);
+
+    // Undeclared keys, the official for...in template: strict rejects them on every path; loose keeps
+    // them, so its probe runs only on the copy path, where the copy has to carry them.
+    // `for...in` yields strings only, so declared symbol keys never reach the probe and the known-key
+    // Set is hoisted only when the declared string keys exceed the inline comparison cap.
+    let known: string | null = null;
+    const knownSet = () => (known ??= ctx.addConst(new Set(inputKeys)));
+    const unknownKey = unknownStringKeyExpr(stringKeys, knownSet);
+    if (!loose) {
+      ctx.write(`for (const k in ${accessor}) {`);
+      ctx.indented(() => {
+        ctx.write(`if (${unknownKey}) return INVALID;`);
+      });
+      ctx.write(`}`);
+    }
+
+    // Copy path: the official assembly, never a spread of the input. Declared keys in declaration
+    // order (a missing declared key is written as undefined, which is what stock does), then in loose
+    // mode the undeclared string keys appended by for...in (stock skips only "__proto__").
+    ctx.write(`if (${dirty}) {`);
     ctx.indented(() => {
-      ctx.write(`if (!${knownConst}.has(k)) return INVALID;`);
+      ctx.write(`${out} = {};`);
+      for (const w of writebacks) ctx.write(`${out}[${w.keyExpr}] = ${w.valueVar};`);
+      if (loose) {
+        ctx.write(`for (const k in ${accessor}) {`);
+        ctx.indented(() => {
+          ctx.write(`if (${unknownKey} && k !== "__proto__") ${out}[k] = ${accessor}[k];`);
+        });
+        ctx.write(`}`);
+      }
     });
     ctx.write(`}`);
-
-    ctx.write(`if (!${dirty}) return ${accessor};`);
-    ctx.write(`${out} = { ...${accessor} };`);
-    for (const w of writebacks) {
-      if (w.outVar === null) {
-        // validator product: value = input (when present inVar is the original value; when missing inVar === undefined)
-        ctx.write(`${out}[${w.keyExpr}] = ${w.inVar};`);
-      } else {
-        // The official code writes declared keys unconditionally (including undefined values)
-        ctx.write(`${out}[${w.keyExpr}] = ${w.outVar};`);
-      }
-    }
-    return out;
+    return emitRecordChecks(ctx, schema, accessor, out, dirty);
   }
 
   /* ── Paths B/C: iterate the input keys ── */
@@ -159,7 +178,20 @@ export function emitCoWRecord(
     ctx.write(`}`);
   }
 
-  // The container's own checks (refine and friends; record has no size check)
+  return emitRecordChecks(ctx, schema, accessor, out, dirty);
+}
+
+/**
+ * The container's own checks (refine and friends; record has no size check), run on the final
+ * output of both paths: the input when clean, the copy when dirty. Returns the output variable.
+ */
+function emitRecordChecks(
+  ctx: CodeCtx,
+  schema: Node,
+  accessor: string,
+  out: string,
+  dirty: string,
+): string {
   const checksFn = containerChecksFn(schema);
   if (checksFn) {
     const cName = ctx.addConst(checksFn);

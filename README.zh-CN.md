@@ -81,7 +81,7 @@ zod3 线不发布。它是 `packages/zod-cow-v3` 里的冻结参考实现，由�
 | default | 仅当 `undefined` 实际被替换 |
 | transform / preprocess / pipe / catch | 仅当运行时实际产生新值 |
 | strip（对象默认模式） | 仅当输入确实存在多余键（小型固定 shape 使用 `for...in` + 生成的比较，大型 shape 回退到 `Set`，并探测自有 symbol；`compile(schema, { ownSymbolKeys: "ignore" })` 可关闭该探测，#43） |
-| strict / passthrough | 永不（strict 有多余键直接失败） |
+| strict / passthrough | 仅当输入带有未声明的自有 symbol 键（stock 在所有模式下都会丢弃它；strict 遇到多余字符串键直接失败）；与 strip 相同的自有 symbol 探测，由同一选项关闭（#42） |
 | `.trim()` / `.toLowerCase()` / `.toUpperCase()` | 仅当值实际变化（值比较） |
 
 由此约束每一处改动：
@@ -183,8 +183,8 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 
 ## 正确性证据
 
-- 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union，套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol，并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（默认规模下分别为 89.2% 与 89.6%，#43）。
-- 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种模式、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
+- 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union，套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（默认规模下成功 case 中分别为 88.8% 与 89.4%，#43）。
+- 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
 - zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`），顶层引用共享率约 92%。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
@@ -199,7 +199,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
-- symbol 键 / getter：strict 或 loose 对象按原引用返回时会保留 stock 重建会丢弃的自有 symbol 键，无论其是否可枚举（strip 模式会探测并拷贝）；骨架做出的拷贝会像 stock 一样丢弃它们，所以结果取决于对象是否为脏（#42）。`compile(schema, { ownSymbolKeys: "ignore" })` 让 strip 模式对象选择同样的行为：跳过探测，干净输入按原引用返回并保留自有 symbol 键（#43）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
+- symbol 键 / getter：stock 的重建在所有对象模式下都会丢弃未声明的自有 symbol 键（无论其是否可枚举），默认情况下对象骨架在所有模式下都会探测它们并拷贝（strip 自 #33 起，strict 与 loose 自 #42 起）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于对象是否为脏（#43）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
 - 刻意不对齐的 stock quirk：tuple 带 async rest 槽且 nullable 槽输入为 `null` 时，stock zod4 runtime 产生稀疏数组并丢掉 `null`；骨架输出稠密数组。差分生成器规避该组合，复现见上游 issue 草稿。
 
 ## 目录

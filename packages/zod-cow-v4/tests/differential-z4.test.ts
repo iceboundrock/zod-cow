@@ -296,7 +296,7 @@ function bWrap(rng: RNG, inner: Built): Built {
   };
 }
 
-/** Declared symbol key shared by every object schema that rolls one; the extra own symbol the strip-mode input may carry */
+/** Declared symbol key shared by every object schema that rolls one; the extra own symbol an input of any mode may carry */
 const DECLARED_SYMBOL = Symbol("declared");
 const EXTRA_SYMBOL = Symbol("extra");
 /** Pass switch: the "ignore" pass keeps the RNG stream and drops only the emission of EXTRA_SYMBOL */
@@ -353,10 +353,10 @@ function bObject(rng: RNG, depth: number): Built {
         if (v !== ABSENT) out[f.key] = v;
       }
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
-      // Extra own symbol, strip mode only: strict and loose do not probe own symbols, so a clean
-      // input keeps its symbol by reference where stock's rebuild drops it (a copy made by the
-      // skeleton drops it like stock); both listed under known limitations
-      if (modeRoll >= 2 && r.chance(0.1) && emitExtraSymbol) out[EXTRA_SYMBOL] = true;
+      // Extra own symbol, in every mode: stock's rebuild drops it and the skeleton probes for it
+      // before returning the input by reference (strip since #33, strict and loose since #42), so
+      // the default pass expects stock's output; the "ignore" pass never emits it
+      if (r.chance(0.1) && emitExtraSymbol) out[EXTRA_SYMBOL] = true;
       return out;
     },
   };

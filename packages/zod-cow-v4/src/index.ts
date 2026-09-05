@@ -79,54 +79,74 @@ export function compile<T extends z.ZodType>(schema: T): Compiled<T> {
     if (r.success) return r.data as z.output<T>;
     throw r.error;
   };
-  const unwrapAsync = async (r: SyncResult | Promise<SyncResult>): Promise<z.output<T>> => {
-    const rr = await r;
-    return unwrap(rr);
-  };
+  type Ok = { success: true; data: z.output<T> };
+  type Err = { success: false; error: z.ZodError };
+  const ok = (out: unknown): Ok => ({ success: true, data: out as z.output<T> });
 
-  return {
-    schema,
-    stock: cowFn === null,
-    async: isAsync,
-    code,
-    parse(data: unknown): z.output<T> {
-      if (isAsync) throwSyncOnAsync();
-      if (cowFn) {
-        const out = cowFn(data);
+  const common = { schema, stock: cowFn === null, async: isAsync, code };
+
+  if (cowFn === null) {
+    // Whole-tree degradation: every entry is stock
+    return {
+      ...common,
+      parse: (data) => unwrap(stockParse(data)),
+      safeParse: (data) => stockParse(data) as Ok | Err,
+      parseAsync: async (data) => unwrap(await stockParseAsync(data)),
+      safeParseAsync: async (data) => (await stockParseAsync(data)) as Ok | Err,
+      validate: (data) => (stockParse(data).success ? data : null),
+    } satisfies Compiled<T>;
+  }
+
+  if (isAsync) {
+    // Async skeleton: the sync API throws, as stock does; the async entries await the skeleton and fall back to stock
+    const fast = cowFn;
+    return {
+      ...common,
+      parse: throwSyncOnAsync,
+      safeParse: throwSyncOnAsync,
+      validate: throwSyncOnAsync,
+      async parseAsync(data) {
+        const out = await fast(data);
         if (out !== INVALID) return out as z.output<T>;
-      }
+        return unwrap(await stockParseAsync(data));
+      },
+      async safeParseAsync(data) {
+        const out = await fast(data);
+        if (out !== INVALID) return ok(out);
+        return (await stockParseAsync(data)) as Err;
+      },
+    } satisfies Compiled<T>;
+  }
+
+  // Sync skeleton, the common case: the methods hold nothing but the fast path and the stock
+  // fallback, so a call is one skeleton call plus the result object (no async or degradation
+  // checks per call; the per-record scenarios of bench-v4 see the difference)
+  const fast = cowFn;
+  const validateFast = validator ?? fast;
+  return {
+    ...common,
+    parse(data) {
+      const out = fast(data);
+      if (out !== INVALID) return out as z.output<T>;
       return unwrap(stockParse(data));
     },
-    safeParse(data: unknown) {
-      if (isAsync) throwSyncOnAsync();
-      if (cowFn) {
-        const out = cowFn(data);
-        if (out !== INVALID)
-          return { success: true, data: out } as { success: true; data: z.output<T> };
-      }
-      return stockParse(data) as { success: false; error: z.ZodError };
+    safeParse(data) {
+      const out = fast(data);
+      if (out !== INVALID) return ok(out);
+      return stockParse(data) as Err;
     },
-    async parseAsync(data: unknown): Promise<z.output<T>> {
-      if (cowFn) {
-        const out = await cowFn(data);
-        if (out !== INVALID) return out as z.output<T>;
-      }
-      return isAsync ? unwrapAsync(stockParseAsync(data)) : unwrap(stockParse(data));
+    async parseAsync(data) {
+      const out = fast(data);
+      if (out !== INVALID) return out as z.output<T>;
+      return unwrap(stockParse(data));
     },
-    async safeParseAsync(data: unknown) {
-      if (cowFn) {
-        const out = await cowFn(data);
-        if (out !== INVALID)
-          return { success: true, data: out } as { success: true; data: z.output<T> };
-      }
-      const r = isAsync ? await stockParseAsync(data) : stockParse(data);
-      return r as { success: false; error: z.ZodError };
+    async safeParseAsync(data) {
+      const out = fast(data);
+      if (out !== INVALID) return ok(out);
+      return stockParse(data) as Err;
     },
-    validate(data: unknown) {
-      if (isAsync) throwSyncOnAsync();
-      if (validator) return validator(data) !== INVALID ? data : null;
-      if (cowFn) return cowFn(data) !== INVALID ? data : null;
-      return (stockParse(data) as { success: boolean }).success ? data : null;
+    validate(data) {
+      return validateFast(data) !== INVALID ? data : null;
     },
   } satisfies Compiled<T>;
 }

@@ -174,12 +174,12 @@ zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4
 - 结构共享可观察：两次 parse 同一输入返回同一引用；修改输出会影响输入。只有 zod3 线的 `validate()` 在类型层用 `DeepReadonly` 提示这一点；zod4 线的 `validate()` 返回 `unknown`，`parse` / `safeParse` 用普通的 zod 输出类型。需要独立副本时用 stock `schema.parse`。
 - refine 不得修改输入（CoW 前提）；开发期可 deep-freeze 输入抓违规。
 - 失败时的 refine 副作用：parse 失败时 refine 回调先在骨架里跑一次，再在 stock 回退里跑一次，共两次。官方 `zod/compile` shim 语义相同。
-- 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。
+- 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。zod4 对象骨架做出的拷贝按 shape 序排列，与 stock 一致。
 - 不支持，明确失败而非静默漂移：
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
-- symbol 键 / getter：透传会保留 spread 可见的自有可枚举 symbol 键，与 stock 的重建行为有细微差异。
+- symbol 键 / getter：strict 或 loose 对象按原引用返回时会保留 stock 重建会丢弃的自有可枚举 symbol 键（strip 模式会探测并拷贝）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
 - 刻意不对齐的 stock quirk：tuple 带 async rest 槽且 nullable 槽输入为 `null` 时，stock zod4 runtime 产生稀疏数组并丢掉 `null`；骨架输出稠密数组。差分生成器规避该组合，复现见上游 issue 草稿。
 
 ## 目录

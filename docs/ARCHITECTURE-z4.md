@@ -176,32 +176,35 @@ schema: `z.object({ id: number.int(), firstName: string.max(64), email: z.email(
 ```js
 // ═══ zc-z4 CoW skeleton (real dump) ═══
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
-let x0 = false, x1 = false;                                // dirty / extra
-const x2 = input["id"];
-if (c0(x2) === INVALID) return INVALID;                    // pure leaf key: official assertOnly product
+let x0 = false;                                            // dirty
+const x1 = input["id"];
+if (c0(x1) === INVALID) return INVALID;                    // pure leaf key: official assertOnly product
+const x2 = input["firstName"];
+if (c1(x2) === INVALID) return INVALID;
 const x3 = input["email"];
-if (c1(x3) === INVALID) return INVALID;                    // (email validation lives inside the product)
+if (c2(x3) === INVALID) return INVALID;                    // (email validation lives inside the product)
 const x4 = input["tags"];
-const x5 = c2(x4);                                         // container key: CoW sub-skeleton product
+const x5 = c3(x4);                                         // container key: CoW sub-skeleton product
 if (x5 === INVALID) return INVALID;
 if (x5 !== x4) x0 = true;                                  // <- reference comparison is the dirty signal
 const x6 = input["address"];
-const x7 = c3(x6);                                         // same as above (nested CoW)
+const x7 = c4(x6);                                         // same as above (nested CoW)
 if (x7 === INVALID) return INVALID;
 if (x7 !== x6) x0 = true;
-for (const k in input) {
-  if (k !== "id" && k !== "email" && k !== "tags" && k !== "address") { x1 = true; break; }
-}                                                           // fixed string keys are generated comparisons
-const x8 = Object.getOwnPropertySymbols(input);            // the clean path's only allocation: one empty array per object
-if (x8.length !== 0) x1 = true;                            // no declared symbols: any own symbol is extra
-if (!x0 && !x1) {
-  return input;                                            // ═══ the one line the official template does not have ═══
+if (!x0) {                                                 // strip probes, only while the input may still be returned
+  let x8 = false;
+  for (const k in input) {
+    if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+  }                                                         // fixed string keys are generated comparisons
+  if (!x8) {
+    const x9 = Object.getOwnPropertySymbols(input);        // the clean path's only allocation: one empty array per object
+    if (x9.length !== 0) x8 = true;                        // no declared symbols: any own symbol is extra
+  }
+  if (!x8) {
+    return input;                                          // ═══ the one line the official template does not have ═══
+  }
 }
-const out = { ...input };                                  // copy only when forced: key presence and key order stay faithful
-if (x1) {
-  for (const k in input) if (k !== "id" && k !== "email" && k !== "tags" && k !== "address") delete out[k];
-  for (const s of x8) delete out[s];                       // the same comparisons and the same symbol array decide what to drop
-}
+const out = { "id": x1, "firstName": x2, "email": x3, "tags": x5, "address": x7 };   // the official assembly, from the captured locals
 return out;
 ```
 
@@ -209,33 +212,13 @@ Point-by-point correspondence with the official dump:
 
 | Official parser | zc-z4 skeleton | Note |
 |---|---|---|
-| `const v8 = {...}` unconditionally | `if (!dirty && !extra) return input;` | The CoW core: no copy on clean input; the strip probe's one empty own-symbol array per object is the clean path's only allocation |
+| `const v8 = {...}` unconditionally | `if (!dirty) { probes; return input; }` | The CoW core: no copy on clean input; the strip probe's one empty own-symbol array per object is the clean path's only allocation |
 | `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
-| (output assembly handles key presence implicitly) | `{ ...input }` | Spread keeps presence and key order faithful naturally |
-| `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the strip deletion path reuses the same predicate and the symbol array the probe read | Same inherited-enumerable semantics with faster monomorphic small-object membership; the `Set` is hoisted only when something references it (large shapes, declared symbol keys), and the cap bounds the generated code size (see the constant's comment for the measurement) |
+| `const v8 = { "id": v0, … }` in shape order, with the `mayOutputUndefined` / `dropsWhenAbsent` rules for conditional keys and a `for...in` append in passthrough mode | the same literal, from the captured locals, on the copy path | The copy is stock's output: shape order, the same key-presence rules, getters read once. Undeclared keys are dropped by construction, so the copy path needs no probe and no `delete` (the earlier `{ ...input }` plus `delete` copy kept the input's order, re-read every getter (#36) and turned the copy into a dictionary-mode object, which made strip parity (S8) slower than stock) |
+| `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found | Same inherited-enumerable semantics with faster monomorphic small-object membership; both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap bounds the generated code size (see the constant's comment for the measurement). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
 
-### 3.2 The container's own checks: the two-path timing
-
-When `.refine()` / `.min()` is attached to a container, the stock semantics is "run the checks on the output after the output
-is constructed". zc-z4 compiles the checks into a separate validation subroutine and **calls it on both paths**:
-
-```js
-const cChecks = /* the containerChecksFn product */;
-if (!x0 && !x1) {
-  if (cChecks(input) === INVALID) return INVALID;   // clean: output === input
-  return input;
-}
-const out = { ...input };
-/* ...write back / strip... */
-if (cChecks(out) === INVALID) return INVALID;       // dirty: aligned with stock's "run the checks on the output"
-return out;
-```
-
-Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
-`min_length/max_length/length_equals` (`.length` read directly) + map/set's
-`min_size/max_size/size_equals` (`.size` read directly). Everything else (superRefine rewriting
-`ctx.value`, overwrite, a custom `when`) → the whole node degrades to the official parser product.
+Cost of the clean path, measured per object on a 6-key primitive record (Node 24, single-record hot loop, see the calibration scenario of `bench-v4`): the own-symbol probe is about 36 ns of a 65 ns skeleton call, the `for...in` probe about 9 ns; the official parser of the same schema costs 24 ns, its validator 15 ns. The leaf validator calls are not a cost (V8 inlines them: one official validator call for all pure keys measured the same as six leaf calls). The symbol probe is what strip semantics cost: stock drops own symbol keys, so a pass-through has to prove there are none, and `Object.getOwnPropertySymbols` is the only way to ask. It stays; an opt-in mode for callers whose data is known to be JSON-shaped is a separate API proposal (issue #40).
 
 ## 4. Purity analysis: the whitelist and the three traps
 
@@ -390,6 +373,13 @@ A line-by-line mirror of the official `generateTupleCheck` (compile.js L1289-137
    Truncation has three states: already copied → truncate for real; the original reference and the target length ≠ the input length → copy then truncate;
    target === the input length → output === input, zero operations
    (the case where a trailing optional truncates to the input length can keep the original reference).
+
+4. Inlining: a fixed tuple without rest, of up to `MAX_INLINE_TUPLE_SLOTS` (4) synchronous leaf slots
+   (`tupleInlineable`), is emitted inline in the parent object skeleton rather than as a sub-skeleton function.
+   The slot products are still called; what goes away is the call into the tuple function, its prologue and its own
+   clean-path return (in inline mode the parent reads the tuple's `out` variable, which is the input reference when
+   clean, and one container-check call covers both paths). Slots below `optinStart` are present by the length guard,
+   so their absent branch is not emitted, and the first tail slot has no `fillLen` gate.
 
 The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new Array` plus a per-slot write every time, while CoW copies nothing
 (S6 in run 33940596453: 7.90x vs stock / 3.34x vs the official parser; ArkType is ahead here at 0.43x, see §7).

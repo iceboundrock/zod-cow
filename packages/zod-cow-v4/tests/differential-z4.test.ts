@@ -295,10 +295,11 @@ const EXTRA_SYMBOL = Symbol("extra");
 function bObject(rng: RNG, depth: number): Built {
   // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to 17
   // to 20 string keys so it crosses the object skeleton's inline-comparison cap and takes the Set
-  // fallback; 1 in 10 shapes declares a symbol key so the declared-symbol probe and the symbol
-  // deletion path run. At least one string key is always present (a symbol-only strip shape is a
-  // known deviation from stock and is deliberately not generated).
-  const nFields = 1 + rng.int(3);
+  // fallback; 1 in 10 shapes declares a symbol key so the declared-symbol probe runs, and 1 in 40
+  // of those keeps no string key at all (a symbol-only shape, whose strip probe treats every
+  // string key as undeclared, #35).
+  const symbolOnly = rng.chance(0.025);
+  const nFields = symbolOnly ? 0 : 1 + rng.int(3);
   const fields: { key: string | symbol; built: Built }[] = [];
   for (let i = 0; i < nFields; i++) {
     fields.push({ key: `f${i}`, built: bChild(rng, depth) });
@@ -313,7 +314,7 @@ function bObject(rng: RNG, depth: number): Built {
       });
     }
   }
-  const withSymbol = rng.chance(0.1);
+  const withSymbol = symbolOnly || rng.chance(0.1);
   if (withSymbol) fields.push({ key: DECLARED_SYMBOL, built: bLeaf(rng) });
   const modeRoll = rng.int(10);
   const shape: Record<string | symbol, z.ZodType> = {};

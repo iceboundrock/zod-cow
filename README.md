@@ -178,12 +178,12 @@ The ArkType column is measured only where arktype 2.2.3 expresses the same workl
 - Structural sharing is observable: parsing the same input twice returns the same reference, and modifying the output modifies the input. Only the zod3 line's `validate()` hints at this in the types, with `DeepReadonly`; the zod4 line's `validate()` returns `unknown` and its `parse` / `safeParse` use the ordinary zod output types. Use stock `schema.parse` when an independent copy is needed.
 - Refines must not mutate the input (the CoW premise); deep-freeze inputs during development to catch violations.
 - Refine side effects on failure: a failing parse runs the refine callback in the skeleton and again in the stock fallback, so it runs twice. The official `zod/compile` shim has the same semantics.
-- Key order: pass-through preserves the input's key order; stock rebuilds in shape order (`deepStrictEqual` does not notice, snapshot tools might).
+- Key order: pass-through preserves the input's key order; stock rebuilds in shape order (`deepStrictEqual` does not notice, snapshot tools might). A copy made by the zod4 object skeleton follows shape order, as stock does.
 - Unsupported, with an explicit failure rather than silent drift:
   - zod4 line: `intersection`, `file` / `templateLiteral` / `promise`, `string_format` without a `pattern` (such as `url`), recursive top-level schemas and schema-level `catchall`. The official `ZodCompileUnsupportedError` makes the tree degrade to stock (`compiled.stock === true`), which is correct but not CoW.
   - zod3 line: `intersection`, `catchall`, tuple rest, `ZodPromise`, async refine. `ZcNotSupportedError` is thrown at compile time.
 - NaN: `z.nan()` is always judged dirty (`NaN !== NaN`); the output is still correct, at the cost of one extra copy.
-- Symbol keys / getters: pass-through keeps own enumerable symbol keys visible to spread, a small difference from stock's rebuild.
+- Symbol keys / getters: a strict or loose object returned by reference keeps own enumerable symbol keys that stock's rebuild drops (strip mode probes for them and copies). The zod4 object skeleton reads a getter once on both paths, like stock; the array, record, map and set skeletons copy with `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` on the dirty path, which reads an accessor property a second time (#36).
 - A stock quirk that is deliberately not matched: with an async rest element and a `null` input in a nullable slot, stock zod4's runtime produces a sparse array and loses the `null`; the skeleton outputs a dense array. The differential generator avoids that combination; the reproduction is in the upstream issue draft.
 
 ## Repository layout

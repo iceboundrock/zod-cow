@@ -19,6 +19,16 @@
  *     retained = heapUsed delta still held after gc;
  *   - median elapsed time over the timed rounds, max alloc / retained over the timed rounds.
  *
+ * Two kinds of scenario share this schedule:
+ *   - batch: one timed call parses the whole dataset (S1 to S8); reported in ms per call plus
+ *     allocation figures;
+ *   - micro (`iterations` set): one timed call is a hot loop the candidate writes itself, running
+ *     the same small input `iterations` times; reported in ns per operation. The candidate writes
+ *     its own loop so that every implementation is called from a monomorphic call site; a shared
+ *     `for` over a function value would make the call site megamorphic and tax every column by the
+ *     same constant. Allocation is not reported for micro runs: a minor GC inside the loop makes the
+ *     heapUsed delta meaningless.
+ *
  * The `run` function of a candidate must verify its own result (e.g. `success === true`) and
  * throw on a rejection: a silent schema/input mismatch would otherwise time an error path and
  * look fast.
@@ -37,16 +47,37 @@ if (!Number.isInteger(PASSES) || PASSES < 1) {
 }
 export const WARMUP = 2;
 
+/**
+ * Optional scenario filter (`BENCH_ONLY`, comma-separated id prefixes such as `S3,S8`): scenarios
+ * whose id starts with none of the prefixes are skipped after their gate, so a change can be
+ * re-measured without the whole suite. The summary omits skipped scenarios.
+ */
+const ONLY = (process.env.BENCH_ONLY ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+export const selected = (id: string): boolean =>
+  ONLY.length === 0 || ONLY.some((p) => id.startsWith(p));
+
 /** Smallest multiple of `n` that is at least `min`: the rounds needed for complete rotations */
 export const balancedRounds = (min: number, n: number): number =>
   n === 0 ? 0 : Math.ceil(min / n) * n;
 
-/** Column of the summary tables a candidate belongs to */
-export type Column = "stock" | "official" | "zc" | "ark";
+/**
+ * Column of the summary tables a candidate belongs to.
+ *   stock     stock Zod 4 (`safeParse` on the plain schema, the interpreter)
+ *   public    the public compiled API of Zod 4.5 (`z.compile(schema).safeParse`, `z.validate`)
+ *   official  the internal `compileFn` / `assertOnly` product, an engineering control kept in a
+ *             diagnostic table next to the public column (it is not a user-facing API)
+ *   zc        zod-cow-v4
+ *   ark       ArkType
+ */
+export type Column = "stock" | "public" | "official" | "zc" | "ark";
 
 export const COLUMN_TITLES: Record<Column, string> = {
   stock: "stock Zod 4",
-  official: "official JIT",
+  public: "Zod 4 z.compile()",
+  official: "Zod internal compiler product",
   zc: "zod-cow-v4",
   ark: "ArkType",
 };
@@ -93,6 +124,8 @@ export interface ScenarioRun {
   id: string;
   title: string;
   results: Result[];
+  /** Micro scenario: every timed call ran this many operations; reported per operation */
+  iterations?: number;
 }
 
 export const isNA = (r: Result): r is NotApplicable => "na" in r;
@@ -127,6 +160,13 @@ export const fmtMB = (bytes: number): string => {
 
 export const fmtMs = (ms: number): string => `${ms.toFixed(0)}ms`;
 
+/** Nanoseconds per operation of a micro measurement */
+export const nsPerOp = (m: Measured, iterations: number): number => (m.medianMs * 1e6) / iterations;
+
+export const fmtNs = (ns: number): string => `${ns.toFixed(0)}ns`;
+
+const fmtOps = (ns: number): string => `${Math.round(1e9 / ns).toLocaleString()} ops/s`;
+
 export function medianOf(samples: Sample[]): number {
   const ms = samples.map((s) => s.ms).sort((a, b) => a - b);
   const mid = ms.length >> 1;
@@ -136,13 +176,20 @@ export function medianOf(samples: Sample[]): number {
 /**
  * Warm up every runnable candidate, then take at least PASSES samples per candidate in complete
  * rotations of the candidate order and print one line per candidate (N/A candidates print their
- * reason).
+ * reason). With `iterations` the scenario is a micro run: the candidates' bodies are hot loops of
+ * that many operations and the line reports ns per operation.
  */
 export async function runScenario(
   id: string,
   title: string,
   candidates: Candidate[],
+  options: { iterations?: number } = {},
 ): Promise<ScenarioRun> {
+  const { iterations } = options;
+  if (!selected(id)) {
+    console.log(`\n═══ ${id} · skipped (BENCH_ONLY) ═══`);
+    return { id, title, results: [], iterations };
+  }
   console.log(`\n═══ ${id} · ${title} ═══`);
   const runnables = candidates.filter((c): c is Runnable => "run" in c);
   const n = runnables.length;
@@ -150,7 +197,7 @@ export async function runScenario(
   const warmupRounds = balancedRounds(WARMUP, n);
   const rounds = balancedRounds(PASSES, n);
   console.log(
-    `  ${n} candidates · ${warmupRounds} warmup + ${rounds} timed rounds, order rotated every round (each candidate holds each position ${rounds / n}× in the timed rounds)`,
+    `  ${n} candidates · ${warmupRounds} warmup + ${rounds} timed rounds, order rotated every round (each candidate holds each position ${rounds / n}× in the timed rounds)${iterations ? ` · ${iterations.toLocaleString()} operations per round` : ""}`,
   );
   for (let w = 0; w < warmupRounds; w++) for (const c of rotated(w)) await sampleOnce(c.run);
 
@@ -175,16 +222,23 @@ export async function runScenario(
 
   for (const r of results) {
     if (isNA(r)) {
-      console.log(`  ${r.label.padEnd(46)} N/A — ${r.na}`);
-      if (r.detail) console.log(`  ${"".padEnd(46)} ${r.detail}`);
+      console.log(`  ${r.label.padEnd(50)} N/A — ${r.na}`);
+      if (r.detail) console.log(`  ${"".padEnd(50)} ${r.detail}`);
       continue;
     }
     const tag = r.nonEquivalent ? "   [non-equivalent reference: excluded from ratios]" : "";
-    console.log(
-      `  ${r.label.padEnd(46)} median ${fmtMs(r.medianMs).padStart(8)}   alloc ${fmtMB(r.alloc).padStart(9)}   retained ${fmtMB(r.retained).padStart(9)}${tag}`,
-    );
+    if (iterations) {
+      const ns = nsPerOp(r, iterations);
+      console.log(
+        `  ${r.label.padEnd(50)} median ${fmtNs(ns).padStart(8)}/op   ${fmtOps(ns).padStart(18)}   (round ${fmtMs(r.medianMs)})${tag}`,
+      );
+    } else {
+      console.log(
+        `  ${r.label.padEnd(50)} median ${fmtMs(r.medianMs).padStart(8)}   alloc ${fmtMB(r.alloc).padStart(9)}   retained ${fmtMB(r.retained).padStart(9)}${tag}`,
+      );
+    }
   }
-  return { id, title, results };
+  return { id, title, results, iterations };
 }
 
 /** The equivalent (not N/A, not non-equivalent) measurement of a column, if any */
@@ -207,7 +261,7 @@ export function ratio(a: Measured | undefined, b: Measured | undefined): string 
 export function printRatios(run: ScenarioRun): void {
   const zc = equivalent(run, "zc");
   if (!zc) return;
-  const parts = (["stock", "official", "ark"] as Column[])
+  const parts = (["stock", "public", "official", "ark"] as Column[])
     .map((c) => {
       const r = equivalent(run, c);
       return r ? `${COLUMN_TITLES[c]} / zod-cow = ${ratio(r, zc)}` : undefined;
@@ -226,7 +280,8 @@ function markdownTable(header: string[], rows: string[][]): string {
   return [line(header), sep, ...rows.map(line)].join("\n");
 }
 
-const COLUMNS: Column[] = ["stock", "official", "zc", "ark"];
+/** The user-facing columns of the primary tables; the internal product has a diagnostic table */
+const PRIMARY_COLUMNS: Column[] = ["stock", "public", "zc", "ark"];
 
 /**
  * One summary cell. A column may hold an N/A entry and a non-equivalent reference measurement
@@ -244,13 +299,16 @@ function cell(run: ScenarioRun, column: Column, pick: (m: Measured) => string): 
     .join(" ");
 }
 
-export function printSummary(runs: ScenarioRun[]): void {
-  const header = ["Scenario", ...COLUMNS.map((c) => COLUMN_TITLES[c])];
-  console.log("\n═══ Summary: median elapsed time (lower is better) ═══\n");
+function printBatchTables(runs: ScenarioRun[]): void {
+  const header = ["Scenario", ...PRIMARY_COLUMNS.map((c) => COLUMN_TITLES[c])];
+  console.log("\n═══ Summary: median elapsed time per call (lower is better) ═══\n");
   console.log(
     markdownTable(
       header,
-      runs.map((run) => [run.id, ...COLUMNS.map((c) => cell(run, c, (m) => fmtMs(m.medianMs)))]),
+      runs.map((run) => [
+        run.id,
+        ...PRIMARY_COLUMNS.map((c) => cell(run, c, (m) => fmtMs(m.medianMs))),
+      ]),
     ),
   );
 
@@ -260,7 +318,9 @@ export function printSummary(runs: ScenarioRun[]): void {
       header,
       runs.map((run) => [
         run.id,
-        ...COLUMNS.map((c) => cell(run, c, (m) => `${fmtMB(m.alloc)} / ${fmtMB(m.retained)}`)),
+        ...PRIMARY_COLUMNS.map((c) =>
+          cell(run, c, (m) => `${fmtMB(m.alloc)} / ${fmtMB(m.retained)}`),
+        ),
       ]),
     ),
   );
@@ -270,18 +330,97 @@ export function printSummary(runs: ScenarioRun[]): void {
   );
   console.log(
     markdownTable(
-      ["Scenario", "stock / zod-cow", "official JIT / zod-cow", "ArkType / zod-cow"],
+      ["Scenario", "stock / zod-cow", "z.compile() / zod-cow", "ArkType / zod-cow"],
       runs.map((run) => {
         const zc = equivalent(run, "zc");
         return [
           run.id,
           ratio(equivalent(run, "stock"), zc),
-          ratio(equivalent(run, "official"), zc),
+          ratio(equivalent(run, "public"), zc),
           ratio(equivalent(run, "ark"), zc),
         ];
       }),
     ),
   );
+}
+
+function printMicroTables(runs: ScenarioRun[]): void {
+  const header = ["Scenario", ...PRIMARY_COLUMNS.map((c) => COLUMN_TITLES[c])];
+  console.log(
+    "\n═══ Summary: single-record hot loops, median ns per operation (lower is better) ═══\n",
+  );
+  console.log(
+    markdownTable(
+      header,
+      runs.map((run) => [
+        run.id,
+        ...PRIMARY_COLUMNS.map((c) => cell(run, c, (m) => fmtNs(nsPerOp(m, run.iterations!)))),
+      ]),
+    ),
+  );
+  console.log(
+    "\n═══ Summary: hot-loop ratios against zod-cow-v4 (values above 1 mean zod-cow was faster) ═══\n",
+  );
+  console.log(
+    markdownTable(
+      ["Scenario", "stock / zod-cow", "z.compile() / zod-cow", "ArkType / zod-cow"],
+      runs.map((run) => {
+        const zc = equivalent(run, "zc");
+        return [
+          run.id,
+          ratio(equivalent(run, "stock"), zc),
+          ratio(equivalent(run, "public"), zc),
+          ratio(equivalent(run, "ark"), zc),
+        ];
+      }),
+    ),
+  );
+}
+
+/**
+ * Diagnostic table: the internal `compileFn` / `assertOnly` product next to the public compiled
+ * API it backs. The public wrapper is the internal parser plus a result object, so the two
+ * columns are expected to read level; a gap would mean the public API carries overhead of its
+ * own (or that the comparison is between different products, as in S4 where the public column is
+ * `z.validate` and the internal one the `assertOnly` validator).
+ */
+function printDiagnosticTable(runs: ScenarioRun[]): void {
+  const rows = runs.filter((run) => run.results.some((r) => r.column === "official"));
+  if (rows.length === 0) return;
+  console.log(
+    "\n═══ Diagnostic: Zod internal compiler product (compileFn / assertOnly, not a public API) against the public compiled API ═══\n",
+  );
+  console.log(
+    markdownTable(
+      [
+        "Scenario",
+        COLUMN_TITLES.public,
+        COLUMN_TITLES.official,
+        "internal / z.compile()",
+        "internal / zod-cow",
+      ],
+      rows.map((run) => {
+        const fmt = (m: Measured) =>
+          run.iterations ? fmtNs(nsPerOp(m, run.iterations)) : fmtMs(m.medianMs);
+        return [
+          run.id,
+          cell(run, "public", fmt),
+          cell(run, "official", fmt),
+          ratio(equivalent(run, "official"), equivalent(run, "public")),
+          ratio(equivalent(run, "official"), equivalent(run, "zc")),
+        ];
+      }),
+    ),
+  );
+}
+
+export function printSummary(allRuns: ScenarioRun[]): void {
+  const runs = allRuns.filter((r) => r.results.length > 0);
+  const batch = runs.filter((r) => !r.iterations);
+  const micro = runs.filter((r) => r.iterations);
+  if (batch.length > 0) printBatchTables(batch);
+  if (micro.length > 0) printMicroTables(micro);
+  printDiagnosticTable(runs);
   console.log(
     "\n`n/a` = not computed: the column is N/A in that scenario or measures a non-equivalent reference.",
   );

@@ -1,23 +1,34 @@
 /**
  * Benchmark for the zod4 line (zod-cow-v4: official codegen + CoW skeletons), reproducing the
- * 500k-account scenario from the Numeric article, with ArkType as a first-class external baseline.
+ * 500k-account scenario from the Numeric article, with the public compiled Zod API and ArkType as
+ * first-class baselines.
  *
- * Four columns, measured in every scenario where an equivalent workload exists:
- *   stock Zod 4      safeParse, interpreter baseline (rebuilds the whole output tree on every parse)
- *   official JIT     zod4's own compileFn parser product, stock semantics (always allocates new
- *                    containers): the "reuse only, no skeleton" control
- *   zod-cow-v4       the subject: official codegen + CoW container skeletons
- *   ArkType          external control, normal public API (direct Type invocation for parse,
- *                    `.allows()` for validation-only), schema built to the same constraints
+ * Columns, measured in every scenario where an equivalent workload exists:
+ *   stock Zod 4          safeParse, interpreter baseline (rebuilds the whole output tree on every parse)
+ *   Zod 4 z.compile()    the public compiled API of Zod 4.5: `z.compile(schema).safeParse` for
+ *                        parsing, `z.validate(compiled, data)` for validation only
+ *   zod-cow-v4           the subject: official codegen + CoW container skeletons
+ *   ArkType              external control, normal public API (direct Type invocation for parse,
+ *                        `.allows()` for validation-only), schema built to the same constraints
+ *   Zod internal compiler product   zod4's own `compileFn` parser / `assertOnly` validator, the
+ *                        engineering control behind the public API; reported in a diagnostic table,
+ *                        not as a user-facing baseline
  *
- * Scenarios:
- *   S1 pure validation parse   clean input; CoW should return the input reference with zero copies
+ * Batch scenarios (one call parses the whole dataset):
+ *   S1 clean-input parse       clean input, no undeclared keys; CoW returns the input reference
  *   S2 10% default             `role` carries a default and 10% of the rows are missing it
  *   S3 dirty sweep             missing-role ratio 0% / 25% / 50% / 100%
- *   S4 validation only         official assertOnly / zod-cow validate / ArkType allows
+ *   S4 validation only         z.validate / assertOnly / zod-cow validate / ArkType allows
  *   S5 record / map / set      one record + one Map + one Set per row
  *   S6 tuple                   [number, number] and [string, string?] per row
  *   S7 async transform         async lowercase transform on one leaf (safeParseAsync)
+ *   S8 strip-unknown parity    every row carries undeclared keys, top-level and nested (strip.ts)
+ *   S10 parse failures         per-row safeParse over datasets with 1% to 100% invalid rows (failures.ts)
+ * Single-record hot loops (ns per operation):
+ *   calibration                a simple primitive-field object, parse and validation only (calibration.ts)
+ *   S9 validation failures     boolean verdicts on invalid records (failures.ts)
+ *   S10 failure position       detailed errors for a failure at the first key, the last key, a
+ *                              nested key and a refine (failures.ts)
  *
  * Fairness rules (see harness.ts and gates.ts): compilation and fixture construction stay outside
  * the timed region; every candidate gets the same warmup and the same rotated, gc()-separated
@@ -29,8 +40,10 @@
 import assert from "node:assert/strict";
 import { ArkErrors, type } from "arktype";
 import { z } from "zod";
-import { compileFn, INVALID, ZodCompileAsyncError } from "zod/v4/core";
-import { type Compiled, compile } from "zod-cow-v4";
+import { compileFn, ZodCompileAsyncError } from "zod/v4/core";
+import { compile } from "zod-cow-v4";
+import { runCalibration } from "./calibration.js";
+import { runFailures } from "./failures.js";
 import { type Fixture, gate, type Impl } from "./gates.js";
 import {
   PASSES,
@@ -40,299 +53,49 @@ import {
   type ScenarioRun,
   WARMUP,
 } from "./harness.js";
-
-/**
- * Record count (`BENCH_N`, an integer of at least 10: S2 marks every tenth row as missing its role
- * and S7 runs on N / 10 rows).
- */
-const N = Number(process.env.BENCH_N ?? 500_000);
-if (!Number.isInteger(N) || N < 10) {
-  throw new Error(
-    `BENCH_N must be an integer of at least 10, got ${JSON.stringify(process.env.BENCH_N)}`,
-  );
-}
+import {
+  AccountsCow,
+  AccountsStock,
+  ArkAccounts,
+  ArkAccountsCow,
+  ArkTupleRows,
+  arkFinite,
+  arkRun,
+  boundaryFixtures,
+  commonInvalid,
+  data,
+  deriveMissingRole,
+  fail,
+  makeTupleRows,
+  N,
+  officialParser,
+  officialParserCow,
+  officialRun,
+  officialValidator,
+  parseImpls,
+  printArkKeywordChecks,
+  PublicAccountsCow,
+  PublicAccountsStock,
+  publicRun,
+  sample,
+  stockRun,
+  TupleRows,
+  variant,
+  without,
+  Z4Cow,
+  Z4Stock,
+  zcRun,
+} from "./schemas.js";
+import { runStripParity } from "./strip.js";
 
 console.log(
   `bench-v4 · ${N.toLocaleString()} records · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
 );
-
-/* ─────────────────────────── Data generation ─────────────────────────── */
-
-const first = ["Ana", "Bob", "Cid", "Dee", "Eve", "Fay", "Gus", "Hal"];
-const cities = ["NYC", "SFO", "SEA", "ATX", "CHI"];
-const streets = ["Main St", "Oak Ave", "Elm Rd", "Pine Dr"];
-
-interface RawAccount {
-  id: number;
-  firstName: string;
-  lastName: string;
-  email: string;
-  role?: string;
-  balance: number;
-  createdAt: string;
-  tags: string[];
-  address: { street: string; city: string; zip: string; country: string };
-  active: boolean;
-}
-
-function makeAccounts(): RawAccount[] {
-  const out: RawAccount[] = new Array(N);
-  for (let i = 0; i < N; i++) {
-    out[i] = {
-      id: i,
-      firstName: first[i % first.length]!,
-      lastName: "Doe",
-      email: `user${i}@example.com`,
-      role: ["admin", "member", "viewer"][i % 3],
-      balance: (i % 1000) + 0.5,
-      createdAt: `2025-0${1 + (i % 9)}-1${i % 9}T12:00:00.000Z`,
-      tags: i % 3 === 0 ? ["a", "b"] : ["c"],
-      address: {
-        street: `${i % 9999} ${streets[i % streets.length]}`,
-        city: cities[i % cities.length]!,
-        zip: String(10000 + (i % 89999)),
-        country: "US",
-      },
-      active: i % 2 === 0,
-    };
-  }
-  return out;
-}
-
-function deriveMissingRole(accounts: RawAccount[], everyNth: number, offset: number): RawAccount[] {
-  if (everyNth <= 0) return accounts;
-  return accounts.map((a, i) => {
-    if (i % everyNth !== offset % everyNth) return a;
-    const { role: _role, ...rest } = a;
-    return rest as RawAccount;
-  });
-}
-
-/** One account with a field replaced, as a single-element array (every schema under test is an array) */
-const variant = (base: RawAccount, patch: Record<string, unknown>): unknown[] => [
-  { ...structuredClone(base), ...patch },
-];
-const without = (base: RawAccount, key: keyof RawAccount): unknown[] => {
-  const copy: Record<string, unknown> = { ...structuredClone(base) };
-  delete copy[key];
-  return [copy];
-};
-
-/* ─────────────────────────── Schemas: zod4 ─────────────────────────── */
-
-const AccountStock = z.object({
-  id: z.number().int(),
-  firstName: z.string().max(64),
-  lastName: z.string().max(64),
-  email: z.email(),
-  role: z.enum(["admin", "member", "viewer"]),
-  balance: z.number(),
-  createdAt: z.iso.datetime(),
-  tags: z.array(z.string()).max(8),
-  address: z.object({ street: z.string(), city: z.string(), zip: z.string(), country: z.string() }),
-  active: z.boolean(),
-});
-
-const AccountCow = AccountStock.extend({
-  role: z.enum(["admin", "member", "viewer"]).default("viewer"),
-});
-
-const AccountsStock = z.array(AccountStock);
-const AccountsCow = z.array(AccountCow);
-
-/* ─────────────────────────── Schemas: ArkType ─────────────────────────── */
-
-// Constraint-by-constraint equivalents of AccountStock / AccountCow, using ArkType's public API:
-//   id          zod `.int()` is Number.isSafeInteger; ArkType `number.integer` alone is `% 1 === 0`
-//               with no range bound, so the safe range is added with `number.safe`
-//   names       zod `.max(64)` counts Unicode code points, ArkType `string <= 64` counts UTF-16
-//               code units (`"😀".repeat(64)` passes zod and fails `string <= 64`), so the zod rule
-//               is reproduced as `arkStringMax64` below
-//   email,      ArkType's own `string.email` and `string.date.iso` keywords accept supersets of
-//   createdAt   zod's patterns (`string.email` takes `a..b@x.com`, `.a@x.com`, `%`; `string.date.iso`
-//               takes date-only `2025-01-10` and `+02:00` offsets, which `z.iso.datetime()` rejects).
-//               The keywords are plain regex nodes inside ArkType, so the exact zod patterns are
-//               used as ArkType regex constraints: identical accepted/rejected sets, same node kind.
-//   role        the literal union; S2/S3 add `= 'viewer'` (ArkType's key default; it applies to
-//               absent keys only, zod also defaults a present `undefined`, declared in the gate)
-//   balance     zod `z.number()` rejects NaN and both infinities; ArkType `number` rejects NaN but
-//               accepts ±Infinity, so the finite range is added explicitly (`arkFinite` below)
-//   tags        `string[] <= 8`
-//   address     nested object literal; extra keys pass through by reference (zod strips them, the
-//               benchmark data has none)
-const patternOf = (schema: z.ZodType): RegExp => {
-  const p = (schema as any)._zod.def.pattern;
-  assert.ok(p instanceof RegExp, "zod string format without a pattern");
-  return p;
-};
-const emailPattern = patternOf(AccountStock.shape.email);
-const datetimePattern = patternOf(AccountStock.shape.createdAt);
-
-/** true when `s` holds at most `max` Unicode code points (a code point is one or two UTF-16 units) */
-const codePointsAtMost =
-  (max: number) =>
-  (s: string): boolean => {
-    if (s.length > max * 2) return false;
-    let n = 0;
-    for (const _ of s) if (++n > max) return false;
-    return true;
-  };
-// zod's `.max(64)` check is "accept when the UTF-16 length fits; otherwise count code points". The
-// same two steps in ArkType: the native `string <= 64` bound as the first union branch, and a
-// predicate that counts code points on the overflow branch only. Accepted set identical to zod,
-// and the benchmark data (ASCII names) never leaves the native branch. A single `.narrow()` over
-// every string would also be exact but costs ArkType a predicate call per name (about 1 ms per
-// 50 000 rows in a probe), which would understate it.
-const arkStringMax64 = type("string <= 64").or(type("string > 64").narrow(codePointsAtMost(64)));
-// ArkType has no finite-number keyword and its string DSL does not resolve `Infinity`, so the
-// finite range goes in through the fluent range API: native range nodes, the same node kind as
-// `<=` in the DSL. NaN is already rejected by ArkType's `number`.
-const arkFinite = type.number.atMost(Number.MAX_VALUE).atLeast(-Number.MAX_VALUE);
-
-const arkAccountShape = {
-  id: "number.integer & number.safe",
-  firstName: arkStringMax64,
-  lastName: arkStringMax64,
-  email: emailPattern,
-  role: "'admin' | 'member' | 'viewer'",
-  balance: arkFinite,
-  createdAt: datetimePattern,
-  tags: "string[] <= 8",
-  address: { street: "string", city: "string", zip: "string", country: "string" },
-  active: "boolean",
-} as const;
-
-const ArkAccounts = type(arkAccountShape).array();
-const ArkAccountsCow = type({
-  ...arkAccountShape,
-  role: "'admin' | 'member' | 'viewer' = 'viewer'",
-}).array();
-
-// Keyword divergences, printed once so the substitution above is visible in every log
-{
-  const kwEmail = type("string.email");
-  const kwIso = type("string.date.iso");
-  const kwLen = type("string <= 64");
-  const kwNum = type("number");
-  const acc = (t: (i: unknown) => unknown, i: unknown) => !(t(i) instanceof ArkErrors);
-  console.log(
-    `  ArkType keyword check: string.email accepts ".a@example.com" = ${acc(kwEmail, ".a@example.com")} (zod: ${z.email().safeParse(".a@example.com").success}); string.date.iso accepts "2025-01-10" = ${acc(kwIso, "2025-01-10")} (zod: ${z.iso.datetime().safeParse("2025-01-10").success}) → the bench uses zod's patterns as ArkType regex constraints`,
-  );
-  console.log(
-    `  ArkType keyword check: \`string <= 64\` accepts 64 astral code points = ${acc(kwLen, "😀".repeat(64))} (zod .max(64): ${z.string().max(64).safeParse("😀".repeat(64)).success}); \`number\` accepts Infinity = ${acc(kwNum, Number.POSITIVE_INFINITY)} (zod: ${z.number().safeParse(Number.POSITIVE_INFINITY).success}) → the bench counts code points on overflow (\`${arkStringMax64.expression}\`) and bounds numbers to the finite range (\`${arkFinite.expression}\`)`,
-  );
-}
-
-/* ─────────────────────────── Products under test ─────────────────────────── */
-
-type Parser = (input: unknown) => unknown;
-
-const officialParser = compileFn(AccountsStock) as Parser;
-const officialParserCow = compileFn(AccountsCow) as Parser;
-const officialValidator = compileFn(AccountsStock, { assertOnly: true }) as Parser;
-
-const Z4Stock = compile(AccountsStock);
-const Z4Cow = compile(AccountsCow);
-assert.ok(!Z4Stock.stock && !Z4Cow.stock, "zod-cow degraded to stock (unexpected)");
-
-const fail = (who: string): never => {
-  throw new Error(`${who} rejected the benchmark input`);
-};
-
-/** Timed bodies: each one verifies the result so a rejection can never be timed as a success */
-const stockRun = (schema: z.ZodType, input: unknown) => () => {
-  const r = schema.safeParse(input);
-  return r.success ? r.data : fail("stock");
-};
-const officialRun = (fn: Parser, input: unknown) => () => {
-  const r = fn(input);
-  return r === INVALID ? fail("official JIT") : r;
-};
-const zcRun = (c: Compiled<z.ZodType>, input: unknown) => () => {
-  const r = c.safeParse(input);
-  return r.success ? r.data : fail("zod-cow");
-};
-const arkRun = (t: (input: unknown) => unknown, input: unknown) => () => {
-  const r = t(input);
-  return r instanceof ArkErrors ? fail("ArkType") : r;
-};
-
-/** Gate implementations for a parse scenario */
-const parseImpls = (
-  schema: z.ZodType,
-  official: Parser,
-  zc: Compiled<z.ZodType>,
-  ark: (input: unknown) => unknown,
-): Impl[] => [
-  {
-    column: "stock",
-    label: "stock safeParse",
-    accepts: (i) => schema.safeParse(i).success,
-    output: (i) => schema.parse(i),
-  },
-  {
-    column: "official",
-    label: "official compileFn parser",
-    accepts: (i) => official(i) !== INVALID,
-    output: (i) => official(i),
-  },
-  {
-    column: "zc",
-    label: "zod-cow safeParse",
-    accepts: (i) => zc.safeParse(i).success,
-    output: (i) => zc.parse(i),
-  },
-  {
-    column: "ark",
-    label: "ArkType Type(data)",
-    accepts: (i) => !(ark(i) instanceof ArkErrors),
-    output: (i) => ark(i),
-  },
-];
+printArkKeywordChecks();
 
 const runs: ScenarioRun[] = [];
 
-/* ─────────────────────────── S1: pure validation parse ─────────────────────────── */
-
-const data = makeAccounts();
-const sample = data[7]!;
-
-// Boundary fixtures for the constraints whose ArkType keyword differs from zod in unit (length in
-// UTF-16 units vs code points) or in range (`number` accepts ±Infinity). Shared by every scenario
-// that runs the account schema (S1, S2/S3 and S4).
-const boundaryFixtures: Fixture[] = [
-  {
-    name: "firstName of 64 astral code points (128 UTF-16 units)",
-    input: variant(sample, { firstName: "😀".repeat(64) }),
-    accept: true,
-  },
-  {
-    name: "lastName of exactly 64 ASCII characters",
-    input: variant(sample, { lastName: "y".repeat(64) }),
-    accept: true,
-  },
-  {
-    name: "overlong firstName (65 astral code points)",
-    input: variant(sample, { firstName: "😀".repeat(65) }),
-    accept: false,
-  },
-  {
-    name: "overlong lastName (64 ASCII + 1 astral)",
-    input: variant(sample, { lastName: `${"y".repeat(64)}😀` }),
-    accept: false,
-  },
-  {
-    name: "balance is Infinity",
-    input: variant(sample, { balance: Number.POSITIVE_INFINITY }),
-    accept: false,
-  },
-  {
-    name: "balance is -Infinity",
-    input: variant(sample, { balance: Number.NEGATIVE_INFINITY }),
-    accept: false,
-  },
-  { name: "balance is NaN", input: variant(sample, { balance: Number.NaN }), accept: false },
-];
+/* ─────────────────────────── S1: clean-input parse ─────────────────────────── */
 
 {
   const stockOut = AccountsStock.parse(data);
@@ -345,85 +108,37 @@ const boundaryFixtures: Fixture[] = [
     `\n  S1 output reference: zod-cow === input ${zcOut === data ? "yes (zero-copy)" : "no"} · ArkType === input ${arkOut === data ? "yes (validation returns the input)" : "no"} · stock === input ${(stockOut as unknown) === data ? "yes" : "no (rebuilt)"}`,
   );
 
-  const commonInvalid: Fixture[] = [
-    { name: "non-integer id (1.5)", input: variant(sample, { id: 1.5 }), accept: false },
-    {
-      name: "unsafe integer id (2^53+2)",
-      input: variant(sample, { id: 2 ** 53 + 2 }),
-      accept: false,
-    },
-    {
-      name: "overlong firstName (65)",
-      input: variant(sample, { firstName: "x".repeat(65) }),
-      accept: false,
-    },
-    {
-      name: "malformed email (not-an-email)",
-      input: variant(sample, { email: "not-an-email" }),
-      accept: false,
-    },
-    {
-      name: "malformed email (user@example)",
-      input: variant(sample, { email: "user@example" }),
-      accept: false,
-    },
-    {
-      name: "leading-dot email (.a@example.com)",
-      input: variant(sample, { email: ".a@example.com" }),
-      accept: false,
-    },
-    {
-      name: "date-only createdAt",
-      input: variant(sample, { createdAt: "2025-01-10" }),
-      accept: false,
-    },
-    {
-      name: "offset createdAt (+02:00)",
-      input: variant(sample, { createdAt: "2025-01-10T12:00:00+02:00" }),
-      accept: false,
-    },
-    {
-      name: "malformed createdAt",
-      input: variant(sample, { createdAt: "not-a-date" }),
-      accept: false,
-    },
-    { name: "invalid role (root)", input: variant(sample, { role: "root" }), accept: false },
-    {
-      name: "oversized tags (9)",
-      input: variant(sample, { tags: "abcdefghi".split("") }),
-      accept: false,
-    },
-    {
-      name: "nested address.zip is a number",
-      input: variant(sample, { address: { ...sample.address, zip: 12345 } }),
-      accept: false,
-    },
-    { name: "balance is a string", input: variant(sample, { balance: "1" }), accept: false },
-    // Non-string values for the regex-constrained fields: a bare RegExp field in ArkType implies a
-    // string base, so these must be rejected by every implementation, not just by zod
-    { name: "email is a number", input: variant(sample, { email: 123 }), accept: false },
-    { name: "createdAt is null", input: variant(sample, { createdAt: null }), accept: false },
-    { name: "not an array", input: sample, accept: false },
-  ];
-  await gate("S1", parseImpls(AccountsStock, officialParser, Z4Stock, ArkAccounts), [
-    { name: "valid account", input: [sample], accept: true },
-    { name: `generated dataset (${N.toLocaleString()} rows)`, input: data, accept: true },
-    {
-      name: "valid account with an extra key",
-      input: variant(sample, { extra: 1 }),
-      accept: true,
-      outputDiffers:
-        "zod strips undeclared keys into a copy, ArkType passes them through by reference",
-    },
-    { name: "missing role", input: without(sample, "role"), accept: false },
-    { name: "present-undefined role", input: variant(sample, { role: undefined }), accept: false },
-    ...boundaryFixtures,
-    ...commonInvalid,
-  ]);
+  // The S1 fixture has no undeclared keys. zod's default object mode strips undeclared keys into
+  // a copy while ArkType's default keeps them on the input reference, so S1 is a fair comparison
+  // of this clean fixture, not of identical parse semantics: the extra-key fixture below declares
+  // that divergence, and S8 measures the strip case with ArkType configured to delete.
+  await gate(
+    "S1",
+    parseImpls(AccountsStock, PublicAccountsStock, officialParser, Z4Stock, ArkAccounts),
+    [
+      { name: "valid account", input: [sample], accept: true },
+      { name: `generated dataset (${N.toLocaleString()} rows)`, input: data, accept: true },
+      {
+        name: "valid account with an extra key",
+        input: variant(sample, { extra: 1 }),
+        accept: true,
+        outputDiffers:
+          "zod strips undeclared keys into a copy, ArkType passes them through by reference (S8 measures the strip case)",
+      },
+      { name: "missing role", input: without(sample, "role"), accept: false },
+      {
+        name: "present-undefined role",
+        input: variant(sample, { role: undefined }),
+        accept: false,
+      },
+      ...boundaryFixtures,
+      ...commonInvalid,
+    ],
+  );
 
   const run = await runScenario(
-    "S1 pure validation parse",
-    `${N.toLocaleString()} accounts, clean input`,
+    "S1 clean-input parse (no undeclared keys)",
+    `${N.toLocaleString()} accounts, clean input without undeclared keys`,
     [
       {
         column: "stock",
@@ -431,8 +146,13 @@ const boundaryFixtures: Fixture[] = [
         run: stockRun(AccountsStock, data),
       },
       {
+        column: "public",
+        label: "z.compile() safeParse (public compiled API)",
+        run: publicRun(PublicAccountsStock, data),
+      },
+      {
         column: "official",
-        label: "official compileFn parser (JIT, stock sem.)",
+        label: "internal compileFn parser (stock sem.)",
         run: officialRun(officialParser, data),
       },
       {
@@ -456,7 +176,7 @@ const cowGateFixtures: Fixture[] = [
   {
     name: "present-undefined role",
     input: variant(sample, { role: undefined }),
-    accept: { stock: true, official: true, zc: true, ark: false },
+    accept: { stock: true, public: true, official: true, zc: true, ark: false },
     divergence:
       "zod applies the default to a present key holding undefined; ArkType key defaults apply to absent keys only (the benchmark data only has absent keys)",
   },
@@ -489,14 +209,18 @@ const cowGateFixtures: Fixture[] = [
   console.log(
     `\n  S2 missing-role share ${((injected / N) * 100).toFixed(1)}% · rows returned by reference: zod-cow ${zcSharesRows.toLocaleString()} / ${N.toLocaleString()}, ArkType ${arkSharesRows.toLocaleString()} / ${N.toLocaleString()} (a defaulted ArkType object is a morph: every row and the array are rebuilt), stock 0`,
   );
-  await gate("S2", parseImpls(AccountsCow, officialParserCow, Z4Cow, ArkAccountsCow), [
-    ...cowGateFixtures,
-    {
-      name: `generated dataset (${injected.toLocaleString()} of ${N.toLocaleString()} rows lack role)`,
-      input: dataCow,
-      accept: true,
-    },
-  ]);
+  await gate(
+    "S2",
+    parseImpls(AccountsCow, PublicAccountsCow, officialParserCow, Z4Cow, ArkAccountsCow),
+    [
+      ...cowGateFixtures,
+      {
+        name: `generated dataset (${injected.toLocaleString()} of ${N.toLocaleString()} rows lack role)`,
+        input: dataCow,
+        accept: true,
+      },
+    ],
+  );
 
   const run = await runScenario(
     "S2 10% default",
@@ -508,8 +232,13 @@ const cowGateFixtures: Fixture[] = [
         run: stockRun(AccountsCow, dataCow),
       },
       {
+        column: "public",
+        label: "z.compile() safeParse (default)",
+        run: publicRun(PublicAccountsCow, dataCow),
+      },
+      {
         column: "official",
-        label: "official compileFn parser (JIT, default)",
+        label: "internal compileFn parser (default)",
         run: officialRun(officialParserCow, dataCow),
       },
       { column: "zc", label: "zod-cow-v4 safeParse (90% zero-copy)", run: zcRun(Z4Cow, dataCow) },
@@ -530,15 +259,19 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const pct = `${(ratio * 100).toFixed(0)}%`;
   // Same schemas as S2, so the S2 fixtures apply as they are; the generated dataset of this ratio
-  // is gated too (accepted by all four, outputs deepStrictEqual, official parser included)
-  await gate(`S3 ${pct}`, parseImpls(AccountsCow, officialParserCow, Z4Cow, ArkAccountsCow), [
-    ...cowGateFixtures,
-    {
-      name: `generated dataset (${pct} of ${N.toLocaleString()} rows lack role)`,
-      input: ds,
-      accept: true,
-    },
-  ]);
+  // is gated too (accepted by all, outputs deepStrictEqual, internal parser included)
+  await gate(
+    `S3 ${pct}`,
+    parseImpls(AccountsCow, PublicAccountsCow, officialParserCow, Z4Cow, ArkAccountsCow),
+    [
+      ...cowGateFixtures,
+      {
+        name: `generated dataset (${pct} of ${N.toLocaleString()} rows lack role)`,
+        input: ds,
+        accept: true,
+      },
+    ],
+  );
   const run = await runScenario(`S3 ${pct} dirty`, `missing-role ratio ${pct} (same S2 schemas)`, [
     {
       column: "stock",
@@ -546,8 +279,13 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
       run: stockRun(AccountsCow, ds),
     },
     {
+      column: "public",
+      label: `z.compile() safeParse (${pct} missing)`,
+      run: publicRun(PublicAccountsCow, ds),
+    },
+    {
       column: "official",
-      label: `official compileFn parser (${pct} missing)`,
+      label: `internal compileFn parser (${pct} missing)`,
       run: officialRun(officialParserCow, ds),
     },
     { column: "zc", label: `zod-cow-v4 safeParse (${pct} missing)`, run: zcRun(Z4Cow, ds) },
@@ -564,13 +302,20 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
 /* ─────────────────────────── S4: validation only ─────────────────────────── */
 
 {
-  // Validation only, no output construction: official assertOnly product, zod-cow validate() (the
-  // official whole-tree assertOnly product of the same array schema, returning the input reference)
-  // and ArkType `.allows()`. All three consume the whole S1 array; every call checks the verdict.
+  // Validation only, no output construction: the public `z.validate(compiled, data)` (the
+  // compiled validator with a runtime fallback on failure), the internal assertOnly product,
+  // zod-cow validate() (the official whole-tree assertOnly product of the same array schema,
+  // returning the input reference) and ArkType `.allows()`. All of them consume the whole S1
+  // array; every call checks the verdict.
   const validateImpls: Impl[] = [
     {
+      column: "public",
+      label: "z.validate(compiled)",
+      accepts: (i) => z.validate(PublicAccountsStock, i),
+    },
+    {
       column: "official",
-      label: "official assertOnly validator",
+      label: "internal assertOnly validator",
       accepts: (i) => officialValidator(i) === true,
     },
     { column: "zc", label: "zod-cow validate", accepts: (i) => Z4Stock.validate(i) === i },
@@ -608,9 +353,14 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
         na: "no validation-only API (safeParse always builds the output)",
       },
       {
+        column: "public",
+        label: "z.validate(compiled, data) (public API)",
+        run: () => (z.validate(PublicAccountsStock, data) ? N : fail("z.validate")),
+      },
+      {
         column: "official",
-        label: "official assertOnly validator (whole array)",
-        run: () => (officialValidator(data) === true ? N : fail("official assertOnly validator")),
+        label: "internal assertOnly validator (whole array)",
+        run: () => (officialValidator(data) === true ? N : fail("internal assertOnly validator")),
       },
       {
         column: "zc",
@@ -664,8 +414,9 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     };
   }
   const RowsZ4 = compile(Rows);
-  const rowsParser = compileFn(Rows) as Parser;
-  assert.ok(!RowsZ4.stock);
+  const rowsParser = compileFn(Rows) as (input: unknown) => unknown;
+  const RowsPublic = z.compile(Rows);
+  assert.ok(!RowsZ4.stock && RowsPublic !== Rows);
 
   // ArkType 2.2.3: `Record<string, number>` validates keys and values natively, but `Map` and `Set`
   // are instanceof checks only; there is no `Map<K, V>` / `Set<T>` generic ("Comparator < must be
@@ -690,8 +441,9 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const rowVariant = (patch: Partial<S5Row>): unknown[] => [{ ...base, ...patch }];
   const refOnly =
     "ArkType `Map` / `Set` are instanceof-only in 2.2.3: entries and members are not validated (non-equivalent reference)";
-  const s5Impls = parseImpls(Rows, rowsParser, RowsZ4, ArkRowsRef);
-  s5Impls[3]!.label = "ArkType non-equivalent reference (Map/Set instanceof)";
+  const s5Impls = parseImpls(Rows, RowsPublic, rowsParser, RowsZ4, ArkRowsRef);
+  s5Impls[4]!.label = "ArkType non-equivalent reference (Map/Set instanceof)";
+  const allZodReject = { stock: false, public: false, official: false, zc: false, ark: true };
   await gate("S5", s5Impls, [
     { name: "valid row", input: [base], accept: true },
     { name: "non-integer id (1.5)", input: rowVariant({ id: 1.5 }), accept: false },
@@ -723,25 +475,25 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     {
       name: "Map key is a number",
       input: rowVariant({ lookup: new Map([[1 as never, 2]]) }),
-      accept: { stock: false, official: false, zc: false, ark: true },
+      accept: allZodReject,
       divergence: refOnly,
     },
     {
       name: "Map value is a string",
       input: rowVariant({ lookup: new Map([["k1", "x" as never]]) }),
-      accept: { stock: false, official: false, zc: false, ark: true },
+      accept: allZodReject,
       divergence: refOnly,
     },
     {
       name: "Set member is not an integer (1.5)",
       input: rowVariant({ tags: new Set([1, 1.5]) }),
-      accept: { stock: false, official: false, zc: false, ark: true },
+      accept: allZodReject,
       divergence: refOnly,
     },
     {
       name: "Set member is a string",
       input: rowVariant({ tags: new Set(["x" as never]) }),
-      accept: { stock: false, official: false, zc: false, ark: true },
+      accept: allZodReject,
       divergence: refOnly,
     },
   ]);
@@ -760,8 +512,13 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
         run: stockRun(Rows, rows),
       },
       {
+        column: "public",
+        label: "z.compile() safeParse (stock sem.)",
+        run: publicRun(RowsPublic, rows),
+      },
+      {
         column: "official",
-        label: "official compileFn parser (JIT, stock sem.)",
+        label: "internal compileFn parser (stock sem.)",
         run: officialRun(rowsParser, rows),
       },
       { column: "zc", label: "zod-cow-v4 safeParse (zero-copy)", run: zcRun(RowsZ4, rows) },
@@ -787,36 +544,15 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
 /* ─────────────────────────── S6: tuple ─────────────────────────── */
 
 {
-  const Point = z.tuple([z.number(), z.number()]);
-  const Label = z.tuple([z.string(), z.optional(z.string())]);
-  const Row = z.object({ id: z.number().int(), point: Point, label: Label });
-  const Rows = z.array(Row);
-  type S6Row = { id: number; point: [number, number]; label: [string, string?] };
-  const rows: S6Row[] = new Array(N);
-  for (let i = 0; i < N; i++) {
-    rows[i] = {
-      id: i,
-      point: [i % 360, i % 180],
-      label: i % 2 === 0 ? [`L${i % 97}`, `T${i % 31}`] : [`L${i % 97}`],
-    };
-  }
-  const RowsZ4 = compile(Rows);
-  const rowsParser = compileFn(Rows) as Parser;
-  assert.ok(!RowsZ4.stock);
-
-  // ArkType tuples: a fixed-length pair of finite numbers (`arkFinite`, since ArkType's `number`
-  // accepts ±Infinity and zod's does not) and an optional trailing element `"string?"`. `string?`
-  // means the slot may be absent; zod's `z.optional()` element also accepts a present `undefined`
-  // (declared in the gate; the benchmark data uses 1- and 2-element labels only).
-  const ArkRows = type({
-    id: "number.integer & number.safe",
-    point: [arkFinite, arkFinite],
-    label: ["string", "string?"],
-  }).array();
+  const rows = makeTupleRows();
+  const RowsZ4 = compile(TupleRows);
+  const rowsParser = compileFn(TupleRows) as (input: unknown) => unknown;
+  const RowsPublic = z.compile(TupleRows);
+  assert.ok(!RowsZ4.stock && RowsPublic !== TupleRows);
 
   const base = rows[4]!;
   const rowVariant = (patch: Record<string, unknown>): unknown[] => [{ ...base, ...patch }];
-  await gate("S6", parseImpls(Rows, rowsParser, RowsZ4, ArkRows), [
+  await gate("S6", parseImpls(TupleRows, RowsPublic, rowsParser, RowsZ4, ArkTupleRows), [
     { name: "valid row, 2-element label", input: [rows[4]!], accept: true },
     { name: "valid row, 1-element label", input: [rows[5]!], accept: true },
     { name: "point has 3 elements", input: rowVariant({ point: [1, 2, 3] }), accept: false },
@@ -844,15 +580,15 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     {
       name: "label second element is a present undefined",
       input: rowVariant({ label: ["a", undefined] }),
-      accept: { stock: true, official: true, zc: true, ark: false },
+      accept: { stock: true, public: true, official: true, zc: true, ark: false },
       divergence:
         "zod's optional tuple element accepts an explicit undefined in the slot; ArkType `string?` only lets the slot be absent (the benchmark data never has a present undefined)",
     },
   ]);
   const probe = RowsZ4.parse(rows);
-  const arkOut = ArkRows(rows);
+  const arkOut = ArkTupleRows(rows);
   assert.ok(!(arkOut instanceof ArkErrors));
-  assert.deepStrictEqual(probe, Rows.parse(rows));
+  assert.deepStrictEqual(probe, TupleRows.parse(rows));
   assert.deepStrictEqual(arkOut, probe);
   console.log(
     `  S6 output reference: zod-cow === input ${probe === rows ? "yes (zero-copy)" : "no"} · ArkType === input ${arkOut === rows ? "yes" : "no"}`,
@@ -865,15 +601,20 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
       {
         column: "stock",
         label: "stock zod4 safeParse (new array per tuple)",
-        run: stockRun(Rows, rows),
+        run: stockRun(TupleRows, rows),
+      },
+      {
+        column: "public",
+        label: "z.compile() safeParse (stock sem.)",
+        run: publicRun(RowsPublic, rows),
       },
       {
         column: "official",
-        label: "official compileFn parser (JIT, stock sem.)",
+        label: "internal compileFn parser (stock sem.)",
         run: officialRun(rowsParser, rows),
       },
       { column: "zc", label: "zod-cow-v4 safeParse (zero-copy)", run: zcRun(RowsZ4, rows) },
-      { column: "ark", label: "ArkType Type(data) (tuples)", run: arkRun(ArkRows, rows) },
+      { column: "ark", label: "ArkType Type(data) (tuples)", run: arkRun(ArkTupleRows, rows) },
     ],
   );
   printRatios(run);
@@ -897,13 +638,24 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const RowsZ4 = compile(Rows);
   assert.ok(RowsZ4.async && !RowsZ4.stock, "async skeleton compiled");
 
-  // The official compiler refuses async transforms; keep the exact error as the N/A reason.
+  // The official compiler refuses async transforms; keep the exact error as the N/A reason. The
+  // public `z.compile()` hands the schema back uncompiled in that case (strict mode throws), so a
+  // "compiled" column here would time the interpreter under another label.
   let officialNA = "compileFn accepted the async schema (unexpected)";
   try {
     compileFn(Rows);
   } catch (e) {
     assert.ok(e instanceof ZodCompileAsyncError, `unexpected compileFn error: ${String(e)}`);
     officialNA = "compileFn refuses async transforms (ZodCompileAsyncError)";
+  }
+  assert.equal(z.compile(Rows), Rows, "z.compile() no longer returns an async schema uncompiled");
+  let publicNA = "z.compile() accepted the async schema (unexpected)";
+  try {
+    z.compile(Rows, { strict: true });
+  } catch (e) {
+    assert.ok(e instanceof ZodCompileAsyncError, `unexpected z.compile error: ${String(e)}`);
+    publicNA =
+      "z.compile() returns the schema uncompiled for async transforms (strict mode throws ZodCompileAsyncError)";
   }
 
   // ArkType 2.2.3 has no async morph: a `.pipe(async fn)` morph returns a Promise that the pipeline
@@ -965,7 +717,8 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
           return r.success ? r.data : fail("stock async");
         },
       },
-      { column: "official", label: "official compileFn", na: officialNA },
+      { column: "public", label: "z.compile()", na: publicNA },
+      { column: "official", label: "internal compileFn", na: officialNA },
       {
         column: "zc",
         label: "zod-cow-v4 safeParseAsync (async skeleton + CoW)",
@@ -981,11 +734,17 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   runs.push(run);
 }
 
+/* ─────────────────────────── S8, calibration, S9, S10 ─────────────────────────── */
+
+runs.push(await runStripParity());
+runs.push(...(await runCalibration()));
+runs.push(...(await runFailures()));
+
 /* ─────────────────────────── Summary ─────────────────────────── */
 
 printSummary(runs);
 console.log(
-  "\nNotes: alloc = heapUsed delta at the end of a timed call (before gc); retained = the delta still held after gc.",
+  "\nNotes: alloc = heapUsed delta at the end of a timed call (before gc); retained = the delta still held after gc; hot-loop rows report ns per operation and no allocation.",
 );
 console.log(
   "  zod-cow returns the input reference on the clean path (≈0 allocated beyond the strip probe, 0 retained) and shallow-copies only the dirty path otherwise.",

@@ -169,7 +169,23 @@ How to read it:
 - validate fast path: `validate()` is the official whole-tree `assertOnly` product of the same array schema, so S4 reads level with `z.validate` by construction (18 ms against 17 ms, 0.93x). Its value is the validation-only cost: 18 ms / 50 000 = 360 ns per account, with nothing retained after GC.
 - The +3.1 MB in S1 is short-lived allocation from the strip-mode probe: exactly one empty own-symbol array (32 bytes) per object, 100 000 objects here, read to prove that the object can be returned by reference. That probe (`Object.getOwnPropertySymbols`) is also the skeleton's per-object cost: about 36 ns of a 65 ns skeleton call on a 6-field record measured locally on Node 24, next to about 9 ns for the `for...in` probe and nothing measurable for the leaf validator calls, against 24 ns for the compiled parser of the same schema. It stays on by default because stock drops own symbol keys and a pass-through has to prove there are none. `compile(schema, { ownSymbolKeys: "ignore" })` switches it off for callers whose data carries no symbol keys (#43, documented in the [package README](packages/zod-cow-v4/README.md#compileoptions)); the bench measures that as a separate, labelled opt-in row of the calibration section while the zod-cow-v4 column of every scenario keeps the default. Measured locally on Node 24 at 2 000 000 operations per round, the calibration parse reads 75 ns with the probe and 32 ns without it, against 24 to 29 ns for `z.compile()`.
 
-The zod3 line measured 4.3x to 4.6x against stock zod 3.24.1 in the same run (S1 4.29x, S2 4.56x; stock zod3 still pays the interpreter tax). The superseded tables from runs 33940596453 and 33837195401 and the earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
+The zod3 line has its own suite, `bench-v3` (`pnpm run bench:v3`), with the same methodology and ArkType built to zod3's constraints. From [Benchmarks workflow run 33992895288](https://github.com/iceboundrock/zod-cow/actions/runs/33992895288) (same runner class, node 24, `BENCH_N=50 000`, the generated skeletons of the zod3 line):
+
+| Scenario | stock Zod 3 | zod-cow-v3 | ArkType | stock / zod-cow | ArkType / zod-cow |
+|---|---:|---:|---:|---:|---:|
+| S1 clean-input parse | 254 ms (+75.5 MB / +17.7 MB) | **24 ms (0 / 0)** | 23 ms | 10.75x | 0.99x |
+| S2 10% default | 268 ms | **27 ms** | 819 ms (morph) | 10.12x | 30.89x |
+| S3 0% / 25% / 50% / 100% dirty | 259 / 272 / 271 / 270 ms | **25 / 29 / 33 / 40 ms** | 828 / 833 / 852 / 819 ms | 10.44x to 6.78x | 33.40x to 20.55x |
+| S4 validate (same runtime as parse) | N/A | **27 ms** | 25 ms (`allows`) | n/a | 0.93x |
+| S5 record / map / set, clean / 10% dirty | 200 / 230 ms | **12 / 15 ms** | N/A (instanceof-only) | 16.23x / 15.33x | n/a |
+| S6 tuple, clean / 50% dirty | 129 / 142 ms | **3 / 7 ms** | 2 ms / N/A | 39.39x / 21.05x | 0.69x |
+| S7 sync transform, every row / no-op | 228 / 223 ms | **17 / 10 ms** | 398 / 391 ms | 13.60x / 22.06x | 23.77x / 38.61x |
+| S8 strip-unknown parity | 278 ms | **37 ms (+23.7 MB / +9.5 MB)** | 1 113 ms | 7.52x | 30.14x |
+| S9 per-row parse, 1% / 10% / 50% / 100% invalid | 265 / 273 / 299 / 340 ms | **33 / 37 / 58 / 79 ms** | 36 / 104 / 301 / 474 ms | 8.02x to 4.29x | 1.08x to 5.99x |
+| calibration parse, 6-field record | 2 123 ns | **107 ns** | 80 ns | 19.8x | 0.75x |
+| S9 failure hot loops (first / last / nested / 3 siblings / array / tuple) | 6.5 / 6.5 / 6.3 / 8.1 / 6.4 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.6 / 1.4 / 0.9 µs** | 7.3 / 12.4 / 7.5 / 20.3 / 7.9 / 6.3 µs | 4.5x to 4.9x | 5.1x to 7.8x |
+
+How to read it: the zod3 line is level with ArkType on the clean parse (S1 0.99x, S4 0.93x, within runner noise at these sizes) and on the leaf and tuple sweeps, behind it on deep nesting and long arrays (the scaling sweeps in the run: nesting depth 5 195 ns against 79 ns, 100-element array 643 ns against 170 ns, a monomorphic call per nested skeleton and per element), and far ahead wherever ArkType's morphs rebuild (S2, S3, S7, S8). Failure paths carry stock's exact issue lists (the run's parity section: 16 of 16 fixtures) at a fifth of stock's cost. Before this round the zod3 line measured 3.2x to 3.7x against stock on S1 (572 ms against 2 101 ms at 500 000 rows locally) and was behind stock on the failure hot loops; the before / after table at 500 000 rows is in the [CHANGELOG](CHANGELOG.md#unreleased). The superseded tables from runs 33940596453 and 33837195401 and the earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 
 ### Cross-library comparison
 

@@ -10,8 +10,9 @@
  *   2. `ownSymbolKeys: "ignore"`: the generator draws the same random numbers but never emits the
  *      extra own symbol (the one input the option is documented to treat differently from stock),
  *      so every case is the same schema and the same input minus that symbol; the pass also checks
- *      that no generated top-level code carries the own-symbol probe. Its sharing rate is expected
- *      at or above the first pass (the inputs that carried the symbol are clean now).
+ *      that no generated code carries the own-symbol probe, at any depth (`compiled.code` dumps the
+ *      nested skeletons after the top-level one, #46). Its sharing rate is expected at or above the
+ *      first pass (the inputs that carried the symbol are clean now).
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
@@ -665,7 +666,9 @@ async function runPass(
         compileOptions?.ownSymbolKeys === "ignore" &&
         compiled.code?.includes("getOwnPropertySymbols")
       ) {
-        failures.push(`OWN-SYMBOL PROBE EMITTED UNDER ownSymbolKeys: "ignore" → ${caseId}`);
+        failures.push(
+          `OWN-SYMBOL PROBE EMITTED (at some depth) UNDER ownSymbolKeys: "ignore" → ${caseId}`,
+        );
         continue;
       }
       const useAsync = compiled.async; // async skeleton → both sides go through safeParseAsync

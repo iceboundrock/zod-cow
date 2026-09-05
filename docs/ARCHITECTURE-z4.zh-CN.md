@@ -516,7 +516,10 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）；
   骨架输出稠密数组（更正确），差分生成器规避该组合；详见 upstream-issue-draft.md §Bonus。
 - 失败诊断钩子：`REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
-  打印 schema desc、input、CoW 骨架源码。
+  打印 schema desc、input、CoW 骨架源码：先是顶层骨架，随后按构建顺序列出树中构建的每个嵌套容器骨架
+  （各自是一次独立的 `Function` 构建，以提升常量的形式进入父骨架），每个带 `// ── nested skeleton #n ──` 标题。
+  它们由 `CodeCtx.sources` 收集：`subFn` 把父上下文的列表交给子上下文，`buildFn` 追加每个构建出的函数体，
+  构建后失败并被官方产物替换的子骨架会被再次移除，因此 dump 只含树实际调用的函数（#46）。
 
 ## 9. 版本锚点与风险
 
@@ -559,7 +562,7 @@ The engine lives in `src/cow4/` as a set of modules cut along the seams describe
 |---|---|---|
 | `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator` |
 | `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
-| `codectx.ts` | §3 | `CodeCtx`, `escKey`, `buildFn` |
+| `codectx.ts` | §3 | `CodeCtx`（携带 debug dump 共享的 `sources` 列表）, `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
 | `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync` |

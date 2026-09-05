@@ -65,7 +65,7 @@ export function emitCoWRecord(
       const inVar = ctx.var();
       // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
       ctx.write(`const ${inVar} = ${accessor}[${keyExpr}];`);
-      const product = childProduct(def.valueType, childSeen, ctx.options);
+      const product = childProduct(def.valueType, childSeen, ctx);
       const f = ctx.addConst(product.fn);
       const pAsync = product.kind === "async";
       if (pAsync) ctx.async = true;
@@ -222,7 +222,7 @@ function emitRecordValueProduct(
   keyVar: string,
   outKeyVar?: string,
 ): void {
-  const product = childProduct(valueType, seen, ctx.options);
+  const product = childProduct(valueType, seen, ctx);
   const f = ctx.addConst(product.fn);
   if (product.kind === "validator") {
     ctx.write(`if (${f}(vIn) === INVALID) return INVALID;`);

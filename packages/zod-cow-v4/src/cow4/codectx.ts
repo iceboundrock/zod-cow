@@ -14,8 +14,17 @@ export class CodeCtx {
   async = false;
   private varN = 0;
 
-  /** The compile options of the tree; a sub-skeleton context is created with its parent's options */
-  constructor(readonly options: CowOptions) {}
+  /**
+   * The compile options of the tree and the source of every skeleton built so far, both shared by
+   * the whole tree: a sub-skeleton context is created with its parent's options and its parent's
+   * `sources` (`subFn`), so `compileCowDebug` can dump the nested skeletons next to the top-level
+   * one (#46). `buildFn` appends to `sources`, `compileCowDebug` reads it, and a failed sub-skeleton
+   * build truncates it back (`dropSourcesOnThrow` in `emit.ts`).
+   */
+  constructor(
+    readonly options: CowOptions,
+    readonly sources: string[] = [],
+  ) {}
 
   /** Equivalent of the official addConstant: runtime references are hoisted into function parameters (c0,c1,…), deduped by === */
   addConst(value: unknown): string {
@@ -80,7 +89,9 @@ export function unknownStringKeyExpr(
 export function buildFn(ctx: CodeCtx): Fn {
   const F = Function;
   const head = ctx.async ? "return async (input) => {" : "return (input) => {";
-  const factory = new F("INVALID", ...ctx.constNames, `${head}\n${ctx.lines.join("\n")}\n}`);
+  const body = ctx.lines.join("\n");
+  const factory = new F("INVALID", ...ctx.constNames, `${head}\n${body}\n}`);
+  ctx.sources.push(body);
   const fn = factory(INVALID, ...ctx.constValues) as Fn;
   return ctx.async ? markAsync(fn) : fn;
 }

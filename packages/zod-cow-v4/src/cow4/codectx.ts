@@ -86,6 +86,35 @@ export function unknownStringKeyExpr(
     : `!${knownSet()}.has(k)`;
 }
 
+/**
+ * Own-symbol probe of a clean container: sets `extraVar` when `accessor` carries an own symbol key
+ * that is not one of the declared `symbolKeys`. Shared by the object skeleton (every mode, #42)
+ * and the enum-keyed record skeleton (#51): stock's rebuild drops undeclared own symbol keys,
+ * enumerable or not, so a skeleton has to prove there are none before returning the input by
+ * reference, and `Object.getOwnPropertySymbols` is the only way to ask without listing every key.
+ * Callers emit it only under `ownSymbolKeys: "probe"`. `knownSet` hoists the caller's known-key
+ * `Set` on first use; a container without a declared symbol key never references it.
+ */
+export function emitOwnSymbolProbe(
+  ctx: CodeCtx,
+  accessor: string,
+  extraVar: string,
+  symbolKeys: readonly symbol[],
+  knownSet: () => string,
+): void {
+  const syms = ctx.var();
+  ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
+  if (symbolKeys.length === 0) {
+    ctx.write(`if (${syms}.length !== 0) ${extraVar} = true;`);
+  } else {
+    ctx.write(`for (const s of ${syms}) {`);
+    ctx.indented(() => {
+      ctx.write(`if (!${knownSet()}.has(s)) { ${extraVar} = true; break; }`);
+    });
+    ctx.write(`}`);
+  }
+}
+
 export function buildFn(ctx: CodeCtx): Fn {
   const F = Function;
   const head = ctx.async ? "return async (input) => {" : "return (input) => {";

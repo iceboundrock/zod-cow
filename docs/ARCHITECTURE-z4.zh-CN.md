@@ -314,7 +314,10 @@ if (!c0(input)) return INVALID;                            // util.isPlainObject
 let x0 = input, x1 = false;
 for (const k of Reflect.ownKeys(input)) {
   if (k === "__proto__") continue;
-  if (!c1.call(input, k)) continue;                        // propertyIsEnumerable（官方同款）
+  if (!c1.call(input, k)) {                                // propertyIsEnumerable（官方同款）
+    if (typeof k === "symbol" && !x1) { x1 = true; x0 = { ...input }; }  // 不可枚举的自有 symbol：stock 的重建会丢弃它（#51）
+    continue;
+  }
   if (typeof k !== "string") return INVALID;               // symbol 键官方拒绝
   const vIn = input[k];
   const t = cValue(vIn);                                   // 值产物（validator/parser/cow 子骨架）
@@ -327,6 +330,11 @@ for (const k of Reflect.ownKeys(input)) {
 return x0;                                                 // 干净 → 原引用
 ```
 
+不可枚举键的跳过分支就是路径 B 与 C 处理未声明自有 symbol 键的地方（#51）：可枚举的 symbol 会像 stock 一样被当作键来校验
+（字符串键 schema 拒绝、接受 symbol 的 schema 通过、loose record 原样保留），而不可枚举的 symbol 会被 stock 跳过、随后被其重建丢弃，
+干净路径却会连同它一起返回输入。`Reflect.ownKeys` 已经列出了它，所以跳过分支在 `typeof k === "symbol"` 时把 record 判脏，不增加任何调用；
+`{ ...input }` 只拷贝可枚举键，因此与 stock 一样丢掉它。在 `ownSymbolKeys: "ignore"`（#43）下该分支只是 `continue`，symbol 按原引用保留。
+
 路径 B（数值键重试，键名会变）：沿用官方 `keyFast + regexes.number 重试`
 模板，额外做键名引用比较，`outKey !== k` 也判脏，拷贝分支
 `delete out[k]; out[outKey] = t;`。键名不变的子场景（string format 键如
@@ -337,6 +345,10 @@ return x0;                                                 // 干净 → 原引�
 
 - 缺失声明键即脏（`!(k in input)` → stock 会物化该键）；
 - 未知键 strict 拒绝照抄（`for...in → INVALID`）；
+- 未声明的自有 symbol 键：`for...in` 永远不会产出它，strict 与 loose 都看不到，而 stock 的重建在每条路径上都会丢弃它，
+  正是对象骨架的 #42 情形。没有键为脏时骨架运行与对象骨架相同的 `Object.getOwnPropertySymbols` 探测（`emitOwnSymbolProbe`，#51），
+  发现未声明的 symbol 即判脏；拷贝路径按构造就不会带上它。`ownSymbolKeys: "ignore"` 在这里同样跳过探测。
+  本地 Node 24 实测（单记录热循环，每轮 2 000 000 次）6 键 enum record 干净输入：带探测 74 ns，不带 31.5 ns，官方 parser 99 ns；
 - 拷贝分支 `{...input}` 后逐声明键写回（validator 产物键写 `inVar`，缺失时
   `inVar === undefined` 恰好就是 stock 语义；parser 产物键写产物输出值）。
 

@@ -1,6 +1,6 @@
 /** Record skeleton: key-name/value double reference comparison + conditional {...input} copy. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, escKey, unknownStringKeyExpr } from "./codectx.js";
+import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
 import { childProduct, containerChecksFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
@@ -52,6 +52,7 @@ export function emitCoWRecord(
     /** The declared keys as `for...in` yields them (numbers stringified), the form the unknown-key probe compares against (#37) */
     const inputKeys: (string | symbol)[] = [];
     const stringKeys: string[] = [];
+    const symbolKeys: symbol[] = [];
 
     for (const kv of keyValues) {
       if (typeof kv !== "string" && typeof kv !== "number" && typeof kv !== "symbol") {
@@ -61,6 +62,7 @@ export function emitCoWRecord(
       if (inputKey === "__proto__") throw new ZodCompileUnsupportedError('record key "__proto__"');
       inputKeys.push(inputKey);
       if (typeof inputKey === "string") stringKeys.push(inputKey);
+      else symbolKeys.push(inputKey);
       const keyExpr = typeof inputKey === "symbol" ? ctx.addConst(inputKey) : escKey(inputKey);
       const inVar = ctx.var();
       // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
@@ -102,6 +104,16 @@ export function emitCoWRecord(
       ctx.write(`}`);
     }
 
+    // Undeclared own symbol keys: `for...in` never sees them, so neither strict nor loose rejects or
+    // keeps one, and stock's rebuild drops them on every path (the object skeleton's #42 case, #51).
+    // The clean path has to prove there are none before returning the input by reference; the copy
+    // path drops them by construction. Skipped under `ownSymbolKeys: "ignore"` (#43), like objects.
+    if (ctx.options.ownSymbolKeys === "probe") {
+      ctx.write(`if (!${dirty}) {`);
+      ctx.indented(() => emitOwnSymbolProbe(ctx, accessor, dirty, symbolKeys, knownSet));
+      ctx.write(`}`);
+    }
+
     // Copy path: the official assembly, never a spread of the input. Declared keys in declaration
     // order (a missing declared key is written as undefined, which is what stock does), then in loose
     // mode the undeclared string keys appended by for...in (stock skips only "__proto__").
@@ -135,13 +147,32 @@ export function emitCoWRecord(
     (keyDef.checks?.length ?? 0) === 0;
 
   const propIsEnumerable = ctx.addConst(Object.prototype.propertyIsEnumerable);
+  // Stock skips a non-enumerable own key and its rebuild then drops it. A non-enumerable own
+  // *symbol* is the record-side case of #42 (an enumerable one is validated as a key below, like
+  // stock): under `ownSymbolKeys: "probe"` it marks the record dirty from inside the skip the loop
+  // already runs, so `{ ...input }` (which copies enumerable keys only) drops it like stock (#51).
+  // No second probe: `Reflect.ownKeys` has listed it already. `"ignore"` keeps the plain skip.
+  const skipNonEnumerable = () => {
+    if (ctx.options.ownSymbolKeys === "probe") {
+      ctx.write(`if (!${propIsEnumerable}.call(${accessor}, k)) {`);
+      ctx.indented(() => {
+        ctx.write(
+          `if (typeof k === "symbol" && !${dirty}) { ${dirty} = true; ${out} = { ...${accessor} }; }`,
+        );
+        ctx.write(`continue;`);
+      });
+      ctx.write(`}`);
+    } else {
+      ctx.write(`if (!${propIsEnumerable}.call(${accessor}, k)) continue;`);
+    }
+  };
 
   if (keyIsBareString) {
     /* ── Path C: the key name never changes ── */
     ctx.write(`for (const k of Reflect.ownKeys(${accessor})) {`);
     ctx.indented(() => {
       ctx.write(`if (k === "__proto__") continue;`);
-      ctx.write(`if (!${propIsEnumerable}.call(${accessor}, k)) continue;`);
+      skipNonEnumerable();
       ctx.write(`if (typeof k !== "string") return INVALID;`);
       ctx.write(`const vIn = ${accessor}[k];`);
       emitRecordValueProduct(ctx, def.valueType, childSeen, dirty, out, accessor, "k");
@@ -159,7 +190,7 @@ export function emitCoWRecord(
     ctx.write(`for (const k of Reflect.ownKeys(${accessor})) {`);
     ctx.indented(() => {
       ctx.write(`if (k === "__proto__") continue;`);
-      ctx.write(`if (!${propIsEnumerable}.call(${accessor}, k)) continue;`);
+      skipNonEnumerable();
       ctx.write(`let outKey = ${kAwait}${keyFast}(k);`);
       ctx.write(
         `if (outKey === INVALID && typeof k === "string" && ${numeric}.test(k)) outKey = ${kAwait}${keyFast}(Number(k));`,

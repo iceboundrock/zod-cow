@@ -7,13 +7,15 @@
 /** Options accepted by `compile(schema, options)`. Every field is optional; the defaults give stock semantics. */
 export interface CompileOptions {
   /**
-   * What an object skeleton, in every object mode (strip, strict, loose), does about own symbol
-   * keys of the input (#43, #42).
+   * What an object skeleton, in every object mode (strip, strict, loose), and a record skeleton do
+   * about own symbol keys of the input (#43, #42, #51).
    *
    *   "probe"   (default) before returning the input by reference, prove that it carries no
-   *             undeclared own symbol key (`Object.getOwnPropertySymbols`, which lists non-enumerable
-   *             ones too), because stock's rebuild drops such keys in every mode. Exact stock
-   *             semantics; about 36 ns per object.
+   *             undeclared own symbol key, because stock's rebuild drops such keys on every path.
+   *             For an object or an enum-keyed record that is one `Object.getOwnPropertySymbols`
+   *             call (which lists non-enumerable symbols too), about 36 ns; a record that iterates
+   *             its keys already lists them and only marks a non-enumerable symbol dirty inside its
+   *             loop (an enumerable one is validated as a key, like stock). Exact stock semantics.
    *   "ignore"  skip that probe. An input whose declared keys are unchanged and which carries no
    *             undeclared string key that the mode would strip or reject is returned by reference
    *             even when it carries an own symbol key, which then survives where stock would drop

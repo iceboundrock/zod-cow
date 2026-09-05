@@ -82,6 +82,7 @@ zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `ben
 | transform / preprocess / pipe / catch | 仅当运行时实际产生新值 |
 | strip（对象默认模式） | 仅当输入确实存在多余键（小型固定 shape 使用 `for...in` + 生成的比较，大型 shape 回退到 `Set`，并探测自有 symbol；`compile(schema, { ownSymbolKeys: "ignore" })` 可关闭该探测，#43） |
 | strict / passthrough | 仅当输入带有未声明的自有 symbol 键（stock 在所有模式下都会丢弃它；strict 遇到多余字符串键直接失败）；与 strip 相同的自有 symbol 探测，由同一选项关闭（#42） |
+| record | 仅当输入带有未声明的自有 symbol 键（stock 的重建在每条路径上都会丢弃它）：enum 键的 record（`z.record(z.enum(…), v)`，strict 或 loose）在干净路径上运行与对象相同的自有 symbol 探测；遍历键的 record（`z.record(z.string(), v)` 及其他所有键 schema）像 stock 一样把可枚举的 symbol 键当作键来校验，并在已有的键循环里把不可枚举的 symbol 键判脏。两者由同一选项关闭（#51） |
 | `.trim()` / `.toLowerCase()` / `.toUpperCase()` | 仅当值实际变化（值比较） |
 
 由此约束每一处改动：
@@ -184,7 +185,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 ## 正确性证据
 
 - 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union（普通 union 取 2 到 3 个随机分支，因此会出现带未声明键的 object 分支；另有两个 object 分支的 discriminatedUnion；生成器自 #47 起才生成 union，此前尽管列表如此写，却从未生成过），套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（加入 union 生成器与 #47 的 union 规则后，默认规模下成功 case 中分别为 85.6% 与 86.2%；此前为 88.8% 与 89.4%，#43）。
-- 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
+- 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式与 record 三路径下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
 - zod3 线有 27 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`），顶层引用共享率约 92%。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
@@ -200,7 +201,8 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`、async refine。编译期抛 `ZcNotSupportedError`。
 - 带容器分支的 union 总会拷贝：分支全为叶子的 union 按原引用返回输入，但只要有一个 object / array / tuple / record / map / set 分支（含 optional / nullable 包裹），整个 union 就交给官方 parser，因为分支拿不到自己的骨架，而官方 validator 会保留 stock 会剥掉的未声明键（#47）。stock 的 parser 会重建命中的容器，所以该 union 的值以及到根的路径每次 parse 都会拷贝。按顺序尝试各分支 CoW 产物的 union 骨架能恢复共享，是后续工作。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
-- symbol 键 / getter：stock 的重建在所有对象模式下都会丢弃未声明的自有 symbol 键（无论其是否可枚举），默认情况下对象骨架在所有模式下都会探测它们并拷贝（strip 自 #33 起，strict 与 loose 自 #42 起）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于对象是否为脏（#43）。zod4 对象骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
+- symbol 键 / getter：stock 的重建在每条路径上都会丢弃未声明的自有 symbol 键（无论其是否可枚举），对象的所有模式与 record 皆然。默认情况下骨架先证明没有这样的键再按原引用返回输入，否则拷贝：对象骨架在所有模式下探测（strip 自 #33 起，strict 与 loose 自 #42 起），enum 键的 record 以同样方式探测，遍历键的 record 像 stock 一样把可枚举的 symbol 键当作键来校验，并在其键循环里把不可枚举的 symbol 键判脏（#51）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过这些探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于容器是否为脏（#43）。zod4 对象骨架与 enum 键 record 骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、遍历键的 record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。
+- 干净路径原样返回输入，所以只要没有触发拷贝，stock 重建时会规范化掉的东西都会保留下来：不可枚举的未声明字符串键（`for...in` 探测与 record 的键循环都会跳过它）、输入的原型（类实例仍按该实例返回，而 stock 返回普通对象；可枚举的继承键会被看到并走拷贝路径）以及 Proxy 陷阱（strip 对象在干净路径上会枚举而 stock 的 strip 不会，loose 对象不枚举而 stock 会，所以抛错的 `ownKeys` 陷阱在两边的表现不同）。不为它们增加探测：在每个干净容器上证明它们不存在，正是 `ownSymbolKeys: "ignore"` 想省掉的那种开销；需要这种规范化的输入可以用 stock 的 `parse`（#48）。
 - 刻意不对齐的 stock quirk：tuple 带 async rest 槽且 nullable 槽输入为 `null` 时，stock zod4 runtime 产生稀疏数组并丢掉 `null`；骨架输出稠密数组。差分生成器规避该组合，复现见上游 issue 草稿。
 
 ## 目录

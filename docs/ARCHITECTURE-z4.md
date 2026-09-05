@@ -269,7 +269,7 @@ A pure subtree goes through the official validator (value = input); anything unc
 | optional/nullable | recurse into the inner | the value passes through |
 | object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
 | record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
-| union | all options pure and no option is, or unwraps through optional / nullable to, a container | the options pass through; a container option would need a skeleton that the union position cannot provide, see trap four (#47) |
+| union | all options pure and none is, or unwraps through optional / nullable to, a container | the options pass through; a container option would need a skeleton that the union position cannot provide, see trap four (#47) |
 | readonly | false | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | value producer / black box / new container |
 

@@ -723,6 +723,8 @@ import { compile } from "../src/index.js";
   assert.deepEqual(out, U.parse(input));
   assert.notEqual(out, input);
   assert.equal(C.parse(3), 3);
+  // White-box pin on the current codegen shape: a top-level assertOnly validator emits `return input;`, the
+  // official parser path returns its own local (`return x0;`). Update the pin if the emitted shape changes.
   assert.ok(
     !C.code!.includes("return input;"),
     "the union is not handed to the assertOnly validator",

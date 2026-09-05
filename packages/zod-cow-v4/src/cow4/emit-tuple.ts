@@ -5,29 +5,8 @@
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import type { CodeCtx } from "./codectx.js";
 import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
-import { subtreeHasAsync } from "./official.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
-import { cowSafeContainerForChild } from "./purity.js";
-
-/**
- * Fixed tuples up to this many slots, without rest, whose slots are all synchronous leaves, are
- * emitted inline in the parent object skeleton instead of as a sub-skeleton function: the slot
- * products are still called, but the per-row call into the tuple function, its prologue and its
- * own clean-path return go away. Measured on S6 (bench-v4); larger or nested tuples keep the
- * function so the parent's generated code stays bounded.
- */
-const MAX_INLINE_TUPLE_SLOTS = 4;
-
-/** Whether a key's schema is a bare fixed tuple the parent skeleton may emit inline */
-export function tupleInlineable(schema: Node): boolean {
-  const def = schema._zod.def;
-  if (def.type !== "tuple" || def.rest) return false;
-  const items: Node[] = def.items;
-  if (items.length === 0 || items.length > MAX_INLINE_TUPLE_SLOTS) return false;
-  if (!cowSafeContainerForChild(schema)) return false;
-  return items.every((it) => !cowSafeContainerForChild(it) && !subtreeHasAsync(it));
-}
 
 /* ── tuple skeleton: mirrors the official generateTupleCheck + fillLen truncation tracking + CoW decoration ── */
 
@@ -51,7 +30,6 @@ export function emitCoWTuple(
   schema: Node,
   accessor: string,
   seen: Set<Node>,
-  inline = false,
 ): string {
   const def = schema._zod.def as { items: Node[]; rest?: Node };
   const items: Node[] = def.items;
@@ -257,24 +235,20 @@ export function emitCoWTuple(
     ctx.write(`}`);
   }
 
-  // The container's own checks (tuple .refine pure predicates): both paths, same as the object/array skeletons.
-  // Inline (emitted inside a parent skeleton): no early return of a value, the parent reads `out`,
-  // which is the input reference when clean, so one check call covers both paths.
+  // The container's own checks (tuple .refine pure predicates): both paths, same as the object/array skeletons
   const checksFn = containerChecksFn(schema);
   if (checksFn) {
     const cName = ctx.addConst(checksFn);
     const isA = isAsyncProduct(checksFn);
     const awaitKw = isA ? "await " : "";
-    if (!inline) {
-      ctx.write(`if (${out} === ${accessor}) {`);
-      ctx.indented(() => {
-        ctx.write(`if ((${awaitKw}${cName}(${accessor})) === INVALID) return INVALID;`);
-        ctx.write(`return ${accessor};`);
-      });
-      ctx.write(`}`);
-    }
+    ctx.write(`if (${out} === ${accessor}) {`);
+    ctx.indented(() => {
+      ctx.write(`if ((${awaitKw}${cName}(${accessor})) === INVALID) return INVALID;`);
+      ctx.write(`return ${accessor};`);
+    });
+    ctx.write(`}`);
     ctx.write(`if ((${awaitKw}${cName}(${out})) === INVALID) return INVALID;`);
-  } else if (!inline) {
+  } else {
     ctx.write(`if (${out} === ${accessor}) return ${accessor};`);
   }
 

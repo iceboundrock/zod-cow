@@ -6,7 +6,6 @@
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, escKey } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
-import { emitCoWTuple, tupleInlineable } from "./emit-tuple.js";
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
@@ -109,15 +108,6 @@ export function emitCoWObject(
         ctx.write(`if (${v}(${inVar}) === INVALID) return INVALID;`);
       }
       outputs.push({ key, keyExpr, valueVar: inVar });
-      continue;
-    }
-
-    if (tupleInlineable(child)) {
-      // Small fixed leaf tuple: its skeleton is emitted here instead of as a function of its own;
-      // it returns the input reference when clean, a copy when a slot changed (see emit-tuple.ts)
-      const outVar = emitCoWTuple(ctx, child, inVar, seen, true);
-      ctx.write(`if (${outVar} !== ${inVar}) ${dirty} = true;`);
-      outputs.push({ key, keyExpr, valueVar: outVar });
       continue;
     }
 

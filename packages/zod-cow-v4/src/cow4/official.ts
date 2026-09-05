@@ -34,7 +34,7 @@ export function makeAsyncIsland(schema: Node): Fn {
  * compileFn does not throw ZodCompileAsyncError for it, and the async leaks out silently as a Promise --
  * it has to be spotted at compile time and routed to an async island. For async in every other type the official compileFn throws on its own, so this function is not needed.
  */
-export function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
+function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
   if (seen.has(schema)) return false; // recursive subtree (lazy self-reference) -- asyncness is decided by the first expansion
   seen.add(schema);
   const def = schema._zod.def;

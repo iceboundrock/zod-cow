@@ -44,7 +44,7 @@ import {
 const N = Number(process.env.BENCH_N ?? 500_000);
 
 console.log(
-  `bench-v4 · ${N.toLocaleString()} records · ${WARMUP} warmup + ${PASSES} interleaved timed rounds per candidate · node ${process.version}`,
+  `bench-v4 · ${N.toLocaleString()} records · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
 );
 
 /* ─────────────────────────── Data generation ─────────────────────────── */
@@ -331,6 +331,7 @@ const sample = data[7]!;
   ];
   await gate("S1", parseImpls(AccountsStock, officialParser, Z4Stock, ArkAccounts), [
     { name: "valid account", input: [sample], accept: true },
+    { name: `generated dataset (${N.toLocaleString()} rows)`, input: data, accept: true },
     {
       name: "valid account with an extra key",
       input: variant(sample, { extra: 1 }),
@@ -410,11 +411,14 @@ const cowGateFixtures: Fixture[] = [
   console.log(
     `\n  S2 missing-role share ${((injected / N) * 100).toFixed(1)}% · rows returned by reference: zod-cow ${zcSharesRows.toLocaleString()} / ${N.toLocaleString()}, ArkType ${arkSharesRows.toLocaleString()} / ${N.toLocaleString()} (a defaulted ArkType object is a morph: every row and the array are rebuilt), stock 0`,
   );
-  await gate(
-    "S2",
-    parseImpls(AccountsCow, officialParserCow, Z4Cow, ArkAccountsCow),
-    cowGateFixtures,
-  );
+  await gate("S2", parseImpls(AccountsCow, officialParserCow, Z4Cow, ArkAccountsCow), [
+    ...cowGateFixtures,
+    {
+      name: `generated dataset (${injected.toLocaleString()} of ${N.toLocaleString()} rows lack role)`,
+      input: dataCow,
+      accept: true,
+    },
+  ]);
 
   const run = await runScenario(
     "S2 10% default",
@@ -447,10 +451,16 @@ const cowGateFixtures: Fixture[] = [
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const pct = `${(ratio * 100).toFixed(0)}%`;
-  const arkOut = ArkAccountsCow(ds);
-  assert.ok(!(arkOut instanceof ArkErrors), `ArkType rejected the S3 ${pct} data`);
-  assert.deepStrictEqual(Z4Cow.parse(ds), AccountsCow.parse(ds));
-  assert.deepStrictEqual(arkOut, AccountsCow.parse(ds));
+  // Same schemas as S2, so the S2 fixtures apply as they are; the generated dataset of this ratio
+  // is gated too (accepted by all four, outputs deepStrictEqual, official parser included)
+  await gate(`S3 ${pct}`, parseImpls(AccountsCow, officialParserCow, Z4Cow, ArkAccountsCow), [
+    ...cowGateFixtures,
+    {
+      name: `generated dataset (${pct} of ${N.toLocaleString()} rows lack role)`,
+      input: ds,
+      accept: true,
+    },
+  ]);
   const run = await runScenario(`S3 ${pct} dirty`, `missing-role ratio ${pct} (same S2 schemas)`, [
     {
       column: "stock",

@@ -8,10 +8,13 @@
  * Methodology (identical for every candidate):
  *   - schema construction, JIT compilation and fixture construction happen before `runScenario`
  *     is called, so the timed region holds only steady-state execution;
- *   - WARMUP rounds per candidate, discarded, then PASSES timed rounds;
- *   - timed rounds are interleaved: round p runs the candidates in an order rotated by p, so no
- *     candidate always runs first or last (JIT/thermal/GC state is shared as evenly as the
- *     rotation allows);
+ *   - WARMUP warmup rounds, discarded, then PASSES timed rounds; both counts are rounded up to a
+ *     multiple of the runnable-candidate count (`balancedRounds`);
+ *   - every round runs the candidates in an order rotated by the round index, and because the
+ *     round count is a multiple of the candidate count the schedule is a set of complete Latin
+ *     squares: every candidate occupies every position (first … last) equally often, so a
+ *     position effect (JIT, thermal or heap history, which gc() does not reset) lands on every
+ *     candidate alike;
  *   - every round starts after gc(); alloc = heapUsed delta at the end of the call (before gc),
  *     retained = heapUsed delta still held after gc;
  *   - median elapsed time over the timed rounds, max alloc / retained over the timed rounds.
@@ -22,7 +25,10 @@
  */
 import { performance } from "node:perf_hooks";
 
-/** Timed rounds per candidate; `BENCH_PASSES` must be a positive integer (no samples, no median) */
+/**
+ * Minimum timed rounds per candidate (`BENCH_PASSES`, a positive integer). A scenario rounds it up
+ * to a multiple of its runnable-candidate count so the rotated order forms complete rotations.
+ */
 export const PASSES = Number(process.env.BENCH_PASSES ?? 3);
 if (!Number.isInteger(PASSES) || PASSES < 1) {
   throw new Error(
@@ -30,6 +36,10 @@ if (!Number.isInteger(PASSES) || PASSES < 1) {
   );
 }
 export const WARMUP = 2;
+
+/** Smallest multiple of `n` that is at least `min`: the rounds needed for complete rotations */
+export const balancedRounds = (min: number, n: number): number =>
+  n === 0 ? 0 : Math.ceil(min / n) * n;
 
 /** Column of the summary tables a candidate belongs to */
 export type Column = "stock" | "official" | "zc" | "ark";
@@ -119,12 +129,14 @@ export const fmtMs = (ms: number): string => `${ms.toFixed(0)}ms`;
 
 export function medianOf(samples: Sample[]): number {
   const ms = samples.map((s) => s.ms).sort((a, b) => a - b);
-  return ms[Math.floor(ms.length / 2)]!;
+  const mid = ms.length >> 1;
+  return ms.length % 2 ? ms[mid]! : (ms[mid - 1]! + ms[mid]!) / 2;
 }
 
 /**
- * Warm up every runnable candidate, then take PASSES interleaved samples per candidate and print
- * one line per candidate (N/A candidates print their reason).
+ * Warm up every runnable candidate, then take at least PASSES samples per candidate in complete
+ * rotations of the candidate order and print one line per candidate (N/A candidates print their
+ * reason).
  */
 export async function runScenario(
   id: string,
@@ -133,12 +145,18 @@ export async function runScenario(
 ): Promise<ScenarioRun> {
   console.log(`\n═══ ${id} · ${title} ═══`);
   const runnables = candidates.filter((c): c is Runnable => "run" in c);
-  for (const c of runnables) for (let w = 0; w < WARMUP; w++) await sampleOnce(c.run);
+  const n = runnables.length;
+  const rotated = (round: number) => runnables.map((_, i) => runnables[(i + round) % n]!);
+  const warmupRounds = balancedRounds(WARMUP, n);
+  const rounds = balancedRounds(PASSES, n);
+  console.log(
+    `  ${n} candidates · ${warmupRounds} warmup + ${rounds} timed rounds, order rotated every round (each candidate holds each position ${rounds / n}× in the timed rounds)`,
+  );
+  for (let w = 0; w < warmupRounds; w++) for (const c of rotated(w)) await sampleOnce(c.run);
 
   const samples = new Map<Runnable, Sample[]>(runnables.map((c) => [c, []]));
-  for (let p = 0; p < PASSES; p++) {
-    const order = runnables.map((_, i) => runnables[(i + p) % runnables.length]!);
-    for (const c of order) samples.get(c)!.push(await sampleOnce(c.run));
+  for (let p = 0; p < rounds; p++) {
+    for (const c of rotated(p)) samples.get(c)!.push(await sampleOnce(c.run));
   }
 
   const results: Result[] = candidates.map((c) => {

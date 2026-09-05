@@ -41,7 +41,16 @@ import {
   WARMUP,
 } from "./harness.js";
 
+/**
+ * Record count (`BENCH_N`, an integer of at least 10: S2 marks every tenth row as missing its role
+ * and S7 runs on N / 10 rows).
+ */
 const N = Number(process.env.BENCH_N ?? 500_000);
+if (!Number.isInteger(N) || N < 10) {
+  throw new Error(
+    `BENCH_N must be an integer of at least 10, got ${JSON.stringify(process.env.BENCH_N)}`,
+  );
+}
 
 console.log(
   `bench-v4 · ${N.toLocaleString()} records · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
@@ -136,7 +145,9 @@ const AccountsCow = z.array(AccountCow);
 // Constraint-by-constraint equivalents of AccountStock / AccountCow, using ArkType's public API:
 //   id          zod `.int()` is Number.isSafeInteger; ArkType `number.integer` alone is `% 1 === 0`
 //               with no range bound, so the safe range is added with `number.safe`
-//   names       `string <= 64`, same inclusive bound as `.max(64)`
+//   names       zod `.max(64)` counts Unicode code points, ArkType `string <= 64` counts UTF-16
+//               code units (`"😀".repeat(64)` passes zod and fails `string <= 64`), so the zod rule
+//               is reproduced as `arkStringMax64` below
 //   email,      ArkType's own `string.email` and `string.date.iso` keywords accept supersets of
 //   createdAt   zod's patterns (`string.email` takes `a..b@x.com`, `.a@x.com`, `%`; `string.date.iso`
 //               takes date-only `2025-01-10` and `+02:00` offsets, which `z.iso.datetime()` rejects).
@@ -144,6 +155,8 @@ const AccountsCow = z.array(AccountCow);
 //               used as ArkType regex constraints: identical accepted/rejected sets, same node kind.
 //   role        the literal union; S2/S3 add `= 'viewer'` (ArkType's key default; it applies to
 //               absent keys only, zod also defaults a present `undefined`, declared in the gate)
+//   balance     zod `z.number()` rejects NaN and both infinities; ArkType `number` rejects NaN but
+//               accepts ±Infinity, so the finite range is added explicitly (`arkFinite` below)
 //   tags        `string[] <= 8`
 //   address     nested object literal; extra keys pass through by reference (zod strips them, the
 //               benchmark data has none)
@@ -155,13 +168,34 @@ const patternOf = (schema: z.ZodType): RegExp => {
 const emailPattern = patternOf(AccountStock.shape.email);
 const datetimePattern = patternOf(AccountStock.shape.createdAt);
 
+/** true when `s` holds at most `max` Unicode code points (a code point is one or two UTF-16 units) */
+const codePointsAtMost =
+  (max: number) =>
+  (s: string): boolean => {
+    if (s.length > max * 2) return false;
+    let n = 0;
+    for (const _ of s) if (++n > max) return false;
+    return true;
+  };
+// zod's `.max(64)` check is "accept when the UTF-16 length fits; otherwise count code points". The
+// same two steps in ArkType: the native `string <= 64` bound as the first union branch, and a
+// predicate that counts code points on the overflow branch only. Accepted set identical to zod,
+// and the benchmark data (ASCII names) never leaves the native branch. A single `.narrow()` over
+// every string would also be exact but costs ArkType a predicate call per name (about 1 ms per
+// 50 000 rows in a probe), which would understate it.
+const arkStringMax64 = type("string <= 64").or(type("string > 64").narrow(codePointsAtMost(64)));
+// ArkType has no finite-number keyword and its string DSL does not resolve `Infinity`, so the
+// finite range goes in through the fluent range API: native range nodes, the same node kind as
+// `<=` in the DSL. NaN is already rejected by ArkType's `number`.
+const arkFinite = type.number.atMost(Number.MAX_VALUE).atLeast(-Number.MAX_VALUE);
+
 const arkAccountShape = {
   id: "number.integer & number.safe",
-  firstName: "string <= 64",
-  lastName: "string <= 64",
+  firstName: arkStringMax64,
+  lastName: arkStringMax64,
   email: emailPattern,
   role: "'admin' | 'member' | 'viewer'",
-  balance: "number",
+  balance: arkFinite,
   createdAt: datetimePattern,
   tags: "string[] <= 8",
   address: { street: "string", city: "string", zip: "string", country: "string" },
@@ -178,9 +212,14 @@ const ArkAccountsCow = type({
 {
   const kwEmail = type("string.email");
   const kwIso = type("string.date.iso");
+  const kwLen = type("string <= 64");
+  const kwNum = type("number");
   const acc = (t: (i: unknown) => unknown, i: unknown) => !(t(i) instanceof ArkErrors);
   console.log(
     `  ArkType keyword check: string.email accepts ".a@example.com" = ${acc(kwEmail, ".a@example.com")} (zod: ${z.email().safeParse(".a@example.com").success}); string.date.iso accepts "2025-01-10" = ${acc(kwIso, "2025-01-10")} (zod: ${z.iso.datetime().safeParse("2025-01-10").success}) → the bench uses zod's patterns as ArkType regex constraints`,
+  );
+  console.log(
+    `  ArkType keyword check: \`string <= 64\` accepts 64 astral code points = ${acc(kwLen, "😀".repeat(64))} (zod .max(64): ${z.string().max(64).safeParse("😀".repeat(64)).success}); \`number\` accepts Infinity = ${acc(kwNum, Number.POSITIVE_INFINITY)} (zod: ${z.number().safeParse(Number.POSITIVE_INFINITY).success}) → the bench counts code points on overflow (\`${arkStringMax64.expression}\`) and bounds numbers to the finite range (\`${arkFinite.expression}\`)`,
   );
 }
 
@@ -257,6 +296,43 @@ const runs: ScenarioRun[] = [];
 
 const data = makeAccounts();
 const sample = data[7]!;
+
+// Boundary fixtures for the constraints whose ArkType keyword differs from zod in unit (length in
+// UTF-16 units vs code points) or in range (`number` accepts ±Infinity). Shared by every scenario
+// that runs the account schema (S1, S2/S3 and S4).
+const boundaryFixtures: Fixture[] = [
+  {
+    name: "firstName of 64 astral code points (128 UTF-16 units)",
+    input: variant(sample, { firstName: "😀".repeat(64) }),
+    accept: true,
+  },
+  {
+    name: "lastName of exactly 64 ASCII characters",
+    input: variant(sample, { lastName: "y".repeat(64) }),
+    accept: true,
+  },
+  {
+    name: "overlong firstName (65 astral code points)",
+    input: variant(sample, { firstName: "😀".repeat(65) }),
+    accept: false,
+  },
+  {
+    name: "overlong lastName (64 ASCII + 1 astral)",
+    input: variant(sample, { lastName: `${"y".repeat(64)}😀` }),
+    accept: false,
+  },
+  {
+    name: "balance is Infinity",
+    input: variant(sample, { balance: Number.POSITIVE_INFINITY }),
+    accept: false,
+  },
+  {
+    name: "balance is -Infinity",
+    input: variant(sample, { balance: Number.NEGATIVE_INFINITY }),
+    accept: false,
+  },
+  { name: "balance is NaN", input: variant(sample, { balance: Number.NaN }), accept: false },
+];
 
 {
   const stockOut = AccountsStock.parse(data);
@@ -341,6 +417,7 @@ const sample = data[7]!;
     },
     { name: "missing role", input: without(sample, "role"), accept: false },
     { name: "present-undefined role", input: variant(sample, { role: undefined }), accept: false },
+    ...boundaryFixtures,
     ...commonInvalid,
   ]);
 
@@ -395,6 +472,7 @@ const cowGateFixtures: Fixture[] = [
     input: variant(sample, { createdAt: "2025-01-10" }),
     accept: false,
   },
+  ...boundaryFixtures,
 ];
 
 {
@@ -517,6 +595,7 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
       input: variant(sample, { tags: "abcdefghi".split("") }),
       accept: false,
     },
+    ...boundaryFixtures,
   ]);
 
   const run = await runScenario(
@@ -602,7 +681,7 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   assert.ok(!arkGenericMapSupported, "ArkType now parses Map<string, number>: revisit the S5 N/A");
   const ArkRowsRef = type({
     id: "number.integer & number.safe",
-    dict: "Record<string, number>",
+    dict: type.Record("string", arkFinite),
     lookup: "Map",
     tags: "Set",
   }).array();
@@ -624,6 +703,11 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     {
       name: "record value is a number-like string",
       input: rowVariant({ dict: { a: "1" as never } }),
+      accept: false,
+    },
+    {
+      name: "record value is Infinity",
+      input: rowVariant({ dict: { a: Number.POSITIVE_INFINITY } }),
       accept: false,
     },
     {
@@ -720,12 +804,13 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const rowsParser = compileFn(Rows) as Parser;
   assert.ok(!RowsZ4.stock);
 
-  // ArkType tuples: fixed-length `["number", "number"]` and an optional trailing element `"string?"`.
-  // `string?` means the slot may be absent; zod's `z.optional()` element also accepts a present
-  // `undefined` (declared in the gate; the benchmark data uses 1- and 2-element labels only).
+  // ArkType tuples: a fixed-length pair of finite numbers (`arkFinite`, since ArkType's `number`
+  // accepts ±Infinity and zod's does not) and an optional trailing element `"string?"`. `string?`
+  // means the slot may be absent; zod's `z.optional()` element also accepts a present `undefined`
+  // (declared in the gate; the benchmark data uses 1- and 2-element labels only).
   const ArkRows = type({
     id: "number.integer & number.safe",
-    point: ["number", "number"],
+    point: [arkFinite, arkFinite],
     label: ["string", "string?"],
   }).array();
 
@@ -737,6 +822,17 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     { name: "point has 3 elements", input: rowVariant({ point: [1, 2, 3] }), accept: false },
     { name: "point has 1 element", input: rowVariant({ point: [1] }), accept: false },
     { name: "point element is a string", input: rowVariant({ point: [1, "2"] }), accept: false },
+    {
+      name: "point element is Infinity",
+      input: rowVariant({ point: [Number.POSITIVE_INFINITY, 2] }),
+      accept: false,
+    },
+    {
+      name: "point element is -Infinity",
+      input: rowVariant({ point: [1, Number.NEGATIVE_INFINITY] }),
+      accept: false,
+    },
+    { name: "point element is NaN", input: rowVariant({ point: [Number.NaN, 2] }), accept: false },
     { name: "label has 3 elements", input: rowVariant({ label: ["a", "b", "c"] }), accept: false },
     {
       name: "label second element is a number",
@@ -787,8 +883,9 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
 /* ─────────────────────────── S7: async transform ─────────────────────────── */
 
 {
-  // Async adds one microtask chain per element; N/10 rows keeps a single round measurable.
-  const M = N / 10;
+  // Async adds one microtask chain per element; N/10 rows keeps a single round measurable
+  // (rounded up, so any BENCH_N >= 10 gives at least one row).
+  const M = Math.ceil(N / 10);
   const Row = z.object({
     id: z.number().int(),
     email: z.string().transform(async (e) => e.toLowerCase()),
@@ -841,14 +938,16 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
       output: (i) => RowsZ4.parseAsync(i),
     },
   ];
+  const s7Sample = rows[0]!;
   await gate("S7", asyncImpls, [
-    { name: "valid row (email lowercased in the output)", input: [rows[3]!], accept: true },
-    { name: "non-integer id (1.5)", input: [{ ...rows[3]!, id: 1.5 }], accept: false },
-    { name: "email is a number", input: [{ ...rows[3]!, email: 5 }], accept: false },
-    { name: "score is a string", input: [{ ...rows[3]!, score: "1" }], accept: false },
+    { name: "valid row (email lowercased in the output)", input: [s7Sample], accept: true },
+    { name: "non-integer id (1.5)", input: [{ ...s7Sample, id: 1.5 }], accept: false },
+    { name: "email is a number", input: [{ ...s7Sample, email: 5 }], accept: false },
+    { name: "score is a string", input: [{ ...s7Sample, score: "1" }], accept: false },
   ]);
   const probe = await RowsZ4.parseAsync(rows);
-  assert.equal(probe[3]!.email, rows[3]!.email.toLowerCase());
+  assert.equal(probe.length, M);
+  for (let i = 0; i < M; i++) assert.equal(probe[i]!.email, rows[i]!.email.toLowerCase());
   console.log(
     `  S7 output: email lowercased ✓ · every row is dirty (a new object per row), the array is rebuilt`,
   );
@@ -892,5 +991,5 @@ console.log(
   "  zod-cow returns the input reference on the clean path (≈0 allocated beyond the strip probe, 0 retained) and shallow-copies only the dirty path otherwise.",
 );
 console.log(
-  "  ArkType schemas carry the same constraints as the zod schemas (see the gate output); its `Map`/`Set` and async morphs have no equivalent in 2.2.3, hence the S5/S7 N/A.",
+  "  ArkType schemas carry the same constraints as the zod schemas (see the gate output: code-point length on overflow, finite numbers, zod's email/datetime patterns); its `Map`/`Set` and async morphs have no equivalent in 2.2.3, hence the S5/S7 N/A.",
 );

@@ -43,7 +43,7 @@ pnpm run probe:v3    # 实测 stock zod3 的边界语义（zod3 线）
 pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的承诺
 ```
 
-环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数。
+环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数（不小于 10 的整数）。
 
 > 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
@@ -154,11 +154,11 @@ zod3 线在同一次 run 中对 stock zod 3.24.1（仍付解释器税）测得 4
 
 | 场景 | ArkType 等价 | ArkType API | 说明 |
 |---|---|---|---|
-| S1 | 是 | `Type(data)` | `.int()` 对应 `number.integer & number.safe`，`string <= 64`，`string[] <= 8`，字面量联合。zod 的 email 和 datetime 正则作为 ArkType 正则约束传入，因为 `string.email` 与 `string.date.iso` 接受超集（`.a@x.com`、只有日期、带时区偏移）。多余键在 ArkType 里按引用透传，zod 则 strip 进拷贝；数据里没有多余键 |
+| S1 | 是 | `Type(data)` | `.int()` 对应 `number.integer & number.safe`，`string[] <= 8`，字面量联合。zod 的 `.max(64)` 按 Unicode 码点计数，ArkType 的 `string <= 64` 按 UTF-16 单元计数（64 个辅助平面字符 zod 接受、该关键字拒绝），所以长度约束按 zod 自己的规则传入：原生 `string <= 64` 作为联合的第一个分支，只在溢出分支上用谓词数码点。`z.number()` 拒绝正负 Infinity 而 ArkType 的 `number` 接受，所以数字通过 ArkType 的范围 API 加上有限范围（原生范围节点）。zod 的 email 和 datetime 正则作为 ArkType 正则约束传入，因为 `string.email` 与 `string.date.iso` 接受超集（`.a@x.com`、只有日期、带时区偏移）。gate 对以上每一项都有边界 fixture（64 与 65 个辅助平面字符、正负 Infinity、NaN）。多余键在 ArkType 里按引用透传，zod 则 strip 进拷贝；数据里没有多余键 |
 | S2、S3 | 是 | `Type(data)`，`role: "'admin' \| 'member' \| 'viewer' = 'viewer'"` | 同样的缺键输入、同样的输出。已声明分歧：zod 对显式 `undefined` 也套默认值，ArkType 拒绝 |
 | S4 | 是 | `Type.allows(data)` | 纯校验，与官方 `assertOnly` validator 和 `validate()` 并列 |
 | S5 | 否 | N/A | `Map` / `Set` 只是 instanceof 检查，没有 `Map<K, V>` / `Set<T>` 泛型，条目和成员从不校验。最接近的 schema 作为标注过的非等价参考运行（6 ms），不进入比值 |
-| S6 | 是 | `Type(data)`，`["number", "number"]` 与 `["string", "string?"]` | 已声明分歧：zod 的可选槽接受显式 `undefined`，ArkType 的 `string?` 只接受缺席；数据只有 1 元素和 2 元素的 label |
+| S6 | 是 | `Type(data)`，一对有限数字（与 S1 相同的有限范围）与 `["string", "string?"]` | 已声明分歧：zod 的可选槽接受显式 `undefined`，ArkType 的 `string?` 只接受缺席；数据只有 1 元素和 2 元素的 label |
 | S7 | 否 | N/A | `.pipe(async fn)` 的 morph 返回一个不被 await 的 Promise，后接 `.to("string")` 会把它当 object 拒绝；换成同步小写或包一层 `Promise.resolve()` 都是另一种负载 |
 
 ## 正确性证据

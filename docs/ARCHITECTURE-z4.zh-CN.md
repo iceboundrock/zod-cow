@@ -212,6 +212,16 @@ return out;
 | （输出组装隐式处理键存在性） | `{ ...input }` | 扩展天然保真 presence/键序 |
 | `for (const k in …)` unknown 探测 | 同左逐行照抄 | strict/strip/loose 语义对齐 |
 
+干净路径的自有 symbol 探测：stock 在所有模式下都会丢弃自有 symbol 键（strict 的未知键循环只看字符串键，所以也不会拒绝 symbol），
+因此按原引用放行之前必须证明没有这样的键，而 `Object.getOwnPropertySymbols` 是唯一不必列出全部键的问法（`Reflect.ownKeys` 会分配全部键）。
+它在对象的所有模式下运行（strip 自 #33 起，strict 与 loose 自 #42 起；对 strict 与 loose 而言它是干净路径上唯一的探测），
+自 #51 起也在 enum 键 record 的干净路径上运行（§5.1；辅助函数是 `codectx.ts` 里的 `emitOwnSymbolProbe`，两种骨架共用），默认保持开启。
+`compile(schema, { ownSymbolKeys: "ignore" })`（#43）去掉它：选项在 `compile` 里解析一次，由树中每个 `CodeCtx` 携带
+（`subFn` 用父上下文的选项创建子上下文），此时带有未声明自有 symbol 键的干净输入按原引用返回并保留该 symbol，而 stock 的重建会丢弃它；
+strict 与 loose 对象在 #42 之前、record 在 #51 之前无条件如此，现在在所有模式与所有 record 路径上都是可选项。
+其余不变：已声明的 symbol 键照常校验并写入，拷贝路径按构造丢弃未声明的 symbol，`validate()` 仍是官方 validator。
+差分模糊测试用不生成额外自有 symbol 的生成器对该选项再跑一遍（§8）。
+
 ### 3.2 容器自身 checks：双路径时点
 
 `.refine()` / `.min()` 挂在容器上时，stock 语义是"输出构造后对输出跑 checks"。
@@ -314,7 +324,10 @@ if (!c0(input)) return INVALID;                            // util.isPlainObject
 let x0 = input, x1 = false;
 for (const k of Reflect.ownKeys(input)) {
   if (k === "__proto__") continue;
-  if (!c1.call(input, k)) continue;                        // propertyIsEnumerable（官方同款）
+  if (!c1.call(input, k)) {                                // propertyIsEnumerable（官方同款）
+    if (typeof k === "symbol" && !x1) { x1 = true; x0 = { ...input }; }  // 不可枚举的自有 symbol：stock 的重建会丢弃它（#51）
+    continue;
+  }
   if (typeof k !== "string") return INVALID;               // symbol 键官方拒绝
   const vIn = input[k];
   const t = cValue(vIn);                                   // 值产物（validator/parser/cow 子骨架）
@@ -327,6 +340,11 @@ for (const k of Reflect.ownKeys(input)) {
 return x0;                                                 // 干净 → 原引用
 ```
 
+不可枚举键的跳过分支就是路径 B 与 C 处理未声明自有 symbol 键的地方（#51）：可枚举的 symbol 会像 stock 一样被当作键来校验
+（字符串键 schema 拒绝、接受 symbol 的 schema 通过、loose record 原样保留），而不可枚举的 symbol 会被 stock 跳过、随后被其重建丢弃，
+干净路径却会连同它一起返回输入。`Reflect.ownKeys` 已经列出了它，所以跳过分支在 `typeof k === "symbol"` 时把 record 判脏，不增加任何调用；
+`{ ...input }` 只拷贝可枚举键，因此与 stock 一样丢掉它。在 `ownSymbolKeys: "ignore"`（#43）下该分支只是 `continue`，symbol 按原引用保留。
+
 路径 B（数值键重试，键名会变）：沿用官方 `keyFast + regexes.number 重试`
 模板，额外做键名引用比较，`outKey !== k` 也判脏，拷贝分支
 `delete out[k]; out[outKey] = t;`。键名不变的子场景（string format 键如
@@ -337,12 +355,20 @@ return x0;                                                 // 干净 → 原引�
 
 - 缺失声明键即脏（`!(k in input)` → stock 会物化该键）；
 - 未知键 strict 拒绝照抄（`for...in → INVALID`）；
+- 未声明的自有 symbol 键：`for...in` 永远不会产出它，strict 与 loose 都看不到，而 stock 的重建在每条路径上都会丢弃它，
+  正是对象骨架的 #42 情形。没有键为脏时骨架运行与对象骨架相同的 `Object.getOwnPropertySymbols` 探测（`emitOwnSymbolProbe`，#51），
+  发现未声明的 symbol 即判脏；拷贝路径按构造就不会带上它。`ownSymbolKeys: "ignore"` 在这里同样跳过探测。
+  本地 Node 24 实测（单记录热循环，每轮 2 000 000 次）6 键 enum record 干净输入：带探测 74 ns，不带 31.5 ns，官方 parser 99 ns；
 - 拷贝分支 `{...input}` 后逐声明键写回（validator 产物键写 `inVar`，缺失时
   `inVar === undefined` 恰好就是 stock 语义；parser 产物键写产物输出值）。
 
 实测语义锚点：`{a:1}` 对 `z.record(z.enum(["a","b"]), z.number().optional())`
 → stock 物化 `b: undefined` → ours 判脏返回 `{a:1, b:undefined}` ✓；未知键
-`{a:1,b:2,extra:3}` → 双方都拒绝 ✓。
+`{a:1,b:2,extra:3}` → 双方都拒绝 ✓。`{a:1, b:2, [Symbol()]: 3}` 对 `z.record(z.enum(["a","b"]), z.number())`
+→ stock 丢弃该 symbol → ours 也拷贝并丢弃，同一输入去掉 symbol 后仍是原引用 ✓（#51；此前干净路径会连同 symbol 返回输入，
+而拷贝路径会丢弃它）。被定义为不可枚举属性的*已声明*键（symbol enum 值或已声明的字符串键）属于 #48 那一族，只记录不探测：
+探测只问是否存在未声明的 symbol，所以干净路径按定义原样返回输入，而 stock 的重建会写入一个可枚举的数据属性；拷贝路径像 stock 一样写入该键。
+对象骨架的行为相同（README 已知限制）。
 
 ### 5.2 map / set
 
@@ -500,7 +526,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（14 组行为断言，第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（16 组行为断言，第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套
@@ -510,6 +536,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   - 输出 `deepStrictEqual` 一致（Map/Set 按条目集合比较）
   - 输入零失真（structuredClone 快照比对）
   - 顶层引用共享率 89.1%（成功 case），stock 降级 0 次
+  - 自 #43 起每个 case 都会用 `ownSymbolKeys: "ignore"` 再编译一次，对同一 RNG 流去掉额外自有 symbol 后的输入运行，检查同样的三项，另加：任何深度的生成骨架都不含 `getOwnPropertySymbols`，且该 pass 共享的顶层引用不少于默认 pass。自 #51 起两个 record 生成器也会生成额外的自有 symbol（十分之一，其中一半通过 `Object.defineProperty` 设为不可枚举），输入快照保留可枚举性，运行器在 `deepEqual` 之外还固定检查顶层输出上该 symbol 是否存在，因为 harness 的比较器只拷贝可枚举键，看不到按原引用存活的不可枚举 symbol；未修复的引擎在默认 pass 下该生成器失败 26 / 20 000 case（全部是这项检查），修复后为 0；默认规模下的共享率为 85.1%（默认）与 86.0%（`"ignore"`），新生成器在两个引擎上相同，旧生成器下为 85.6% / 86.2%
 - 自 #47 起生成器生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion），上面的列表此前虚有其名；在未修复的引擎上新生成器在默认 pass 失败 15 / 20 000 case、`"ignore"` pass 失败 11 个，全部是陷阱四形态的输出不一致，修复后为 0。默认规模下成功 case 的顶层引用共享率为 85.6%（默认）与 86.2%（`"ignore"`），同一生成器在未修复引擎上为 85.9% 与 86.6%（该规则放弃的容器分支 union 的 CoW 路径），旧生成器下为 88.8% / 89.4%。
 - 已知不对齐项（刻意保留）：async rest 槽 + nullable null 输入时 stock runtime 产生
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))

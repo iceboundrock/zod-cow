@@ -4,7 +4,7 @@
  * own assembly rules).
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, escKey, unknownStringKeyExpr } from "./codectx.js";
+import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
@@ -260,30 +260,4 @@ export function emitCoWObject(
   if (cName) ctx.write(`if (${cName}(out) === INVALID) return INVALID;`);
 
   return "out";
-}
-
-/**
- * Emits the own-symbol probe: `extraVar` is set when the input carries an own symbol key the shape
- * does not declare. `Object.getOwnPropertySymbols` lists non-enumerable symbols too, and stock's
- * rebuild drops every one of them, so a pass-through has to prove there are none; it is the clean
- * path's only allocation (one empty array per object, about 36 ns).
- */
-function emitOwnSymbolProbe(
-  ctx: CodeCtx,
-  accessor: string,
-  extraVar: string,
-  symbolKeys: readonly symbol[],
-  knownSet: () => string,
-): void {
-  const syms = ctx.var();
-  ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
-  if (symbolKeys.length === 0) {
-    ctx.write(`if (${syms}.length !== 0) ${extraVar} = true;`);
-  } else {
-    ctx.write(`for (const s of ${syms}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (!${knownSet()}.has(s)) { ${extraVar} = true; break; }`);
-    });
-    ctx.write(`}`);
-  }
 }

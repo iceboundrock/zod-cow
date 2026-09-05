@@ -87,9 +87,25 @@ function snapshotInput(v: unknown): unknown {
     return new Map([...v].map(([k, x]) => [snapshotInput(k), snapshotInput(x)]));
   if (v instanceof Set) return new Set([...v].map(snapshotInput));
   const out: Record<PropertyKey, unknown> = {};
-  for (const k of Reflect.ownKeys(v))
-    out[k] = snapshotInput((v as Record<PropertyKey, unknown>)[k]);
+  for (const k of Reflect.ownKeys(v)) {
+    // Keep enumerability: the record generator emits a non-enumerable extra symbol (#51), and the
+    // comparator ignores non-enumerable keys, so the snapshot must not turn it into an enumerable one
+    const d = Object.getOwnPropertyDescriptor(v, k)!;
+    Object.defineProperty(out, k, {
+      value: snapshotInput(d.value),
+      enumerable: d.enumerable,
+      writable: true,
+      configurable: true,
+    });
+  }
   return out;
+}
+
+/** Whether `v` is an object carrying the extra own symbol, enumerable or not */
+function carriesExtraSymbol(v: unknown): boolean {
+  return (
+    typeof v === "object" && v !== null && Object.getOwnPropertySymbols(v).includes(EXTRA_SYMBOL)
+  );
 }
 
 function repr(v: unknown): string {
@@ -303,6 +319,22 @@ const EXTRA_SYMBOL = Symbol("extra");
 /** Pass switch: the "ignore" pass keeps the RNG stream and drops only the emission of EXTRA_SYMBOL */
 let emitExtraSymbol = true;
 
+/**
+ * Extra own symbol on a record input (#51), enumerable or not, one in ten; the object generator
+ * emits the enumerable form itself. Draws the same random numbers whether or not the pass emits it.
+ * On an enum-keyed record stock drops either form on every path (its `for...in` never sees a
+ * symbol); on a string-keyed record stock rejects the enumerable form as a key and drops the
+ * non-enumerable one, which the comparator does not see (it compares enumerable keys only), so
+ * the runner checks the presence of this symbol on the top-level output separately.
+ */
+function maybeExtraSymbol(out: object, r: RNG): void {
+  const emit = r.chance(0.1);
+  const hidden = r.chance(0.5);
+  if (!emit || !emitExtraSymbol) return;
+  if (hidden) Object.defineProperty(out, EXTRA_SYMBOL, { value: true, enumerable: false });
+  else (out as Record<symbol, unknown>)[EXTRA_SYMBOL] = true;
+}
+
 function bObject(rng: RNG, depth: number): Built {
   // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to 17
   // to 20 string keys so it crosses the object skeleton's inline-comparison cap and takes the Set
@@ -418,6 +450,7 @@ function bEnumRecord(rng: RNG, inner: Built): Built {
         if (x !== ABSENT) out[String(v)] = x;
       }
       if (r.chance(0.2)) out[numeric && r.chance(0.5) ? "99" : "extra"] = r.chance(0.5) ? 1 : "e";
+      maybeExtraSymbol(out, r);
       return out;
     },
   };
@@ -439,6 +472,7 @@ function bRecord(rng: RNG, depth: number): Built {
         const v = inner.gen(r);
         if (v !== ABSENT) out[numericKeys ? String(r.int(4)) : keys[i]!] = v;
       }
+      maybeExtraSymbol(out, r);
       return out;
     },
   };
@@ -755,6 +789,17 @@ async function runPass(
               .split("\n")
               .map((l) => `        ${l}`)
               .join("\n")}`,
+          );
+          continue;
+        }
+        // The comparator sees enumerable keys only: pin the extra symbol's presence on the
+        // top-level output directly, so a non-enumerable one surviving by reference is caught (#51)
+        if (
+          carriesExtraSymbol(input) &&
+          carriesExtraSymbol(ours!.data) !== carriesExtraSymbol(stock!.data)
+        ) {
+          failures.push(
+            `EXTRA OWN SYMBOL MISMATCH stock=${carriesExtraSymbol(stock!.data)} ours=${carriesExtraSymbol(ours!.data)} → ${caseId}`,
           );
           continue;
         }

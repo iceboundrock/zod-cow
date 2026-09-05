@@ -807,4 +807,172 @@ import { compile } from "../src/index.js";
   );
 }
 
+/* ── 16. ownSymbolKeys in records: enum-keyed records probe on the clean path, iterating records mark a non-enumerable symbol dirty (#51) ── */
+{
+  console.log("\n── ownSymbolKeys in records (#51) ──");
+  const sym = Symbol("undeclared");
+  const hidden = Symbol("hidden");
+  const withHidden = <T extends object>(o: T): T =>
+    Object.defineProperty(o, hidden, { value: 1, enumerable: false });
+  /** Stock drops the undeclared own symbol on every path; the skeleton must copy and drop it too */
+  const copiesAndDrops = (
+    S: z.ZodType,
+    C: { parse: (i: unknown) => unknown },
+    input: object,
+    label: string,
+  ) => {
+    const stockOut = S.parse(input) as object;
+    assert.ok(!(sym in stockOut) && !(hidden in stockOut), `stock ${label} drops the symbol`);
+    const out = C.parse(input) as object;
+    assert.notEqual(out, input, `${label}: the undeclared own symbol forces a copy`);
+    assert.ok(!(sym in out) && !(hidden in out), `${label}: the copy drops the symbol`);
+    assert.deepEqual(out, stockOut);
+    assert.deepEqual(Object.keys(out), Object.keys(stockOut), `${label}: key order`);
+  };
+
+  // Path A (enum keys), strict and loose: the clean path probes with `Object.getOwnPropertySymbols`
+  // like the object skeleton (#42), so an undeclared own symbol, enumerable or not, forces a copy
+  const enumKeys = z.enum(["a", "b"]);
+  const pathA = [
+    ["strict enum record", z.record(enumKeys, z.number()), { a: 1, b: 2 }],
+    ["loose enum record", z.looseRecord(enumKeys, z.number()), { a: 1, b: 2, extra: 3 }],
+  ] as const;
+  for (const [label, S, plain] of pathA) {
+    for (const C of [compile(S), compile(S, { ownSymbolKeys: "probe" })]) {
+      assert.ok(!C.stock);
+      assert.ok(C.code!.includes("getOwnPropertySymbols"), `${label}: the probe is emitted`);
+      const clean = { ...plain };
+      assert.equal(C.parse(clean), clean, `${label}: without the symbol the input is shared`);
+      copiesAndDrops(S, C, { ...plain, [sym]: true }, `${label} (enumerable)`);
+      copiesAndDrops(S, C, withHidden({ ...plain }), `${label} (non-enumerable)`);
+    }
+    // "ignore": no probe, the clean input keeps its symbol by reference, enumerable or not
+    const I = compile(S, { ownSymbolKeys: "ignore" });
+    assert.ok(!I.code!.includes("getOwnPropertySymbols"));
+    const kept = { ...plain, [sym]: true };
+    assert.equal(I.parse(kept), kept, `${label}: "ignore" shares`);
+    const keptHidden = withHidden({ ...plain });
+    assert.equal(I.parse(keptHidden), keptHidden, `${label}: "ignore" shares (non-enumerable)`);
+    console.log(`  ${label}: default copies on an undeclared symbol, "ignore" shares ✓`);
+  }
+  // Path A copy path drops the symbol under both settings (a missing declared key is dirty)
+  const Defaulted = z.record(enumKeys, z.number().default(0));
+  for (const C of [compile(Defaulted), compile(Defaulted, { ownSymbolKeys: "ignore" })]) {
+    const dirty = { a: 1, [sym]: true };
+    const out = C.parse(dirty) as Record<string | symbol, unknown>;
+    assert.notEqual(out, dirty);
+    assert.deepEqual(out, Defaulted.parse(dirty));
+    assert.ok(!(sym in out) && out.b === 0);
+  }
+  // Strict still rejects an undeclared string key on every path, symbol or not
+  const Strict = compile(z.record(enumKeys, z.number()));
+  assert.equal(Strict.safeParse({ a: 1, b: 2, extra: 3 }).success, false);
+  assert.equal(Strict.safeParse({ a: 1, b: 2, extra: 3, [sym]: true }).success, false);
+  console.log("  enum record: copy path drops the symbol, strict rejects string keys ✓");
+
+  // Path C (bare string keys): stock validates an enumerable symbol as a key and rejects it, and
+  // skips a non-enumerable one, which its rebuild then drops. The loop already sees both, so the
+  // non-enumerable one marks the record dirty inside the existing skip; no probe call is added
+  const StringKeys = z.record(z.string(), z.number());
+  const pathBC = [
+    ["string-keyed record", StringKeys],
+    ["checked string-keyed record", z.record(z.string().min(1), z.number())],
+    ["number-keyed record", z.record(z.number(), z.number())],
+  ] as const;
+  for (const [label, S] of pathBC) {
+    for (const C of [compile(S), compile(S, { ownSymbolKeys: "probe" })]) {
+      assert.ok(!C.stock);
+      assert.ok(!C.code!.includes("getOwnPropertySymbols"), `${label}: no probe call`);
+      const plain = { 1: 1, 2: 2 };
+      assert.equal(C.parse(plain), plain);
+      const enumerable = { 1: 1, 2: 2, [sym]: true };
+      assert.equal(S.safeParse(enumerable).success, false, `stock ${label} rejects the symbol key`);
+      assert.equal(C.safeParse(enumerable).success, false, `${label} rejects the symbol key`);
+      copiesAndDrops(S, C, withHidden({ 1: 1, 2: 2 }), `${label} (non-enumerable)`);
+    }
+    const I = compile(S, { ownSymbolKeys: "ignore" });
+    const keptHidden = withHidden({ 1: 1, 2: 2 });
+    assert.equal(I.parse(keptHidden), keptHidden, `${label}: "ignore" shares (non-enumerable)`);
+    assert.equal(
+      I.safeParse({ 1: 1, [sym]: true }).success,
+      false,
+      `${label}: "ignore" still rejects`,
+    );
+    console.log(`  ${label}: non-enumerable symbol copies by default, "ignore" shares ✓`);
+  }
+  // A dirty value next to a non-enumerable symbol: one copy, the symbol dropped, under both settings
+  const Transformed = z.record(
+    z.string(),
+    z.number().transform((n) => n + 1),
+  );
+  for (const C of [compile(Transformed), compile(Transformed, { ownSymbolKeys: "ignore" })]) {
+    const input = withHidden({ a: 1 });
+    const out = C.parse(input) as Record<string | symbol, unknown>;
+    assert.notEqual(out, input);
+    assert.deepEqual(out, Transformed.parse(input));
+    assert.ok(!(hidden in out) && out.a === 2);
+  }
+
+  // Path B with a key schema that admits symbols keeps an enumerable symbol key like stock, and
+  // a loose record keeps a key its schema rejects: both stay shared (parity, no divergence)
+  const SymbolKeys = z.record(z.union([z.string(), z.symbol()]), z.number());
+  const symIn = { a: 1, [sym]: 2 };
+  assert.ok(sym in (SymbolKeys.parse(symIn) as object), "stock keeps an accepted symbol key");
+  assert.equal(compile(SymbolKeys).parse(symIn), symIn);
+  const LooseChecked = z.looseRecord(z.string().min(1), z.number());
+  assert.ok(sym in (LooseChecked.parse(symIn) as object), "stock loose keeps a rejected key");
+  assert.equal(compile(LooseChecked).parse(symIn), symIn);
+  console.log(
+    "  a key schema that admits symbols, and a loose record, keep the symbol like stock ✓",
+  );
+
+  // Nested: an enum record under a strip object; the default copies the path, "ignore" shares
+  const Nested = z.object({ rec: z.record(enumKeys, z.number()) });
+  const nIn = { rec: { a: 1, b: 2, [sym]: true } };
+  const nOut = compile(Nested).parse(nIn);
+  assert.notEqual(nOut, nIn);
+  assert.notEqual(nOut.rec, nIn.rec);
+  assert.ok(!(sym in nOut.rec));
+  assert.deepEqual(nOut, Nested.parse(nIn));
+  assert.equal(compile(Nested, { ownSymbolKeys: "ignore" }).parse(nIn), nIn);
+  console.log('  nested enum record: default copies, "ignore" shares ✓');
+
+  // Declared keys come back as the input defines them (the #48 family, documented, no probe): the
+  // own-symbol probe asks only whether an undeclared symbol exists, so a clean record or object whose
+  // declared key, symbol or string, is a non-enumerable property is returned by reference as it is,
+  // where stock's rebuild writes an enumerable data property. The copy path writes it like stock.
+  const declared = Symbol("declared");
+  const nonEnumerable = <T extends object>(o: T, key: PropertyKey, value: unknown): T =>
+    Object.defineProperty(o, key, { value, enumerable: false });
+  const enumerableOf = (o: unknown, key: PropertyKey) =>
+    Object.getOwnPropertyDescriptor(o as object, key)?.enumerable;
+  const Literal = z.record(z.literal(declared as never), z.number());
+  const plainDeclared = { [declared]: 1 };
+  assert.deepEqual(Literal.parse(plainDeclared), plainDeclared);
+  assert.equal(compile(Literal).parse(plainDeclared), plainDeclared, "a declared symbol is known");
+  const declaredKeyed = [
+    ["symbol-literal record", Literal, declared],
+    ["enum record", z.record(z.enum(["a"]), z.number()), "a"],
+    ["object, symbol key", z.object({ [declared]: z.number() }), declared],
+    ["object, string key", z.object({ a: z.number() }), "a"],
+  ] as const;
+  for (const [label, S, key] of declaredKeyed) {
+    const hiddenDeclared = nonEnumerable({}, key, 1);
+    assert.equal(enumerableOf(S.parse(hiddenDeclared), key), true, `stock ${label}: enumerable`);
+    assert.equal(
+      compile(S).parse(hiddenDeclared),
+      hiddenDeclared,
+      `${label}: a declared non-enumerable key is returned as it is (#48)`,
+    );
+  }
+  const LiteralT = z.record(
+    z.literal(declared as never),
+    z.number().transform((n) => n + 1),
+  );
+  const tOut = compile(LiteralT).parse(nonEnumerable({}, declared, 1)) as Record<symbol, unknown>;
+  assert.equal(enumerableOf(tOut, declared), true, "the copy path writes it enumerable like stock");
+  assert.equal(tOut[declared], 2);
+  console.log("  declared keys come back as the input defines them, enumerable or not (#48) ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

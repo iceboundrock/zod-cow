@@ -53,16 +53,55 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
 /** A plain object: `Object.prototype` or a null prototype; any other prototype is rejected rather than searched */
 function isPlainObject(value: unknown): value is object {
   if (typeof value !== "object" || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
+  const proto = prototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * `Object.getPrototypeOf` that never throws: a Proxy whose `getPrototypeOf` trap throws is reported
+ * as "not a plain object" (`undefined`) so that the rejection stays the documented `TypeError`
+ */
+function prototypeOf(value: object): object | null | undefined {
+  try {
+    return Object.getPrototypeOf(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Formats the rejected options argument for the `TypeError` message */
 function describe(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return "an array";
   if (typeof value !== "object") return typeof value;
-  const name = Object.getPrototypeOf(value)?.constructor?.name;
-  return typeof name === "string" && name !== "" && name !== "Object"
-    ? `an instance of ${name}`
-    : "an object whose prototype is neither Object.prototype nor null";
+  const name = constructorName(value);
+  return name === undefined
+    ? "an object whose prototype is neither Object.prototype nor null"
+    : `an instance of ${name}`;
+}
+
+/**
+ * The class name of a rejected object, for the diagnostic only. `constructor` and `name` are read
+ * as own data properties through descriptors, never dereferenced: on a user-controlled prototype
+ * either can be an accessor, and user code must not run (or throw something other than the
+ * promised `TypeError`) inside the formatting of an error message. Anything unusual (an accessor,
+ * an inherited `constructor`, a Proxy trap) gives up the name and falls back to the generic text
+ */
+function constructorName(value: object): string | undefined {
+  const proto = prototypeOf(value);
+  if (proto === null || proto === undefined) return undefined;
+  const ctor = ownDataProperty(proto, "constructor");
+  if (typeof ctor !== "function") return undefined;
+  const name = ownDataProperty(ctor, "name");
+  return typeof name === "string" && name !== "" && name !== "Object" ? name : undefined;
+}
+
+/** The value of an own data property; `undefined` for an accessor, a missing property or a throwing Proxy trap */
+function ownDataProperty(target: object, key: string): unknown {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
 }

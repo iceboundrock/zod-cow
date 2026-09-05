@@ -484,6 +484,41 @@ import { compile } from "../src/index.js";
   assert.ok(!compile(S, nullProto).code!.includes("getOwnPropertySymbols"));
   console.log("  non-plain options object throws TypeError, null-prototype object accepted ✓");
 
+  // The rejection stays a TypeError whatever the rejected object does when inspected: the
+  // diagnostic reads `constructor` and `name` through property descriptors, so a throwing accessor
+  // never runs, and a Proxy whose `getPrototypeOf` trap throws counts as a non-plain object
+  const throwingCtor = Object.create(null, {
+    constructor: {
+      get() {
+        throw new Error("constructor getter ran");
+      },
+    },
+  });
+  assert.throws(() => compile(S, Object.create(throwingCtor)), TypeError);
+  class ThrowingName {}
+  Object.defineProperty(ThrowingName, "name", {
+    get() {
+      throw new Error("name getter ran");
+    },
+  });
+  assert.throws(() => compile(S, new ThrowingName() as never), TypeError);
+  const throwingTrap = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error("getPrototypeOf trap ran");
+      },
+    },
+  );
+  assert.throws(() => compile(S, throwingTrap), TypeError);
+  assert.throws(() => compile(S, new Date() as never), {
+    name: "TypeError",
+    message: /an instance of Date/,
+  });
+  console.log(
+    "  a throwing accessor or Proxy trap on a rejected options object still gives TypeError ✓",
+  );
+
   // Only an own `ownSymbolKeys` property is read: a value inherited from `Object.prototype`
   // (prototype pollution) does not turn `compile(S, {})` into the opt-in, so `compile(S)` and
   // `compile(S, {})` stay equivalent whatever the prototype carries

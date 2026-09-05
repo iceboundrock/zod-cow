@@ -98,7 +98,7 @@ The engine is a directory of small modules (guideline: about 500 lines per file 
 |---|---|
 | `index.ts` | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator`, `CompileOptions`, `resolveOptions` |
 | `product.ts` | The `Fn` product contract, the `ZC_ASYNC` marker (`markAsync`/`isAsyncProduct`), `isAsyncFn`, `throwAsync` |
-| `options.ts` | `CompileOptions` (the public options of `compile(schema, options?)`: `ownSymbolKeys: "probe" \| "ignore"`), the resolved `CowOptions`, `DEFAULT_OPTIONS`, `resolveOptions` (throws `TypeError` on an unknown value or a non-plain options object) |
+| `options.ts` | `CompileOptions` (the public options of `compile(schema, options?)`: `ownSymbolKeys: "probe" \| "ignore"`), the resolved `CowOptions`, `DEFAULT_OPTIONS`, `resolveOptions` (throws `TypeError` on an unknown value or a non-plain options object; reads only an own `ownSymbolKeys`, never an inherited one) |
 | `codectx.ts` | `CodeCtx` (lines, hoisted constants, var names, async flag, the resolved compile options; `subFn` gives a child context its parent's options), `escKey`, `buildFn` (Function-constructor build) |
 | `predicates.ts` | Predicates copied verbatim from zod: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |

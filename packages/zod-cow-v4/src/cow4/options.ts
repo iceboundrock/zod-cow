@@ -35,7 +35,11 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
   if (!isPlainObject(options)) {
     throw new TypeError(`compile options must be a plain object, got ${describe(options)}`);
   }
-  const ownSymbolKeys = options.ownSymbolKeys ?? DEFAULT_OPTIONS.ownSymbolKeys;
+  // Only an own property counts: a value inherited from `Object.prototype` (prototype pollution)
+  // must not turn `compile(schema, {})` into something other than `compile(schema)`
+  const ownSymbolKeys =
+    (Object.hasOwn(options, "ownSymbolKeys") ? options.ownSymbolKeys : undefined) ??
+    DEFAULT_OPTIONS.ownSymbolKeys;
   if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys)) {
     throw new TypeError(
       `compile option ownSymbolKeys must be one of ${OWN_SYMBOL_KEYS.map((v) => JSON.stringify(v)).join(", ")}, got ${JSON.stringify(ownSymbolKeys)}`,
@@ -44,7 +48,7 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
   return ownSymbolKeys === DEFAULT_OPTIONS.ownSymbolKeys ? DEFAULT_OPTIONS : { ownSymbolKeys };
 }
 
-/** A plain object: `Object.prototype` or a null prototype, so `ownSymbolKeys` can only be an own property */
+/** A plain object: `Object.prototype` or a null prototype; any other prototype is rejected rather than searched */
 function isPlainObject(value: unknown): value is object {
   if (typeof value !== "object" || value === null) return false;
   const proto = Object.getPrototypeOf(value);

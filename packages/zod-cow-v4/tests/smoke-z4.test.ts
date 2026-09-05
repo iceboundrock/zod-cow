@@ -420,6 +420,32 @@ import { compile } from "../src/index.js";
   assert.notEqual(nOut.list[0], nIn.list[0]);
   console.log('  "ignore": propagates into nested object skeletons ✓');
 
+  // ... through every container skeleton, not only object and array: a strip object under a tuple,
+  // a record, a map and a set is shared under "ignore" and copied by default. Nested skeletons are
+  // separate Function builds, so this is pinned by behavior, not by inspecting `code`
+  const Inner = z.object({ v: z.string() });
+  const Containers = z.object({
+    tup: z.tuple([Inner]),
+    rec: z.record(z.string(), Inner),
+    map: z.map(z.string(), Inner),
+    set: z.set(Inner),
+  });
+  const cIn = {
+    tup: [{ v: "x", [sym]: 1 }] as const,
+    rec: { k: { v: "x", [sym]: 1 } },
+    map: new Map([["k", { v: "x", [sym]: 1 }]]),
+    set: new Set([{ v: "x", [sym]: 1 }]),
+  };
+  assert.equal(compile(Containers, { ownSymbolKeys: "ignore" }).parse(cIn), cIn);
+  const cOut = compile(Containers).parse(cIn) as z.output<typeof Containers>;
+  assert.notEqual(cOut, cIn);
+  assert.notEqual(cOut.tup[0], cIn.tup[0]);
+  assert.notEqual(cOut.rec.k, cIn.rec.k);
+  assert.notEqual(cOut.map.get("k"), cIn.map.get("k"));
+  assert.notEqual([...cOut.set][0], [...cIn.set][0]);
+  assert.deepEqual(cOut, Containers.parse(cIn));
+  console.log('  "ignore": propagates through tuple, record, map and set skeletons ✓');
+
   // The probe covers every own symbol, non-enumerable ones included (`Object.getOwnPropertySymbols`
   // lists them all, and stock's rebuild drops them all): the default copies, "ignore" shares
   const hidden = Symbol("hidden");
@@ -451,6 +477,20 @@ import { compile } from "../src/index.js";
   const nullProto = Object.assign(Object.create(null), { ownSymbolKeys: "ignore" as const });
   assert.ok(!compile(S, nullProto).code!.includes("getOwnPropertySymbols"));
   console.log("  non-plain options object throws TypeError, null-prototype object accepted ✓");
+
+  // Only an own `ownSymbolKeys` property is read: a value inherited from `Object.prototype`
+  // (prototype pollution) does not turn `compile(S, {})` into the opt-in, so `compile(S)` and
+  // `compile(S, {})` stay equivalent whatever the prototype carries
+  const proto = Object.prototype as { ownSymbolKeys?: unknown };
+  proto.ownSymbolKeys = "ignore";
+  try {
+    assert.equal(compile(S, {}).code, compile(S).code);
+    assert.ok(compile(S, {}).code!.includes("getOwnPropertySymbols"));
+    assert.ok(!compile(S, { ownSymbolKeys: "ignore" }).code!.includes("getOwnPropertySymbols"));
+  } finally {
+    delete proto.ownSymbolKeys;
+  }
+  console.log("  ownSymbolKeys inherited from Object.prototype is ignored ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

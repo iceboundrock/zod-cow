@@ -76,6 +76,51 @@ const DATES = [
   null,
 ] as const;
 
+/**
+ * The output comparison sees Map and Set contents in iteration order: stock rebuilds both from
+ * the parsed entries in input order, and the order is observable, so a Map or Set is compared as
+ * the ordered list of its entries or members (the harness comparator, like Node's
+ * `isDeepStrictEqual`, treats them as unordered and can also mismatch two Sets whose object
+ * members are mutually deep-equal, such as two Dates of the same time).
+ */
+function orderedView(v: unknown, seen = new Map<object, unknown>()): unknown {
+  if (typeof v !== "object" || v === null) return v;
+  if (v instanceof Date) return v;
+  const hit = seen.get(v);
+  if (hit !== undefined) return hit;
+  if (v instanceof Map) {
+    const out = { $map: [] as unknown[] };
+    seen.set(v, out);
+    for (const [k, x] of v) out.$map.push([orderedView(k, seen), orderedView(x, seen)]);
+    return out;
+  }
+  if (v instanceof Set) {
+    const out = { $set: [] as unknown[] };
+    seen.set(v, out);
+    for (const x of v) out.$set.push(orderedView(x, seen));
+    return out;
+  }
+  if (Array.isArray(v)) {
+    const out: unknown[] = new Array(v.length); // holes stay holes
+    seen.set(v, out);
+    for (const k of Object.keys(v)) (out as any)[k] = orderedView((v as any)[k], seen);
+    return out;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v; // class instance: as it is
+  const out = Object.create(proto);
+  seen.set(v, out);
+  for (const k of Object.keys(v)) {
+    Object.defineProperty(out, k, {
+      value: orderedView((v as any)[k], seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
 function repr(v: unknown): string {
   try {
     return (
@@ -384,6 +429,9 @@ function bArray(rng: RNG, depth: number): Built {
         const v = inner.gen(r);
         if (v !== ABSENT) out.push(v);
       }
+      // A sparse input now and then: a hole reads as undefined but stock's output owns the index
+      if (out.length > 0 && r.chance(0.08)) delete out[r.int(out.length)];
+      if (r.chance(0.04)) out.length += 1;
       return out;
     },
   };
@@ -391,9 +439,12 @@ function bArray(rng: RNG, depth: number): Built {
 
 function bRecord(rng: RNG, depth: number): Built {
   const inner = bChild(rng, depth);
+  // A key transform that collides with a later key: stock rebuilds in order, the later entry wins
+  const renames = rng.chance(0.2);
+  const keySchema = renames ? z.string().transform((k) => (k === "a" ? "b" : k)) : z.string();
   return {
-    schema: z.record(z.string(), inner.schema),
-    desc: `record(string, ${inner.desc})`,
+    schema: z.record(keySchema, inner.schema),
+    desc: `record(${renames ? "string.transform(a→b)" : "string"}, ${inner.desc})`,
     gen: (r) => {
       const out: Record<string, unknown> = {};
       const keys = ["a", "b", "c", "d"];
@@ -401,6 +452,16 @@ function bRecord(rng: RNG, depth: number): Built {
       for (let i = 0; i < n; i++) {
         const v = inner.gen(r);
         if (v !== ABSENT) out[keys[i]!] = v;
+      }
+      // An own "__proto__" data property (what JSON.parse produces): stock's assembly drops it
+      if (r.chance(0.08)) {
+        const v = inner.gen(r);
+        Object.defineProperty(out, "__proto__", {
+          value: v === ABSENT ? undefined : v,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       return out;
     },
@@ -421,6 +482,11 @@ function bTuple(rng: RNG, depth: number): Built {
       if (roll < 0.1) return items.slice(0, 1);
       if (roll < 0.2) return [...items, 1];
       if (roll < 0.25) return r.pick(["x", 1, null, {}] as const);
+      if (roll < 0.3) {
+        // A hole in one slot, or a hole in the slot stock truncates away
+        if (r.chance(0.3)) items.push(2);
+        delete items[r.int(2)];
+      }
       return items;
     },
   };
@@ -428,9 +494,16 @@ function bTuple(rng: RNG, depth: number): Built {
 
 function bMap(rng: RNG, depth: number): Built {
   const inner = bChild(rng, depth);
+  const renames = rng.chance(0.2);
+  const keySchema = renames
+    ? z
+        .string()
+        .min(1)
+        .transform((k) => (k === "k0" ? "k1" : k))
+    : z.string().min(1);
   return {
-    schema: z.map(z.string().min(1), inner.schema),
-    desc: `map(string.min(1), ${inner.desc})`,
+    schema: z.map(keySchema, inner.schema),
+    desc: `map(string.min(1)${renames ? ".transform(k0→k1)" : ""}, ${inner.desc})`,
     gen: (r) => {
       if (r.chance(0.1)) return r.pick([{}, [], "x"] as const);
       const m = new Map<unknown, unknown>();
@@ -445,6 +518,20 @@ function bMap(rng: RNG, depth: number): Built {
 }
 
 function bSet(rng: RNG, depth: number): Built {
+  if (rng.chance(0.15)) {
+    // A member transform that collides with another member: stock adds in order, the later wins
+    const schema = z.set(z.number().transform((n) => (n === 1 ? 2 : n)));
+    return {
+      schema,
+      desc: "set(number.transform(1→2))",
+      gen: (r) => {
+        const out = new Set<unknown>();
+        const n = r.int(5);
+        for (let i = 0; i < n; i++) out.add(r.pick(NUMBERS));
+        return out;
+      },
+    };
+  }
   const inner = bChild(rng, depth);
   let schema = z.set(inner.schema);
   let desc = `set(${inner.desc})`;
@@ -665,7 +752,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         );
         continue;
       }
-      if (!assertDeepEqual(ours!.data, stock!.data)) {
+      if (!assertDeepEqual(orderedView(ours!.data), orderedView(stock!.data))) {
         failures.push(
           `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}`,
         );

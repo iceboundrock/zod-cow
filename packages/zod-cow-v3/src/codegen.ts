@@ -215,8 +215,13 @@ function childBlock(
   const body = `${childCall(g, child, spec.eager, keyExpr, "inVal")}
       if (outVal === FAILED) anyFailed = true;
       else if (outVal !== inVal && !anyFailed) { if (!dirty) { dirty = true; out = ${copyExpr}; } ${assign("outVal")} }`;
+  // A hole reads as undefined and is parsed as such; stock spreads the input, so its output owns
+  // every index, while `slice()` keeps the hole: an index still absent from `out` after the slot
+  // ran is materialized as an own undefined (tested only when the value read was undefined)
+  const hole = `if (inVal === undefined && !anyFailed && !(${keyExpr} in out)) { if (!dirty) { dirty = true; out = ${copyExpr}; } ${assign("undefined")} }`;
   return `{ const inVal = ${access};
-    ${pred === null ? body : `if (!(${pred})) { ${body} }`} }`;
+    ${pred === null ? body : `if (!(${pred})) { ${body} }`}
+    ${hole} }`;
 }
 
 /**

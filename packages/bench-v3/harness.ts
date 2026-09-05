@@ -276,7 +276,9 @@ export function printRatios(run: ScenarioRun): void {
       return r ? `${COLUMN_TITLES[c]} / zod-cow = ${ratio(r, zc)}` : undefined;
     })
     .filter(Boolean);
-  console.log(`  Ratios (median; >1 = zod-cow faster): ${parts.join("   ")}`);
+  console.log(
+    `  Ratios (median; >1 = zod-cow faster): ${parts.length > 0 ? parts.join("   ") : "none (no equivalent column next to zod-cow)"}`,
+  );
 }
 
 /* ───────────── summary tables (markdown, so they paste into the docs) ───────────── */

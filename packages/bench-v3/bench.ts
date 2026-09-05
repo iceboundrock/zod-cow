@@ -311,8 +311,10 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
       },
       {
         column: "ark",
-        label: "ArkType Type.allows(data) (validation only)",
+        label: "ArkType Type.allows(data) (validation only, non-equivalent reference)",
         run: () => (ArkAccounts.allows(data) ? N : fail("ArkType allows")),
+        nonEquivalent:
+          "validation-only entry point; zod-cow-v3 validate() is the full parse runtime, so the two measure different work per row",
       },
     ],
   );

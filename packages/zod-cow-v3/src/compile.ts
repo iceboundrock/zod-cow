@@ -671,13 +671,36 @@ function makeNativeEnum(def: any): Validator {
 
 /* ════════════════════════════ ZodObject (CoW core) ════════════════════════════ */
 
-/** Whether parse(undefined) is (a) valid and (b) produces undefined — e.g. optional/any/unknown/undefined/void */
-function isUndefStable(s: z.ZodTypeAny): boolean {
-  try {
-    const r = s.safeParse(undefined);
-    return r.success && r.data === undefined;
-  } catch {
-    return false;
+/**
+ * Whether stock's parse of `undefined` is known, from the schema's structure alone, to succeed
+ * with `undefined` and without reaching user code: `optional` short-circuits before its inner
+ * schema, `any` / `unknown` / `undefined` / `void` accept the value, `nullable` and `branded`
+ * hand it to their inner schema, a union answers with its first option when every option does.
+ * Decided structurally, never by running the schema: a compile-time `safeParse(undefined)` would
+ * execute the user's callbacks (a preprocess, transform, refine or default function) and freeze
+ * their answer into the skeleton, while stock consults them on every parse.
+ */
+function isUndefStable(s: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
+  if (seen.has(s)) return false;
+  seen.add(s);
+  const def: any = (s as any)._def;
+  switch (def.typeName) {
+    case "ZodOptional":
+    case "ZodAny":
+    case "ZodUnknown":
+    case "ZodUndefined":
+    case "ZodVoid":
+      return true;
+    case "ZodLiteral":
+      return def.value === undefined;
+    case "ZodNullable":
+      return isUndefStable(def.innerType, seen);
+    case "ZodBranded":
+      return isUndefStable(def.type, seen);
+    case "ZodUnion":
+      return (def.options as z.ZodTypeAny[]).every((o) => isUndefStable(o, seen));
+    default:
+      return false;
   }
 }
 
@@ -935,6 +958,13 @@ function makeArray(def: any): Validator {
           out = data.slice(); // slice only at the first "forced" change — the other elements stay shared
         }
         out[i] = outVal;
+      } else if (inVal === undefined && !anyFailed && !(i in out)) {
+        // A hole: stock spreads the input, so its output owns every index (`slice()` keeps holes)
+        if (!dirty) {
+          dirty = true;
+          out = data.slice();
+        }
+        out[i] = undefined;
       }
     }
     if (anyFailed) return FAILED;
@@ -1009,6 +1039,13 @@ function makeTuple(def: any): Validator {
           out = data.slice();
         }
         out[i] = outVal;
+      } else if (inVal === undefined && !anyFailed && !(i in out)) {
+        // A hole is materialized as an own slot, as stock's spread of the input does
+        if (!dirty) {
+          dirty = true;
+          out = data.slice();
+        }
+        out[i] = undefined;
       }
     }
     if (anyFailed) return FAILED;
@@ -1028,11 +1065,16 @@ function makeRecord(def: any): Validator {
       pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
+    // Stock's loop is `for...in` without an own check, so an inherited enumerable key is parsed
+    // and written as an own key of the output; the output is assembled from the parsed pairs in
+    // that order (`mergeObjectSync`), a pair whose output key is "__proto__" left out. The clean
+    // path returns the input by reference; the first forced change rebuilds the clean prefix in
+    // order and every later pair is written after it, so a transformed key that collides with a
+    // later entry is overwritten by that entry as in stock.
     let out: any = data;
     let dirty = false;
     let anyFailed = false;
     for (const k in data) {
-      if (!hop.call(data, k)) continue;
       const inVal = data[k];
       // Key and value are both parsed (same as stock: a failing key does not skip the value's issues)
       let outKey: any;
@@ -1052,14 +1094,17 @@ function makeRecord(def: any): Validator {
         anyFailed = true;
         continue;
       }
-      if ((outKey !== k || outVal !== inVal) && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = { ...data };
+      if (anyFailed) continue;
+      if (!dirty) {
+        if (outKey === k && outVal === inVal && k !== "__proto__" && hop.call(data, k)) continue;
+        dirty = true;
+        out = {};
+        for (const k2 in data) {
+          if (k2 === k) break;
+          out[k2] = data[k2];
         }
-        if (outKey !== k) delete out[k]; // Key renamed; on a collision the later write wins (same as stock)
-        safeSet(out, outKey, outVal);
       }
+      if (outKey !== "__proto__") safeSet(out, outKey, outVal);
     }
     if (anyFailed) return FAILED;
     return out;
@@ -1104,14 +1149,21 @@ function makeMap(def: any): Validator {
         anyFailed = true;
         continue;
       }
-      if ((outKey !== k || outVal !== v) && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = new Map(data);
+      if (anyFailed) continue;
+      if (!dirty) {
+        if (outKey === k && outVal === v) continue;
+        // Stock sets the parsed pairs into a fresh Map in order: rebuild the clean prefix (the
+        // first i - 1 entries), then write every later pair, so a transformed key that collides
+        // with a later entry is overwritten by it
+        dirty = true;
+        out = new Map();
+        let j = 1;
+        for (const [k2, v2] of data) {
+          if (j++ === i) break;
+          out.set(k2, v2);
         }
-        if (outKey !== k) out.delete(k);
-        out.set(outKey, outVal);
       }
+      out.set(outKey, outVal);
     }
     if (anyFailed) return FAILED;
     return out;
@@ -1171,14 +1223,21 @@ function makeSet(def: any): Validator {
         anyFailed = true;
         continue;
       }
-      if (outVal !== item && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = new Set(data);
+      if (anyFailed) continue;
+      if (!dirty) {
+        if (outVal === item) continue;
+        // Stock adds the parsed members to a fresh Set in order: rebuild the clean prefix, then
+        // add every later member, so a transformed member that collides with a later one keeps
+        // stock's position and the later member wins
+        dirty = true;
+        out = new Set();
+        let j = 1;
+        for (const item2 of data) {
+          if (j++ === i) break;
+          out.add(item2);
         }
-        out.delete(item);
-        out.add(outVal);
       }
+      out.add(outVal);
     }
     if (anyFailed) return FAILED;
     return out;

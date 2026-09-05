@@ -994,4 +994,230 @@ test("ZcError carries issues", () => {
   }
 });
 
+console.log(
+  "── third review round of #63: rebuild order, compile-time effects, holes, record keys ──",
+);
+
+test("record/map/set: a transformed key or member that collides with a later entry is overwritten by it, in stock's order", () => {
+  // Stock rebuilds from the parsed entries in iteration order, so the later (unchanged) entry wins
+  const key = z.string().transform((k) => (k === "a" ? "b" : k));
+  const R = z.record(key, z.number());
+  assert.deepEqual(compile(R).parse({ a: 1, b: 2 }), R.parse({ a: 1, b: 2 }));
+  assert.deepEqual(compile(R).parse({ a: 1, b: 2 }), { b: 2 });
+  assert.deepEqual(Object.keys(compile(R).parse({ b: 2, a: 1 }) as object), ["b"]);
+  assert.deepEqual(compile(R).parse({ b: 2, a: 1 }), { b: 1 }); // the transformed entry comes later here
+
+  const M = z.map(key, z.number());
+  const mIn = new Map([
+    ["a", 1],
+    ["b", 2],
+  ]);
+  assert.deepEqual([...compile(M).parse(mIn)], [...M.parse(mIn)]);
+  assert.deepEqual([...compile(M).parse(mIn)], [["b", 2]]);
+  assert.deepEqual(
+    [...mIn],
+    [
+      ["a", 1],
+      ["b", 2],
+    ],
+  ); // input lossless
+
+  const S = z.set(z.number().transform((n) => (n === 1 ? 2 : 1)));
+  const sIn = new Set([1, 2]);
+  assert.deepEqual([...compile(S).parse(sIn)], [...S.parse(sIn)]);
+  assert.deepEqual([...compile(S).parse(sIn)], [2, 1]);
+  assert.deepEqual([...sIn], [1, 2]);
+
+  // A change in the middle keeps the clean prefix and the clean suffix in order
+  const R2 = z.record(
+    z.string(),
+    z.number().transform((n) => (n === 2 ? 20 : n)),
+  );
+  const out = compile(R2).parse({ a: 1, b: 2, c: 3 }) as Record<string, number>;
+  assert.deepEqual(Object.keys(out), ["a", "b", "c"]);
+  assert.deepEqual(out, { a: 1, b: 20, c: 3 });
+  const M2 = z.map(
+    z.string(),
+    z.number().transform((n) => (n === 2 ? 20 : n)),
+  );
+  assert.deepEqual(
+    [
+      ...compile(M2).parse(
+        new Map([
+          ["a", 1],
+          ["b", 2],
+          ["c", 3],
+        ]),
+      ),
+    ],
+    [
+      ["a", 1],
+      ["b", 20],
+      ["c", 3],
+    ],
+  );
+  const S2 = z.set(z.number().transform((n) => (n === 2 ? 20 : n)));
+  assert.deepEqual([...compile(S2).parse(new Set([1, 2, 3]))], [1, 20, 3]);
+});
+
+test("object: compile() runs no user callback, and a child that adds an issue at run time is always consulted", () => {
+  let calls = 0;
+  let armed = false;
+  const child = z.preprocess((v, ctx) => {
+    calls++;
+    if (armed) ctx.addIssue({ code: "custom", message: "armed" });
+    return v;
+  }, z.unknown());
+  const tr = z.unknown().transform((v) => {
+    calls++;
+    return v;
+  });
+  const rf = z.unknown().refine(() => {
+    calls++;
+    return true;
+  });
+  const df = z.string().default(() => {
+    calls++;
+    return "d";
+  });
+  const C = compile(z.object({ a: child, b: tr, c: rf, d: df }));
+  assert.equal(calls, 0); // no safeParse(undefined) probe of the children at compile time
+  assert.equal(C.safeParse({}).success, true);
+  armed = true;
+  const r = C.safeParse({});
+  assert.equal(r.success, false);
+  assert.deepEqual(r.success ? [] : r.error.issues.map((i) => i.path), [["a"]]);
+  assert.equal(C.safeParse({ a: undefined }).success, false);
+
+  // The structural shortcut still holds where stock never reaches the child: optional / any / unknown /
+  // undefined / void / nullable(optional) skip an absent key and return the input by reference
+  const P = compile(
+    z.object({
+      a: z.string().optional(),
+      b: z.any(),
+      c: z.unknown(),
+      d: z.undefined(),
+      e: z.void(),
+      f: z.string().optional().nullable(),
+    }),
+  );
+  const empty = {};
+  assert.equal(P.parse(empty), empty);
+  // A preprocess under optional is short-circuited by the optional on undefined (stock too)
+  let under = 0;
+  const O = compile(
+    z.object({
+      a: z
+        .preprocess((v) => {
+          under++;
+          return v;
+        }, z.string())
+        .optional(),
+    }),
+  );
+  assert.equal(O.parse(empty), empty);
+  assert.equal(under, 0);
+});
+
+test("array / tuple: a hole is materialized as an own undefined slot like stock", () => {
+  const A = z.array(z.unknown());
+  const hole = new Array(1);
+  const out = compile(A).parse(hole) as unknown[];
+  assert.notEqual(out, hole);
+  assert.equal(Object.hasOwn(out, 0), true);
+  assert.deepEqual(out, A.parse(hole));
+  assert.equal(Object.hasOwn(hole, 0), false); // input lossless
+
+  // A hole next to a default and a plain value: every slot is own afterwards, values as stock
+  const D = z.array(z.string().default("d"));
+  const sparse = new Array(3);
+  sparse[1] = "x";
+  const dout = compile(D).parse(sparse) as string[];
+  assert.deepEqual(dout, ["d", "x", "d"]);
+  assert.deepEqual(
+    [0, 1, 2].map((i) => Object.hasOwn(dout, i)),
+    [true, true, true],
+  );
+  // A hole after the first copy is still materialized
+  const late = ["x", "y"];
+  late.length = 4;
+  late[2] = undefined as never;
+  const lout = compile(z.array(z.string().optional())).parse(late) as unknown[];
+  assert.deepEqual(
+    [0, 1, 2, 3].map((i) => Object.hasOwn(lout, i)),
+    [true, true, true, true],
+  );
+  assert.deepEqual(lout, z.array(z.string().optional()).parse(late));
+  // Dense arrays keep the reference
+  const dense = [undefined, "x"];
+  assert.equal(compile(z.array(z.string().optional())).parse(dense), dense);
+  const empty: unknown[] = [];
+  assert.equal(compile(A).parse(empty), empty);
+
+  const T = z.tuple([z.string().optional(), z.number().optional()]);
+  const th = new Array(2);
+  const tout = compile(T).parse(th) as unknown[];
+  assert.notEqual(tout, th);
+  assert.deepEqual(
+    [0, 1].map((i) => Object.hasOwn(tout, i)),
+    [true, true],
+  );
+  assert.deepEqual(tout, T.parse(th));
+  // A hole in the truncated part of an oversized tuple and a hole in a declared slot
+  const tbig = new Array(3);
+  tbig[1] = 2;
+  const tb = compile(T).safeParse(tbig);
+  assert.equal(tb.success, false); // too_big is an issue, as in stock
+  const tdense = [undefined, 1];
+  assert.equal(compile(T).parse(tdense), tdense);
+});
+
+test("record: an own __proto__ is dropped, a key transformed to __proto__ is skipped, an inherited enumerable key is written as own", () => {
+  const R = z.record(z.string(), z.number());
+  const proto = JSON.parse('{"__proto__":1}');
+  const out = compile(R).parse(proto) as object;
+  assert.notEqual(out, proto);
+  assert.equal(Object.hasOwn(out, "__proto__"), false);
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  assert.deepEqual(out, R.parse(proto));
+  assert.equal(Object.hasOwn(proto, "__proto__"), true); // input lossless
+
+  const mixed = JSON.parse('{"x":1,"__proto__":2,"y":3}');
+  const RT = z.record(
+    z.string(),
+    z.number().transform((n) => n + 1),
+  );
+  const mout = compile(RT).parse(mixed) as object;
+  assert.deepEqual(Object.keys(mout), ["x", "y"]);
+  assert.deepEqual(mout, RT.parse(mixed));
+  assert.equal(Object.hasOwn(mout, "__proto__"), false);
+
+  // A key transform producing "__proto__": stock's assembly skips that pair
+  const KP = z.record(
+    z.string().transform((k) => (k === "a" ? "__proto__" : k)),
+    z.number(),
+  );
+  const kout = compile(KP).parse({ a: 1, b: 2 }) as object;
+  assert.deepEqual(Object.keys(kout), ["b"]);
+  assert.equal(Object.hasOwn(kout, "__proto__"), false);
+  assert.equal(Object.getPrototypeOf(kout), Object.prototype);
+  assert.deepEqual(kout, KP.parse({ a: 1, b: 2 }));
+
+  // Stock's record loop is `for...in` without an own check: an inherited enumerable key is parsed
+  // and written as an own key of the output
+  const inh = Object.create({ inh: 1 });
+  inh.own = 2;
+  const iout = compile(R).parse(inh) as object;
+  assert.notEqual(iout, inh);
+  assert.deepEqual(Object.keys(iout), ["own", "inh"]);
+  assert.equal(Object.hasOwn(iout, "inh"), true);
+  assert.deepEqual(iout, R.parse(inh));
+  assert.equal(
+    compile(R).safeParse(Object.assign(Object.create({ inh: "no" }), { own: 2 })).success,
+    false,
+  );
+  const plain = { own: 2 };
+  assert.equal(compile(R).parse(plain), plain);
+});
+
 summary(noCodegen ? "unit (closure skeletons, --no-codegen)" : "unit (generated skeletons)");

@@ -466,6 +466,12 @@ import { compile } from "../src/index.js";
   assert.throws(() => compile(S, null as never), TypeError);
   console.log("  unknown value, array or null options throw TypeError ✓");
 
+  // An explicit `undefined` is an absent property (the default); an explicit `null` is a value
+  // other than the two strings and throws like any other unknown value
+  assert.equal(compile(S, { ownSymbolKeys: undefined }).code, compile(S).code);
+  assert.throws(() => compile(S, { ownSymbolKeys: null as never }), TypeError);
+  console.log("  explicit undefined is the default, explicit null throws TypeError ✓");
+
   // Only a plain object (Object.prototype or null prototype) is an options argument: a class
   // instance, a Date or an object inheriting `ownSymbolKeys` from its prototype is rejected
   class Opts {

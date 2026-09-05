@@ -36,10 +36,12 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
     throw new TypeError(`compile options must be a plain object, got ${describe(options)}`);
   }
   // Only an own property counts: a value inherited from `Object.prototype` (prototype pollution)
-  // must not turn `compile(schema, {})` into something other than `compile(schema)`
+  // must not turn `compile(schema, {})` into something other than `compile(schema)`. An own
+  // `undefined` is an absent property; anything else, `null` included, is checked as a value
   const ownSymbolKeys =
-    (Object.hasOwn(options, "ownSymbolKeys") ? options.ownSymbolKeys : undefined) ??
-    DEFAULT_OPTIONS.ownSymbolKeys;
+    Object.hasOwn(options, "ownSymbolKeys") && options.ownSymbolKeys !== undefined
+      ? options.ownSymbolKeys
+      : DEFAULT_OPTIONS.ownSymbolKeys;
   if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys)) {
     throw new TypeError(
       `compile option ownSymbolKeys must be one of ${OWN_SYMBOL_KEYS.map((v) => JSON.stringify(v)).join(", ")}, got ${JSON.stringify(ownSymbolKeys)}`,

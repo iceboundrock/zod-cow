@@ -1,6 +1,6 @@
-> **Snapshot notice.** This file is the Chinese text of the architecture document as it stood at v0.5 (issue #7). It is kept for readers of the original and is **not maintained**: the English [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md) is the source of truth and receives every change to the zod4 engine. Section numbers match the English document except for its appendix.
+> **Note.** This file is the Chinese counterpart of [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md), which is the source of truth; a change to the English document is applied here in the same PR. The text below still reflects v0.5 (issue #7) and is being brought up to date under #52. Section numbers match the English document except for its appendix.
 >
-> **快照说明。** 本文是 v0.5 时的架构文档中文原文（issue #7），仅供阅读，**不再维护**：英文 [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md) 是权威版本，zod4 引擎的每一次改动都只更新那一份。除英文版的附录外，章节编号与英文版一一对应。
+> **说明。** 本文是 [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md) 的中文对应版本，英文版是权威版本；英文文档的每次改动都在同一个 PR 里同步到这里。下文目前仍是 v0.5 时的内容（issue #7），正在 #52 中更新。除英文版的附录外，章节编号与英文版一一对应。
 
 # zc-z4 架构对比：自研 codegen vs 复用 zod4 官方 codegen
 

@@ -14,17 +14,17 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 
 - 不 fork zod、不改 Zod API：zod schema 原样消费（读取 `.def` 树），类型推断继续用 `z.infer`
 - 编译期一次性解析 shape / keys / checks，生成特化校验代码
-- 本层自身绝不改动输入：不在输入上原地删除或改写任何东西。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。唯一能落到输入上的原地写入是 `readonly` 的 `Object.freeze`：zod4 线只在 stock zod 4 自己也会冻结输入的位置冻结，即 `any` / `unknown` 这类透传叶子（见[何时被迫拷贝](#何时被迫拷贝)与 #28）；冻结的 zod3 线则在每个 `readonly` 节点上原地冻结（#27）
+- 本层自身绝不改动输入：不在输入上原地删除或改写任何东西。Numeric fork 的 strip 会原地 delete 输入上的多余键，这里修复了该 footgun。唯一能落到输入上的原地写入是 `readonly` 的 `Object.freeze`：zod4 线只在 stock zod 4 自己也会冻结输入的位置冻结，即 `any` / `unknown` 这类透传叶子（见[何时被迫拷贝](#何时被迫拷贝)与 #28）；zod3 线则在每个 `readonly` 节点上原地冻结（#27）
 - 失败路径不自带 issue 数据：编译产物返回哨兵，调用方回退 stock `safeParse` 拿完整 `ZodError`
 
 ## 两条编译线
 
 | 线 | 入口 | 引擎 | 状态 |
 |---|---|---|---|
-| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **活跃线**，所有新工作都在这里 |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **冻结参考实现**：CoW 思路的起点和对比基线，保持测试通过但不再扩展 |
+| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | 复用 zod4 官方 JIT codegen（`compileFn` / `assertOnly`）作为语义后端，叠加 object / array / tuple / record / map / set 六个 CoW 容器骨架，支持 async | **主线**：发布的包，新特性都在这里 |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | 自研闭包树编译器；string 格式正则逐字拷贝自 zod 3.24.1 | **持续维护**：CoW 思路的起点和对比基线，保持测试通过并继续优化；不发布 |
 
-两条线各自是一个 workspace 包，各装各的 zod：`packages/zod-cow-v4`（以 [`zod-cow-v4`](packages/zod-cow-v4/README.md) 发布）对 zod 4.5.4，`packages/zod-cow-v3`（私有的冻结线）对 zod 3.24.1；两者都用真实的 `zod` 说明符引入。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
+两条线各自是一个 workspace 包，各装各的 zod：`packages/zod-cow-v4`（以 [`zod-cow-v4`](packages/zod-cow-v4/README.md) 发布）对 zod 4.5.4，`packages/zod-cow-v3`（私有）对 zod 3.24.1；两者都用真实的 `zod` 说明符引入。两条线不共享代码。早期的自研 zod4 前端（v0.2）已被当前 zod4 线完全取代并移除，其结论记录在 [CHANGELOG](CHANGELOG.md#020)。
 
 ## 快速开始
 
@@ -56,7 +56,7 @@ pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的�
 
 `zod-cow-v4` 是发布的包。它的 README，[packages/zod-cow-v4/README.md](packages/zod-cow-v4/README.md)（英文），是面向使用者的文档，也是安装、用法、API 和 zod peer 策略文字的唯一出处：安装方式（`pnpm add zod-cow-v4 zod`）和 API 表都在那里。
 
-zod3 线不发布。它是 `packages/zod-cow-v3` 里的冻结参考实现，由自己的测试和 `bench-v3` 通过 workspace 导出使用；其 API 与 zod4 线不同（`ZcError` 而非 `ZodError`、`validate()` 返回 `DeepReadonly` 视图、静态 `.pure` 标志），见 `packages/zod-cow-v3/src/index.ts` 和 `pnpm run demo:v3`。
+zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `bench-v3` 通过 workspace 导出使用；其 API 与 zod4 线不同（`ZcError` 而非 `ZodError`、`validate()` 返回 `DeepReadonly` 视图、静态 `.pure` 标志），见 `packages/zod-cow-v3/src/index.ts` 和 `pnpm run demo:v3`。
 
 ## CoW 不变量
 
@@ -207,7 +207,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 一个 pnpm workspace：每个 zod 大版本一个包，每条线再配一个基准包（[ADR 0001](docs/adr/0001-package-layout.md)）：
 
 ```
-packages/zod-cow-v4/        以 zod-cow-v4 发布（活跃线）；peer zod >=4.5.4 <4.6.0，ESM + 类型声明输出到 dist/
+packages/zod-cow-v4/        以 zod-cow-v4 发布（主线）；peer zod >=4.5.4 <4.6.0，ESM + 类型声明输出到 dist/
   README.md                 面向使用者的文档：安装、用法、API、peer 策略
   src/index.ts              compile() API
   src/cow4/                 引擎：官方 codegen + CoW 容器骨架 + async 通道
@@ -219,7 +219,7 @@ packages/zod-cow-v4/        以 zod-cow-v4 发布（活跃线）；peer zod >=4.
   tests/smoke-z4*.test.ts   zod4 行为断言（容器 / tuple / async）
   tests/differential-z4.test.ts   zod4 差分模糊（20000 case，REPRO 钩子）
   scripts/pack-smoke.ts     tarball 冒烟（文件清单、manifest、import、require、消费者 typecheck）
-packages/zod-cow-v3/        私有的 zod-cow-v3（冻结参考）；导出 TypeScript 源码，不构建
+packages/zod-cow-v3/        私有的 zod-cow-v3；导出 TypeScript 源码，不构建
   src/index.ts              compile() API
   src/compile.ts            闭包树编译器
   src/internal.ts           协议：FAILED 哨兵 / Ctx / issue 辅助 / safeSet
@@ -230,7 +230,7 @@ packages/zod-cow-v3/        私有的 zod-cow-v3（冻结参考）；导出 Type
   tests/differential.test.ts   zod3 差分模糊（20000 case）
 packages/bench-v4/          bench.ts（S1 纯校验 / S2 脏负载 / S3 脏比例 / S4 validate / S5 容器 / S6 tuple / S7 async，ArkType 为一列）、harness.ts（测量）、gates.ts（等价性门）与 demo.ts，对构建后的 zod-cow-v4 运行
 packages/bench-v3/          bench.ts（50 万账户）与 zod3 的 demo.ts
-docs/ARCHITECTURE-z4.md     zod4 引擎架构深度走读（英文，权威版本；docs/ARCHITECTURE-z4.zh-CN.md 是冻结的中文快照）
+docs/ARCHITECTURE-z4.md     zod4 引擎架构深度走读（英文，权威版本；docs/ARCHITECTURE-z4.zh-CN.md 是其中文对应版本）
 docs/upstream-issue-draft.md   给 zod 上游的 issue 草稿：请求公开 compileFn / assertOnly / INVALID
 docs/adr/0001-package-layout.md   ADR：每个 zod 大版本一个包的 pnpm workspace 布局、发布名 `zod-cow-v4`、benchmark 按线拆分、peer 依赖策略、zod3 线不发布
 CHANGELOG.md                v0.1～v0.5 历史与各版本的历史基准表（覆盖整个 workspace）

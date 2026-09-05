@@ -2,7 +2,7 @@
   "name": "zod-cow-v3",
   "version": "0.5.0",
   "private": true,
-  "description": "Frozen zod 3 line of the CoW compilation layer (reference implementation, not published)",
+  "description": "zod 3 line of the CoW compilation layer (maintained, not published)",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

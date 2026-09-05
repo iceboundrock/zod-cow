@@ -12,17 +12,17 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 - No fork of zod and no change to the Zod API: schemas are consumed as they are (the `.def` tree is read), type inference stays `z.infer`.
 - Shape, keys and checks are resolved once at compile time into specialized validation code.
-- The layer never mutates the input on its own: nothing is deleted or rewritten in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The one in-place write that can reach the input is the `Object.freeze` of `readonly`. The zod4 line performs it exactly where stock zod 4 does, on a pass-through leaf such as `any` / `unknown` (see [When a copy is forced](#when-a-copy-is-forced) and #28); the frozen zod3 line performs it on every `readonly` node (#27).
+- The layer never mutates the input on its own: nothing is deleted or rewritten in place. The Numeric fork's strip deletes extra keys on the input object; that footgun is fixed here. The one in-place write that can reach the input is the `Object.freeze` of `readonly`. The zod4 line performs it exactly where stock zod 4 does, on a pass-through leaf such as `any` / `unknown` (see [When a copy is forced](#when-a-copy-is-forced) and #28); the zod3 line performs it on every `readonly` node (#27).
 - Failure paths carry no issue data of their own: the compiled function returns a sentinel and the caller falls back to stock `safeParse` for the full `ZodError`.
 
 ## Two compiler lines
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
-| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Active line**, all new work goes here |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Frozen reference implementation**: the origin of the CoW idea and a comparison baseline, kept passing but not extended |
+| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Primary line**: the published package, where new features go |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Maintained**: the origin of the CoW idea and a comparison baseline, kept passing and still optimized; not published |
 
-The lines live in two workspace packages, each installing its own zod: `packages/zod-cow-v4` (published as [`zod-cow-v4`](packages/zod-cow-v4/README.md)) against zod 4.5.4, `packages/zod-cow-v3` (private, the frozen line) against zod 3.24.1; both import `zod` by its real specifier. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
+The lines live in two workspace packages, each installing its own zod: `packages/zod-cow-v4` (published as [`zod-cow-v4`](packages/zod-cow-v4/README.md)) against zod 4.5.4, `packages/zod-cow-v3` (private) against zod 3.24.1; both import `zod` by its real specifier. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
 
 ## Quick start
 
@@ -60,7 +60,7 @@ Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200
 
 `zod-cow-v4` is the published package. Its README, [packages/zod-cow-v4/README.md](packages/zod-cow-v4/README.md), is the consumer document and the only place that carries the install, usage, API and zod peer-policy text; install it from there (`pnpm add zod-cow-v4 zod`) and read the API table there.
 
-The zod3 line is not published. It is the frozen reference implementation in `packages/zod-cow-v3`, exercised through its workspace export by its own tests and by `bench-v3`; its API differs from the zod4 line (`ZcError` instead of `ZodError`, a `DeepReadonly` view from `validate()`, a static `.pure` flag), see `packages/zod-cow-v3/src/index.ts` and `pnpm run demo:v3`.
+The zod3 line is not published. It lives in `packages/zod-cow-v3` and is exercised through its workspace export by its own tests and by `bench-v3`; its API differs from the zod4 line (`ZcError` instead of `ZodError`, a `DeepReadonly` view from `validate()`, a static `.pure` flag), see `packages/zod-cow-v3/src/index.ts` and `pnpm run demo:v3`.
 
 ## The CoW invariant
 
@@ -211,7 +211,7 @@ The ArkType column is measured only where arktype 2.2.3 expresses the same workl
 A pnpm workspace, one package per zod major plus one benchmark package per line ([ADR 0001](docs/adr/0001-package-layout.md)):
 
 ```
-packages/zod-cow-v4/        published as zod-cow-v4 (the active line); peer zod >=4.5.4 <4.6.0, ESM + declarations in dist/
+packages/zod-cow-v4/        published as zod-cow-v4 (the primary line); peer zod >=4.5.4 <4.6.0, ESM + declarations in dist/
   README.md                 consumer document: install, usage, API, peer policy
   src/index.ts              compile() API
   src/cow4/                 engine: official codegen + CoW container skeletons + async channel
@@ -223,7 +223,7 @@ packages/zod-cow-v4/        published as zod-cow-v4 (the active line); peer zod 
   tests/smoke-z4*.test.ts   zod4 behavior assertions (containers / tuple / async)
   tests/differential-z4.test.ts   zod4 differential fuzzer (20 000 cases, REPRO hook)
   scripts/pack-smoke.ts     packed-tarball smoke (listing, manifest, import, require, consumer typecheck)
-packages/zod-cow-v3/        private zod-cow-v3 (frozen reference); exports the TypeScript source, no build
+packages/zod-cow-v3/        private zod-cow-v3; exports the TypeScript source, no build
   src/index.ts              compile() API
   src/compile.ts            closure-tree compiler
   src/internal.ts           protocol: FAILED sentinel / Ctx / issue helpers / safeSet
@@ -234,7 +234,7 @@ packages/zod-cow-v3/        private zod-cow-v3 (frozen reference); exports the T
   tests/differential.test.ts   zod3 differential fuzzer (20 000 cases)
 packages/bench-v4/          bench.ts (S1 pure / S2 dirty / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 async, with ArkType as a column), harness.ts (measurement), gates.ts (equivalence gates) and demo.ts, against the built zod-cow-v4
 packages/bench-v3/          bench.ts (500 000 accounts) and the zod3 demo.ts
-docs/ARCHITECTURE-z4.md     architecture deep dive on the zod4 engine (English source; docs/ARCHITECTURE-z4.zh-CN.md is a frozen Chinese snapshot)
+docs/ARCHITECTURE-z4.md     architecture deep dive on the zod4 engine (English source of truth; docs/ARCHITECTURE-z4.zh-CN.md is its Chinese counterpart)
 docs/upstream-issue-draft.md   draft issue for zod upstream: make compileFn / assertOnly / INVALID public
 docs/adr/0001-package-layout.md   ADR: one package per zod major in a pnpm workspace, `zod-cow-v4` published name, benchmarks split per line, peer-dependency policy, zod3 line unpublished
 CHANGELOG.md                v0.1 to v0.5 history with the historical benchmark tables (covers the whole workspace)

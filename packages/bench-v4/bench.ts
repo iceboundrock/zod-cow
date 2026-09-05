@@ -323,6 +323,10 @@ const sample = data[7]!;
       accept: false,
     },
     { name: "balance is a string", input: variant(sample, { balance: "1" }), accept: false },
+    // Non-string values for the regex-constrained fields: a bare RegExp field in ArkType implies a
+    // string base, so these must be rejected by every implementation, not just by zod
+    { name: "email is a number", input: variant(sample, { email: 123 }), accept: false },
+    { name: "createdAt is null", input: variant(sample, { createdAt: null }), accept: false },
     { name: "not an array", input: sample, accept: false },
   ];
   await gate("S1", parseImpls(AccountsStock, officialParser, Z4Stock, ArkAccounts), [

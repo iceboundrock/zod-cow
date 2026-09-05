@@ -22,7 +22,13 @@
  */
 import { performance } from "node:perf_hooks";
 
+/** Timed rounds per candidate; `BENCH_PASSES` must be a positive integer (no samples, no median) */
 export const PASSES = Number(process.env.BENCH_PASSES ?? 3);
+if (!Number.isInteger(PASSES) || PASSES < 1) {
+  throw new Error(
+    `BENCH_PASSES must be a positive integer, got ${JSON.stringify(process.env.BENCH_PASSES)}`,
+  );
+}
 export const WARMUP = 2;
 
 /** Column of the summary tables a candidate belongs to */
@@ -165,8 +171,9 @@ export async function runScenario(
 
 /** The equivalent (not N/A, not non-equivalent) measurement of a column, if any */
 export function equivalent(run: ScenarioRun, column: Column): Measured | undefined {
-  const r = run.results.find((x) => x.column === column);
-  return r && isMeasured(r) && !r.nonEquivalent ? r : undefined;
+  return run.results.find(
+    (x): x is Measured => x.column === column && isMeasured(x) && !x.nonEquivalent,
+  );
 }
 
 /**
@@ -203,11 +210,20 @@ function markdownTable(header: string[], rows: string[][]): string {
 
 const COLUMNS: Column[] = ["stock", "official", "zc", "ark"];
 
+/**
+ * One summary cell. A column may hold an N/A entry and a non-equivalent reference measurement
+ * side by side (S5, ArkType); both are rendered so the reference timing is not confined to the
+ * scenario output.
+ */
 function cell(run: ScenarioRun, column: Column, pick: (m: Measured) => string): string {
-  const r = run.results.find((x) => x.column === column);
-  if (!r) return "N/A — not part of this scenario";
-  if (isNA(r)) return `N/A — ${r.na}`;
-  return r.nonEquivalent ? `(${pick(r)}, non-equivalent reference)` : pick(r);
+  const rs = run.results.filter((x) => x.column === column);
+  if (rs.length === 0) return "N/A — not part of this scenario";
+  return rs
+    .map((r) => {
+      if (isNA(r)) return `N/A — ${r.na}`;
+      return r.nonEquivalent ? `(${pick(r)}, non-equivalent reference)` : pick(r);
+    })
+    .join(" ");
 }
 
 export function printSummary(runs: ScenarioRun[]): void {

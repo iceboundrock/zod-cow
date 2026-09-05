@@ -19,8 +19,8 @@ The difference from the Numeric fork: Numeric made `parse` return the original o
 
 | Line | Entry | Engine | Status |
 |---|---|---|---|
-| **zod4** | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | **Primary line**: the published package, where new features go |
-| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | **Maintained**: the origin of the CoW idea and a comparison baseline, kept passing and still optimized; not published |
+| zod4 | `packages/zod-cow-v4/src/index.ts` → `packages/zod-cow-v4/src/cow4/` | Reuses zod4's official JIT codegen (`compileFn` / `assertOnly`) as the semantic backend and adds CoW container skeletons for object, array, tuple, record, map and set, plus async support | Primary line: the published package, where new features go |
+| zod3 | `packages/zod-cow-v3/src/index.ts` → `packages/zod-cow-v3/src/compile.ts` | Hand-written closure-tree compiler; string format regexes copied verbatim from zod 3.24.1 | Maintained: the origin of the CoW idea and a comparison baseline, kept passing and still optimized; not published |
 
 The lines live in two workspace packages, each installing its own zod: `packages/zod-cow-v4` (published as [`zod-cow-v4`](packages/zod-cow-v4/README.md)) against zod 4.5.4, `packages/zod-cow-v3` (private) against zod 3.24.1; both import `zod` by its real specifier. The two lines share no code. An earlier self-written zod4 front-end (v0.2) was replaced by the current zod4 line and removed; its findings are recorded in the [CHANGELOG](CHANGELOG.md#020).
 
@@ -102,7 +102,7 @@ The zod4 line does not re-implement zod's semantics. zod4 (>= 4.1) ships a JIT c
 2. Purity analysis is a conservative whitelist deciding "validation passes ⇒ output === input". Pure subtrees get the official validator, impure subtrees get the official parser plus a reference comparison.
 3. Container skeletons are string-templated codegen that mirrors zod's own `generate*` functions line by line, then rewrites the unconditional `const out = {...}` into "compare references, copy on first dirt, `return input` when clean". Container-level checks (`min` / `max` / `refine`) run on the final output on both paths.
 4. Async: async subtrees become async islands, every product call site emits `await`, and the skeleton becomes an async function. The sync API on an async product throws `$ZodAsyncError`, same as stock.
-5. Degradation chain, per subtree, never giving up correctness: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`).
+5. Degradation chain, per subtree, every step keeping stock's results: CoW skeleton → official validator (pure leaf) → official parser (impure subtree) → runtime island (`_zod.run` black box) → whole-tree stock `safeParse` (`compiled.stock === true`).
 
 The layer depends on `zod/v4/core`, a public permalink subpath whose compiler exports (`compileFn`, `assertOnly`, `INVALID`, the artifact protocol) are unsupported, and on a few hand-copied predicates. It is anchored to zod 4.5.4, the lower bound of the package's peer range: `packages/zod-cow-v4/tests/canary-z4.test.ts` asserts the stock behaviors the compiler assumes, so an upgrade turns the tests red instead of drifting silently. [docs/upstream-issue-draft.md](docs/upstream-issue-draft.md) asks zod upstream to make that surface public.
 
@@ -135,7 +135,7 @@ Batch scenarios (one call parses the whole dataset):
 | S8 allocation pressure / retained | +28.2 MB / +11.6 MB | +11.2 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +157.5 MB / +66.6 MB |
 | S10 parse failures, per-row `safeParse`, 1% / 10% / 50% / 100% invalid rows | 69 / 88 / 151 / 224 ms | 18 / 40 / 128 / 227 ms | **25 / 47 / 132 / 231 ms** | 30 / 91 / 287 / 426 ms |
 
-Single-record hot loops (one small input, 50 000 operations per timed round, median nanoseconds per operation; a calibration against the shape of public single-object benchmarks, not a product workload):
+Single-record hot loops (one small input, 50 000 operations per timed round, median nanoseconds per operation; this calibrates against the shape of public single-object benchmarks and is not a product workload):
 
 | Scenario | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|

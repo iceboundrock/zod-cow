@@ -82,7 +82,7 @@ The deeper and heavier the containers, the more of stock's time goes into output
 | `regexes.number`, `util.isPlainObject` | record skeleton (100% official semantics for numeric-key retry / plain-object guard) | low |
 | semantic predicates copied from source: `fastPathAcceptsAbsence`, `dropsWhenAbsent`, `getTupleOptStart`, `WHEN_DEFAULTED_CHECKS` | purity analysis & tuple tail semantics | medium: must be re-synced if zod changes `when`/optin-optout semantics |
 
-We mitigate this with a strict degradation chain, where any drift degrades to stock rather than to wrong results, and with the 50k-case differential suite as an upgrade gate. A public guarantee would remove that class of risk.
+We mitigate this with a strict degradation chain, where any drift degrades to stock instead of producing wrong results, and with the 50k-case differential suite as an upgrade gate. A public guarantee would remove that class of risk.
 
 ### Proposal
 
@@ -123,8 +123,8 @@ Reproduction, differential suite, and benchmarks: [zod-cow](https://github.com/i
 
 ### Compatibility & risk
 
-- The compiler is already load-bearing for `zod/compile`; promoting it formalizes what exists rather than adding surface.
-- All failure modes are throws (`ZodCompileUnsupportedError` / `ZodCompileAsyncError`) rather than silently wrong results, which makes the surface safe to build on.
+- The compiler is already load-bearing for `zod/compile`; promoting it formalizes what already exists and adds no surface.
+- Every failure mode is a throw (`ZodCompileUnsupportedError` / `ZodCompileAsyncError`), never a silently wrong result, which makes the surface safe to build on.
 - Our differential setup (a random schema generator, 50k cases checking success parity, `deepStrictEqual` outputs, input mutation and the reference-sharing rate, with `REPRO=seed:case` hooks) is available if it is useful for the repo's own compile tests.
 
 ---

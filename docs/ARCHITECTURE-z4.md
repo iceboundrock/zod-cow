@@ -64,12 +64,12 @@ Three key product contracts:
 | Product | Signature | Semantics |
 |---|---|---|
 | parser | `(input) => out \| INVALID` | stock zod semantics (validation + transformation + an unconditional new container) |
-| validator (`assertOnly: true`) | `(input) => true \| INVALID` | validation semantics complete, **output construction skipped** |
+| validator (`assertOnly: true`) | `(input) => true \| INVALID` | validation semantics complete, output construction skipped |
 | runtime island | `(input) => out \| INVALID` | a black box calling `_zod.run({value, issues:[]}, {})`, swallows async in a sync context |
 
 Another official mount point is `globalConfig.postProcessor` (the side-effect entry of `zod/compile` installs its shim
 there). This layer does not use it (that is the "clone every instance and replace run" route, incompatible with CoW's
-"whole-tree product"), but note that the two can coexist: zc-z4's failure fallback calls
+"whole-tree product"), but the two can coexist: zc-z4's failure fallback calls
 `schema.safeParse`, so if the user also enables `zod/compile`, the fallback path automatically enjoys the official JIT.
 
 ### 2.1 The real code the official compiler generates for an object (parser mode)
@@ -119,7 +119,7 @@ return true;                                      // <- constructs no output at 
 ```
 
 `assertOnly` cuts output construction away entirely and keeps the validation semantics untouched, which is exactly the product
-that a "pure subtree" needs in CoW. Measured (500 000 accounts, assertOnly in a per-account loop): **265ms / +13MB**, against
+that a "pure subtree" needs in CoW. Measured (500 000 accounts, assertOnly in a per-account loop): 265ms / +13MB, against
 the parser product's 332ms / +112MB. The net cost of output construction is 67ms plus 99MB of allocation.
 
 ### 2.3 The product shape of transform/default/optional
@@ -237,7 +237,7 @@ Under the option a clean input that does carry an undeclared own symbol key is r
 ### 3.2 The container's own checks: the two-path timing
 
 When `.refine()` / `.min()` is attached to a container, the stock semantics is "run the checks on the output after the output
-is constructed". zc-z4 compiles the checks into a separate validation subroutine and **calls it on both paths**:
+is constructed". zc-z4 compiles the checks into a separate validation subroutine and calls it on both paths:
 
 ```js
 const cChecks = /* the containerChecksFn product */;
@@ -270,8 +270,8 @@ A pure subtree goes through the official validator (value = input); anything unc
 | object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
 | record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
 | union | all branches pure | branches pass through |
-| readonly | **false** | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
-| default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | **false** | value producer / black box / new container |
+| readonly | false | the `Object.freeze` side effect. The official parser then freezes exactly what stock freezes: a new container, or the input itself for a pass-through leaf such as `any` / `unknown` (#28) |
+| default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | value producer / black box / new container |
 
 ### Trap one: `overwrite` rewrites values (proved by differential seed=51)
 
@@ -340,7 +340,7 @@ return x0;                                                 // clean → the orig
 ```
 
 Path B (numeric-key retry, key names can change): reuses the official `keyFast + regexes.number retry`
-template and additionally performs a key-name reference comparison: `outKey !== k` also counts as dirty, and the copy branch does
+template and also performs a key-name reference comparison: `outKey !== k` also counts as dirty, and the copy branch does
 `delete out[k]; out[outKey] = t;`. In the sub-case where key names do not change (string-format keys such as
 `z.record(z.email(), v)`), `outKey === k` always holds and the key-name comparison costs nothing.
 
@@ -558,11 +558,11 @@ The unsupported surface we depend on (all reachable through the public `zod/v4/c
 |---|---|---|
 | `compileFn(schema, {assertOnly, debug})` | leaf/subtree products | signature change (low); behavior changes are backstopped by the differential tests |
 | `INVALID` | failure sentinel | extremely low (Symbol.for is stable) |
-| `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the **async detector** (v0.5) | low |
+| `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the async detector (v0.5) | low |
 | `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton | low |
 | `regexes.number` / `util.isPlainObject` | record skeleton | low (the official internals depend on the same ones for consistency) |
-| `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | **medium**: must be synced when zod changes the `when` semantics |
-| `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | **medium**: must be synced when zod changes the optin/optout ladder |
+| `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | medium: must be synced when zod changes the `when` semantics |
+| `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | medium: must be synced when zod changes the optin/optout ladder |
 
 Mitigations: the degradation chain guarantees that any drift shows up at worst as "degrading to stock" (correctness is never lost);
 the async channel uses `ZodCompileAsyncError` as an async detector maintained by the official project (when the official code adds async detection points,
@@ -609,16 +609,16 @@ This table was written for the removed self-written zod4 front-end (v0.2) and mo
 
 | Dimension | zod3 | zod4 |
 |---|---|---|
-| checks location | the wrapper type (the checks array on `ZodString`) | a flat `def.checks`, and `z.email()/z.iso.*()/z.int()` attach the format check **directly on the def itself** (`def.check`) |
+| checks location | the wrapper type (the checks array on `ZodString`) | a flat `def.checks`, and `z.email()/z.iso.*()/z.int()` attach the format check directly on the def itself (`def.check`) |
 | check instance | `c.kind` + `c.value` | `check` kinds are named differently (`min_length/max_length/greater_than/string_format/number_format/overwrite/custom`…), and may be an instance or a bare def, so they need normalizing |
 | `.int()` | `ZodNumber` check kind `"int"` | `number_format "safeint"` (isInteger + the 2^53 range, out of range reports too_big) |
 | object mode | the `def.unknownKeys` flag | strict = `catchall: never`, loose = `catchall: unknown` |
-| object output rebuild | the `alwaysSet` rule | **driven by `optin`/`optout`**: an absent optional key is not materialized, a present undefined is kept, an absent required key reports `nonoptional` |
-| `.default()` | the default value **must pass** the inner validation | **short-circuits** (the default value is not validated); and `handleDefaultResult` fills in the default when the inner produces undefined |
-| `.optional()` | passes undefined straight through | when the inner has `optin === "defaulted"` it **hands undefined to the inner** (so the default fires) |
-| `.catch()` | **swallows exceptions** | **does not swallow exceptions** (only a validation failure falls back to the catch value) |
+| object output rebuild | the `alwaysSet` rule | driven by `optin`/`optout`: an absent optional key is not materialized, a present undefined is kept, an absent required key reports `nonoptional` |
+| `.default()` | the default value must pass the inner validation | short-circuits (the default value is not validated); and `handleDefaultResult` fills in the default when the inner produces undefined |
+| `.optional()` | passes undefined straight through | when the inner has `optin === "defaulted"` it hands undefined to the inner (so the default fires) |
+| `.catch()` | swallows exceptions | does not swallow exceptions (only a validation failure falls back to the catch value) |
 | `.transform()` | `ZodEffects` | `pipe(in, transform)`; `fn(value, payload{issues, addIssue})` |
 | refine | `ZodEffects.refinement` | a `custom` check inside `def.checks`; every check instance has a lazily compiled `_zod.check(payload)`, which serves as the generic channel for kinds we did not hand-write |
-| string format | regexes copied verbatim into `regexes.ts` | a `string_format` check **carries its own pattern regex** (email/uuid/datetime/ipv4… inlined directly) |
-| record keys | string only | number keys are supported (retried by falling back to the numeric string); **enum/literal keys are declaration-driven** (all declared keys required + extra keys report unrecognized_keys) |
+| string format | regexes copied verbatim into `regexes.ts` | a `string_format` check carries its own pattern regex (email/uuid/datetime/ipv4… inlined directly) |
+| record keys | string only | number keys are supported (retried by falling back to the numeric string); enum/literal keys are declaration-driven (all declared keys required + extra keys report unrecognized_keys) |
 | NaN | `invalid_type received nan` | same as zod3 (z.number() rejects NaN) |

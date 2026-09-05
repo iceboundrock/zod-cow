@@ -171,7 +171,7 @@ The earlier self-written zod4 front-end (v0.2) contained about 1100 lines of sem
 2. Container CoW skeleton codegen (object and array templates, about 200 lines): the official "unconditional new container" (`const out = {...}` / `new Array(n)`) is rewritten into "reference comparison as dirty check plus conditional shallow copy". Clean input does `return input` (the one line the official template lacks); a forced copy does `out = { ...input }`, so key presence and key order are preserved by the spread, and strip detects extra keys with the official `for...in` plus `Set` probe and deletes them on the copy.
 3. Container-level checks subroutine (refine/min/max): an independent validation function called on both paths, matching stock semantics (checks run on the final output: the input when clean, the rebuilt `out` when dirty).
 
-### Degradation chain (per subtree, never giving up correctness)
+### Degradation chain (per subtree, every step keeping stock's results)
 
 ```
 CoW container skeleton
@@ -212,7 +212,7 @@ Takeaways at the time:
 
 ### Version anchor
 
-The layer reads zod4 internals: `compileFn` / `INVALID` / `ZodCompileUnsupportedError` / `ZodCompileAsyncError` from `zod4/v4/core`, plus hand-copied semantic predicates (`WHEN_DEFAULTED_CHECKS`, `fastPathAcceptsAbsence`, `mayOutputUndefined`). Anchored to zod **4.5.4**; a zod upgrade requires rerunning the differential suite to confirm the predicates did not drift.
+The layer reads zod4 internals: `compileFn` / `INVALID` / `ZodCompileUnsupportedError` / `ZodCompileAsyncError` from `zod4/v4/core`, plus hand-copied semantic predicates (`WHEN_DEFAULTED_CHECKS`, `fastPathAcceptsAbsence`, `mayOutputUndefined`). Anchored to zod 4.5.4; a zod upgrade requires rerunning the differential suite to confirm the predicates did not drift.
 
 ## [0.2.0]
 

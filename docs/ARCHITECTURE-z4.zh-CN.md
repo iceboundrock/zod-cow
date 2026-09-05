@@ -222,6 +222,15 @@ strict 与 loose 对象在 #42 之前、record 在 #51 之前无条件如此，�
 其余不变：已声明的 symbol 键照常校验并写入，拷贝路径按构造丢弃未声明的 symbol，`validate()` 仍是官方 validator。
 差分模糊测试用不生成额外自有 symbol 的生成器对该选项再跑一遍（§8）。
 
+两个探测证明不了的事（#48）：`for...in` 探测列出可枚举的字符串键（自有与继承的），自有 symbol 探测列出自有 symbol；干净路径上没有任何地方读取属性描述符或原型，
+所以干净输入会连同 stock 重建时会规范化掉的东西一起原样返回。共四类：不可枚举的未声明字符串键（对象的每种模式；record 也一样，其键循环像 stock 一样跳过不可枚举的字符串键，
+然后返回输入，而 stock 的重建会丢弃它）、被输入定义为不可枚举的已声明键（§5.1）、输入的原型（类实例仍是该实例；loose 对象还会让可枚举的继承键留在原型上，
+因为只有 strip 在干净路径上运行 `for...in`，而 stock 的 loose 追加会把它写成自有键；record 两边都拒绝类实例），以及被触发的 Proxy 陷阱集合
+（strip 触发 `ownKeys` 与 `getOwnPropertyDescriptor`，而 stock 的 strip 模板什么都不触发；loose 只通过自有 symbol 探测触发 `ownKeys`，`"ignore"` 下什么都不触发，
+而 stock 的 `for...in` 追加两个都触发）。拷贝路径是官方组装，每种情况都与 stock 一致。要证明它们不存在，每个对象要多一个 `Object.getOwnPropertyNames` 或 `Reflect.ownKeys` 数组、
+每个已声明键要多一次 `propertyIsEnumerable` 调用或每个干净容器要多一次原型读取，正是 `ownSymbolKeys: "ignore"` 想省掉的那类开销，
+所以它们只记录（README 已知限制）并由 smoke 第 16、17 组对照 stock 的行为钉住，不探测。
+
 ### 3.2 容器自身 checks：双路径时点
 
 `.refine()` / `.min()` 挂在容器上时，stock 语义是"输出构造后对输出跑 checks"。
@@ -526,7 +535,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（16 组行为断言，第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（17 组行为断言，第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys` 或 `getOwnPropertyDescriptor` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 以及 `"ignore"` 下不触发，对象骨架的 `code` 不含描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套

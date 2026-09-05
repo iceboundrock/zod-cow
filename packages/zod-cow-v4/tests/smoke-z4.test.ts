@@ -975,4 +975,207 @@ import { compile } from "../src/index.js";
   console.log("  declared keys come back as the input defines them, enumerable or not (#48) ✓");
 }
 
+/* ── 17. clean path keeps what stock's rebuild normalizes (#48) ── */
+{
+  console.log("\n── clean path keeps what stock's rebuild normalizes (#48) ──");
+  // The two undeclared-key probes prove only what they look at (`for...in`: enumerable string keys;
+  // `Object.getOwnPropertySymbols`: own symbols), and nothing on the clean path reads a property
+  // descriptor or the prototype, so a clean input comes back with everything stock's rebuild would
+  // normalize away. Documented under known limitations, not probed; the copy path is the official
+  // assembly and matches stock. These assertions pin the documented behavior next to stock's, so a
+  // future probe is a deliberate change. Group 16 pins the declared-key descriptor member.
+  const hide = <T extends object>(o: T, key: PropertyKey, value: unknown): T =>
+    Object.defineProperty(o, key, { value, enumerable: false });
+  const ownNames = (o: unknown) => Object.getOwnPropertyNames(o as object);
+  const bump = z.number().transform((n) => n + 1);
+  const objectModes = [
+    ["strip", z.object({ a: z.number() }), z.object({ a: bump })],
+    ["strict", z.strictObject({ a: z.number() }), z.strictObject({ a: bump })],
+    ["loose", z.looseObject({ a: z.number() }), z.looseObject({ a: bump })],
+  ] as const;
+  const [[, Strip], [, Strict], [, Loose]] = objectModes;
+  const recordPaths = [
+    ["enum record", z.record(z.enum(["a"]), z.number()), z.record(z.enum(["a"]), bump)],
+    [
+      "loose enum record",
+      z.looseRecord(z.enum(["a"]), z.number()),
+      z.looseRecord(z.enum(["a"]), bump),
+    ],
+    ["string record", z.record(z.string(), z.number()), z.record(z.string(), bump)],
+    [
+      "checked-string record",
+      z.record(z.string().min(1), z.number()),
+      z.record(z.string().min(1), bump),
+    ],
+  ] as const;
+
+  // 1. A non-enumerable undeclared string key: stock's rebuild drops it on every path, the clean
+  // path returns the input with it (the `for...in` probe and the record key loop skip it)
+  for (const [label, S, T] of [...objectModes, ...recordPaths]) {
+    const input = hide({ a: 1 }, "hidden", 2);
+    assert.deepEqual(ownNames(S.parse(input)), ["a"], `stock ${label}: the hidden key is dropped`);
+    assert.equal(compile(S).parse(input), input, `${label}: clean input returned as it is (#48)`);
+    assert.deepEqual(ownNames(input), ["a", "hidden"], `${label}: the input is not mutated`);
+    const dirty = hide({ a: 1 }, "hidden", 2);
+    const out = compile(T).parse(dirty) as Record<string, unknown>;
+    assert.notEqual(out, dirty);
+    assert.deepEqual(ownNames(out), ["a"], `${label}: the copy path drops it like stock`);
+    assert.equal(out.a, 2);
+  }
+  const NumberRecord = z.record(z.coerce.number(), z.number());
+  const numberIn = hide({ 1: 1 }, "hidden", 2);
+  assert.deepEqual(ownNames(NumberRecord.parse(numberIn)), ["1"]);
+  assert.equal(compile(NumberRecord).parse(numberIn), numberIn, "number record: returned as it is");
+  console.log(
+    "  a non-enumerable undeclared string key survives the clean path, the copy drops it ✓",
+  );
+
+  // 2. The input's prototype: a class instance comes back as that instance where stock returns a
+  // plain object; the copy path is a plain object like stock
+  class Row {
+    a = 1;
+  }
+  for (const [label, S, T] of objectModes) {
+    const row = new Row();
+    assert.equal(Object.getPrototypeOf(S.parse(row)), Object.prototype, `stock ${label}: plain`);
+    assert.equal(compile(S).parse(row), row, `${label}: the instance is returned as it is (#48)`);
+    const copy = compile(T).parse(new Row());
+    assert.equal(Object.getPrototypeOf(copy), Object.prototype, `${label}: the copy is plain`);
+    assert.deepEqual(copy, { a: 2 });
+  }
+  // Records are not affected: stock rejects a class instance (not a plain object) and so do we
+  for (const [label, S] of recordPaths) {
+    assert.equal(S.safeParse(new Row()).success, false, `stock ${label}: rejects a class instance`);
+    assert.equal(
+      compile(S).safeParse(new Row()).success,
+      false,
+      `${label}: rejects a class instance`,
+    );
+  }
+  // An inherited enumerable key: strip's `for...in` probe sees it and copies (a plain object with the
+  // declared keys, like stock); strict rejects it on both sides; loose does not enumerate on its clean
+  // path and keeps the key inherited, where stock's `for...in` append writes it as an own key
+  const withInherited = () => Object.assign(Object.create({ inherited: 1 }), { a: 1 });
+  {
+    const input = withInherited();
+    const ours = compile(Strip).parse(input);
+    assert.notEqual(ours, input, "strip: an inherited enumerable key takes the copy path");
+    assert.equal(Object.getPrototypeOf(ours), Object.prototype);
+    assert.deepEqual(ours, Strip.parse(input));
+    assert.deepEqual(ownNames(ours), ["a"]);
+  }
+  assert.equal(Strict.safeParse(withInherited()).success, false, "stock strict: rejects it");
+  assert.equal(compile(Strict).safeParse(withInherited()).success, false, "strict: rejects it");
+  {
+    const input = withInherited();
+    assert.deepEqual(
+      ownNames(Loose.parse(input)),
+      ["a", "inherited"],
+      "stock loose: written as own",
+    );
+    assert.equal(
+      compile(Loose).parse(input),
+      input,
+      "loose: returned with the key inherited (#48)",
+    );
+    const copy = compile(z.looseObject({ a: bump })).parse(withInherited());
+    assert.deepEqual(
+      ownNames(copy),
+      ["a", "inherited"],
+      "loose copy: the append writes it like stock",
+    );
+  }
+  console.log("  a class instance and an inherited key come back as passed on the clean path ✓");
+
+  // 3. Proxy traps: strip's `for...in` probe consults `ownKeys` and `getOwnPropertyDescriptor` where
+  // stock's strip template enumerates nothing; loose consults `ownKeys` alone (the own-symbol probe,
+  // parity with stock's `for...in` append there since #42) and nothing under `"ignore"`, where stock's
+  // append consults both; strict runs the official unknown-key loop on both sides
+  class TrapError extends Error {}
+  const trapped = (trap: "ownKeys" | "getOwnPropertyDescriptor") => {
+    const boom = () => {
+      throw new TrapError(trap);
+    };
+    return new Proxy(
+      { a: 1 },
+      trap === "ownKeys" ? { ownKeys: boom } : { getOwnPropertyDescriptor: boom },
+    );
+  };
+  const throwsTrap = (f: () => unknown) => {
+    try {
+      f();
+      return false;
+    } catch (e) {
+      assert.ok(e instanceof TrapError, "the trap's own error propagates, not a ZodError");
+      return true;
+    }
+  };
+  for (const trap of ["ownKeys", "getOwnPropertyDescriptor"] as const) {
+    assert.equal(
+      throwsTrap(() => Strip.parse(trapped(trap))),
+      false,
+      `stock strip: no ${trap}`,
+    );
+    assert.equal(
+      throwsTrap(() => compile(Strip).parse(trapped(trap))),
+      true,
+      `strip: ${trap} (#48)`,
+    );
+    assert.equal(
+      throwsTrap(() => compile(Strip, { ownSymbolKeys: "ignore" }).parse(trapped(trap))),
+      true,
+      `strip under "ignore": the for...in probe still consults ${trap}`,
+    );
+    assert.equal(
+      throwsTrap(() => Strict.parse(trapped(trap))),
+      true,
+      `stock strict: ${trap}`,
+    );
+    assert.equal(
+      throwsTrap(() => compile(Strict).parse(trapped(trap))),
+      true,
+      `strict: ${trap}`,
+    );
+    assert.equal(
+      throwsTrap(() => Loose.parse(trapped(trap))),
+      true,
+      `stock loose: ${trap}`,
+    );
+  }
+  assert.equal(
+    throwsTrap(() => compile(Loose).parse(trapped("ownKeys"))),
+    true,
+    "loose: ownKeys",
+  );
+  const descriptorTrap = trapped("getOwnPropertyDescriptor");
+  assert.equal(
+    compile(Loose).parse(descriptorTrap),
+    descriptorTrap,
+    "loose: getOwnPropertyDescriptor is not consulted, the proxy is returned as it is (#48)",
+  );
+  const keysTrap = trapped("ownKeys");
+  assert.equal(
+    compile(Loose, { ownSymbolKeys: "ignore" }).parse(keysTrap),
+    keysTrap,
+    'loose under "ignore": nothing is enumerated, the proxy is returned as it is (#48)',
+  );
+  console.log("  Proxy traps: strip enumerates where stock does not, loose less than stock ✓");
+
+  // No probe for any of it: the object skeleton reads neither descriptors nor the prototype
+  for (const [label, S] of objectModes) {
+    for (const C of [compile(S), compile(S, { ownSymbolKeys: "ignore" })]) {
+      for (const probe of [
+        "getOwnPropertyNames",
+        "Reflect.ownKeys",
+        "getPrototypeOf",
+        "propertyIsEnumerable",
+        "getOwnPropertyDescriptor",
+      ]) {
+        assert.ok(!C.code!.includes(probe), `${label}: no ${probe} probe in the skeleton`);
+      }
+    }
+  }
+  console.log("  no descriptor or prototype probe in the object skeleton ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

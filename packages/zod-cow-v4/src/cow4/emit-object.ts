@@ -205,7 +205,7 @@ export function emitCoWObject(
       if (ctx.options.ownSymbolKeys === "probe") {
         ctx.write(`if (!${extra}) {`);
         ctx.indented(() => {
-          // Official strip discards extra enumerable own symbol keys, which a pass-through would keep → probe for them
+          // Official strip discards every extra own symbol key (non-enumerable ones too), which a pass-through would keep → probe for them
           const syms = ctx.var();
           ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
           if (symbolKeys.length === 0) {

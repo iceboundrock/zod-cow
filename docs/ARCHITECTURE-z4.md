@@ -521,7 +521,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
 
 ## 8. Correctness evidence
 
-- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (12 groups of behavioral assertions, the last one the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons, rejects an unknown value with `TypeError`) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (12 groups of behavioral assertions, the last one the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons, treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value or a non-plain options object with `TypeError`) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested

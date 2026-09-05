@@ -420,11 +420,37 @@ import { compile } from "../src/index.js";
   assert.notEqual(nOut.list[0], nIn.list[0]);
   console.log('  "ignore": propagates into nested object skeletons ✓');
 
+  // The probe covers every own symbol, non-enumerable ones included (`Object.getOwnPropertySymbols`
+  // lists them all, and stock's rebuild drops them all): the default copies, "ignore" shares
+  const hidden = Symbol("hidden");
+  const withHidden = Object.defineProperty({ a: "x", b: 2 }, hidden, {
+    value: 1,
+    enumerable: false,
+  });
+  assert.ok(!(hidden in S.parse(withHidden)), "stock drops a non-enumerable undeclared symbol");
+  const hiddenOut = compile(S).parse(withHidden);
+  assert.notEqual(hiddenOut, withHidden);
+  assert.ok(!(hidden in hiddenOut));
+  assert.equal(I.parse(withHidden), withHidden);
+  console.log('  non-enumerable undeclared symbol: default copies, "ignore" shares ✓');
+
   // An unknown value is a programming error, reported at compile time
   assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), TypeError);
   assert.throws(() => compile(S, [] as never), TypeError);
   assert.throws(() => compile(S, null as never), TypeError);
   console.log("  unknown value, array or null options throw TypeError ✓");
+
+  // Only a plain object (Object.prototype or null prototype) is an options argument: a class
+  // instance, a Date or an object inheriting `ownSymbolKeys` from its prototype is rejected
+  class Opts {
+    ownSymbolKeys = "ignore" as const;
+  }
+  assert.throws(() => compile(S, new Opts()), TypeError);
+  assert.throws(() => compile(S, new Date() as never), TypeError);
+  assert.throws(() => compile(S, Object.create({ ownSymbolKeys: "ignore" })), TypeError);
+  const nullProto = Object.assign(Object.create(null), { ownSymbolKeys: "ignore" as const });
+  assert.ok(!compile(S, nullProto).code!.includes("getOwnPropertySymbols"));
+  console.log("  non-plain options object throws TypeError, null-prototype object accepted ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

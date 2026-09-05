@@ -10,8 +10,9 @@ export interface CompileOptions {
    * What a strip-mode object skeleton does about own symbol keys of the input (#43).
    *
    *   "probe"   (default) before returning the input by reference, prove that it carries no
-   *             undeclared own enumerable symbol key (`Object.getOwnPropertySymbols`), because
-   *             stock's rebuild drops such keys. Exact stock semantics; about 36 ns per object.
+   *             undeclared own symbol key (`Object.getOwnPropertySymbols`, which lists non-enumerable
+   *             ones too), because stock's rebuild drops such keys. Exact stock semantics; about
+   *             36 ns per object.
    *   "ignore"  skip that probe. An input whose declared keys are unchanged and which carries no
    *             undeclared string key is returned by reference even when it carries an own symbol
    *             key, which then survives where stock would drop it. For data known to carry no
@@ -31,10 +32,8 @@ const OWN_SYMBOL_KEYS = ["probe", "ignore"] as const;
 /** Fills in the defaults; an unknown value is a programming error and throws (compile-time, not at parse time) */
 export function resolveOptions(options: CompileOptions | undefined): CowOptions {
   if (options === undefined) return DEFAULT_OPTIONS;
-  if (typeof options !== "object" || options === null || Array.isArray(options)) {
-    throw new TypeError(
-      `compile options must be a plain object, got ${options === null ? "null" : Array.isArray(options) ? "an array" : typeof options}`,
-    );
+  if (!isPlainObject(options)) {
+    throw new TypeError(`compile options must be a plain object, got ${describe(options)}`);
   }
   const ownSymbolKeys = options.ownSymbolKeys ?? DEFAULT_OPTIONS.ownSymbolKeys;
   if (!OWN_SYMBOL_KEYS.includes(ownSymbolKeys)) {
@@ -43,4 +42,21 @@ export function resolveOptions(options: CompileOptions | undefined): CowOptions 
     );
   }
   return ownSymbolKeys === DEFAULT_OPTIONS.ownSymbolKeys ? DEFAULT_OPTIONS : { ownSymbolKeys };
+}
+
+/** A plain object: `Object.prototype` or a null prototype, so `ownSymbolKeys` can only be an own property */
+function isPlainObject(value: unknown): value is object {
+  if (typeof value !== "object" || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "an array";
+  if (typeof value !== "object") return typeof value;
+  const name = Object.getPrototypeOf(value)?.constructor?.name;
+  return typeof name === "string" && name !== "" && name !== "Object"
+    ? `an instance of ${name}`
+    : "an object whose prototype is neither Object.prototype nor null";
 }

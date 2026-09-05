@@ -51,12 +51,20 @@ export function compileCowFn(schema: Node, options: CowOptions): Fn {
   return buildFn(ctx);
 }
 
-/** Same as above, but returns [function, source] for a debug dump */
+/**
+ * Same as above, but also returns the source for a debug dump: the top-level skeleton first, then
+ * every nested container skeleton the tree built (each a separate `Function` build reaching its
+ * parent as a hoisted constant), in build order under a `// ── nested skeleton #n ──` header (#46).
+ * Skeletons that were built and then replaced by an official product are not part of the dump.
+ */
 export function compileCowDebug(schema: Node, options: CowOptions): { fn: Fn; code: string } {
   const ctx = new CodeCtx(options);
   const acc = emitNode(ctx, schema, "input", true, new Set());
   ctx.write(`return ${acc ?? "true"};`);
-  return { fn: buildFn(ctx), code: ctx.lines.join("\n") };
+  const fn = buildFn(ctx);
+  const top = ctx.sources.pop()!; // buildFn appended the top-level source last
+  const nested = ctx.sources.map((src, i) => `\n// ── nested skeleton #${i + 1} ──\n${src}`);
+  return { fn, code: top + nested.join("") };
 }
 
 export { INVALID };

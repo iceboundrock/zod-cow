@@ -769,4 +769,42 @@ import { compile } from "../src/index.js";
   console.log("  leaf-only union keeps the validator, parent shares ✓");
 }
 
+/* ── 15. `code` is the whole dump: the top-level skeleton followed by every nested skeleton it built (#46) ── */
+{
+  console.log("\n── nested skeleton dump (#46) ──");
+  const inner = z.object({ n: z.number() });
+  const S = z.object({
+    o: inner,
+    a: z.array(inner),
+    t: z.tuple([inner]),
+    r: z.record(z.string(), inner),
+    m: z.map(z.string(), inner),
+    s: z.set(inner),
+  });
+  const C = compile(S);
+  assert.ok(!C.stock);
+  // Each nested container builds its own skeleton, so the dump holds a header per nested skeleton
+  const headers = C.code!.match(/^\/\/ ── nested skeleton #\d+ ──$/gm) ?? [];
+  assert.ok(
+    headers.length >= 6,
+    `dump holds ${headers.length} nested skeletons, expected at least 6`,
+  );
+  // The top-level source comes first, before any nested header
+  assert.ok(C.code!.indexOf("nested skeleton #1") > C.code!.indexOf("return input;"));
+  // Every object skeleton in the dump probes by default; none does under "ignore", at any depth
+  const probes = (code: string) => code.split("getOwnPropertySymbols").length - 1;
+  assert.ok(
+    probes(C.code!) >= 7,
+    `default dump carries ${probes(C.code!)} probes, expected at least 7`,
+  );
+  const I = compile(S, { ownSymbolKeys: "ignore" });
+  assert.equal(probes(I.code!), 0);
+  assert.equal(headers.length, (I.code!.match(/^\/\/ ── nested skeleton #\d+ ──$/gm) ?? []).length);
+  // A schema whose only skeleton is the top-level one has no header at all
+  assert.ok(!compile(inner).code!.includes("nested skeleton"));
+  console.log(
+    `  dump holds ${headers.length} nested skeletons; ${probes(C.code!)} probes by default, 0 under "ignore" ✓`,
+  );
+}
+
 console.log("\nAll smoke assertions passed ✓");

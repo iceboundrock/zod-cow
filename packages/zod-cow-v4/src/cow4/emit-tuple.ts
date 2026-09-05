@@ -52,7 +52,7 @@ export function emitCoWTuple(
   }
 
   // The product for each fixed slot (generated once at compile time; key/element/value positions all go through childProduct)
-  const itemProducts = items.map((it) => childProduct(it, childSeen, ctx.options));
+  const itemProducts = items.map((it) => childProduct(it, childSeen, ctx));
 
   const out = ctx.var();
   const fillLen = ctx.var();
@@ -212,7 +212,7 @@ export function emitCoWTuple(
 
   /* Segment 3: rest [N, L) -- the official ungated per-slot write */
   if (rest) {
-    const restProduct = childProduct(rest, childSeen, ctx.options);
+    const restProduct = childProduct(rest, childSeen, ctx);
     const f = ctx.addConst(restProduct.fn);
     const isA = restProduct.kind === "async";
     if (isA) ctx.async = true;

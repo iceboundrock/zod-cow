@@ -79,7 +79,7 @@ Every field is optional. The defaults give exact stock semantics; `compile(schem
 | `schema` | `T` | The schema that was compiled. |
 | `stock` | `boolean` | `true` when this layer gave up on the whole tree and every call goes through stock zod (same results, no CoW benefit). |
 | `async` | `boolean` | `true` when the schema holds an async refine or transform; then only the `*Async` methods are usable, and the sync ones throw `$ZodAsyncError` exactly as stock does. |
-| `code` | `string \| null` | The generated CoW skeleton source, for debugging. `null` when `stock` is true. |
+| `code` | `string \| null` | The generated CoW skeleton source, for debugging: the top-level skeleton, followed by every nested container skeleton the tree built (each under a `// ── nested skeleton #n ──` header, in build order). `null` when `stock` is true. |
 
 ### What is supported
 

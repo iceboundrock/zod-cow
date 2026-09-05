@@ -110,7 +110,7 @@ export function emitCoWObject(
 
     if (cowSafeContainerForChild(child)) {
       // Container key (including optional/nullable wrapping): CoW sub-skeleton (nested CoW + strip semantics intact)
-      const vFn = containerChildFn(child, seen, ctx.options);
+      const vFn = containerChildFn(child, seen, ctx);
       const v = ctx.addConst(vFn);
       const isA = isAsyncProduct(vFn);
       if (isA) ctx.async = true;

@@ -16,11 +16,11 @@ import { cowSafeContainerForChild, isPure } from "./purity.js";
 /**
  * Two paths, decided at runtime per object:
  *
- *   clean   every key's product returned its input (or validated a pure leaf) and, in strip
- *           mode, the input carries no undeclared string key and (unless the tree was compiled
- *           with `ownSymbolKeys: "ignore"`, #43) no undeclared own symbol key: the container
- *           checks run on the input and the input reference is returned;
- *   copy    something changed (a value producer fired, a nested container was copied) or strip
+ *   clean   every key's product returned its input (or validated a pure leaf), in strip mode the
+ *           input carries no undeclared string key, and in every mode (unless the tree was
+ *           compiled with `ownSymbolKeys: "ignore"`, #43) no undeclared own symbol key: the
+ *           container checks run on the input and the input reference is returned;
+ *   copy    something changed (a value producer fired, a nested container was copied) or a probe
  *           found an undeclared key: the output is a fresh object assembled in shape order from
  *           the locals captured while validating, with the official presence rules
  *           (`dropsWhenAbsent` / `mayOutputUndefined`, copied from zod's generateObjectCheck), and
@@ -33,10 +33,12 @@ import { cowSafeContainerForChild, isPure } from "./purity.js";
  * known dirty: the probes only decide whether the input can be returned by reference.
  *
  * The own-symbol probe (`Object.getOwnPropertySymbols`, about 36 ns per object, the whole gap of
- * the clean path to the compiled parser) exists because stock's rebuild drops own symbol keys and
- * a pass-through has to prove there are none. `ownSymbolKeys: "ignore"` drops the probe: the
- * input is then returned by reference on the strength of the string probe alone, and an own symbol
- * key survives where stock would drop it, the behavior strict and loose objects already have (#42).
+ * the clean path to the compiled parser) exists because stock's rebuild drops own symbol keys in
+ * every mode (strict's for...in sees string keys only, so a symbol is never rejected either) and
+ * a pass-through has to prove there are none. It runs in all three modes (strip since #33, strict
+ * and loose since #42). `ownSymbolKeys: "ignore"` drops it: the input is then returned by
+ * reference on the strength of the string probe alone (strip) or of the key comparisons alone
+ * (strict, loose), and an undeclared own symbol key survives where stock would drop it.
  */
 export function emitCoWObject(
   ctx: CodeCtx,
@@ -174,36 +176,34 @@ export function emitCoWObject(
   const cName = checksFn ? ctx.addConst(checksFn) : null;
 
   // ═══ CoW core: the branch the official template does not have ═══
+  // Undeclared-key probes, only here: a copy assembled from the declared keys drops undeclared keys
+  // by construction, so the probes exist solely to prove that the input can be returned as is.
+  // Strip probes for undeclared string keys (shapes without a string key, symbol-only or empty,
+  // treat every string key as undeclared, #35); strict rejected them above and loose keeps them, so
+  // neither needs that probe. Every mode probes for undeclared own symbol keys (#42), which stock's
+  // rebuild drops on every path, unless the tree was compiled with `ownSymbolKeys: "ignore"` (#43).
+  const probeSymbols = ctx.options.ownSymbolKeys === "probe";
   ctx.write(`if (!${dirty}) {`);
   ctx.indented(() => {
-    if (mode === "strip") {
-      // Strip probes, only here: a copy assembled from the declared keys drops undeclared keys by
-      // construction, so the probes exist solely to prove that the input can be returned as is.
-      // Shapes without a string key (symbol-only or empty) treat every string key as undeclared (#35).
+    if (mode === "strip" || probeSymbols) {
       const extra = ctx.var();
       ctx.write(`let ${extra} = false;`);
-      ctx.write(`for (const k in ${accessor}) {`);
-      ctx.indented(() => {
-        ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
-      });
-      ctx.write(`}`);
-      if (ctx.options.ownSymbolKeys === "probe") {
-        ctx.write(`if (!${extra}) {`);
+      if (mode === "strip") {
+        ctx.write(`for (const k in ${accessor}) {`);
         ctx.indented(() => {
-          // Official strip discards every extra own symbol key (non-enumerable ones too), which a pass-through would keep → probe for them
-          const syms = ctx.var();
-          ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
-          if (symbolKeys.length === 0) {
-            ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
-          } else {
-            ctx.write(`for (const s of ${syms}) {`);
-            ctx.indented(() => {
-              ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
-            });
-            ctx.write(`}`);
-          }
+          ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
         });
         ctx.write(`}`);
+      }
+      if (probeSymbols) {
+        if (mode === "strip") {
+          // Only worth asking when the string probe found nothing
+          ctx.write(`if (!${extra}) {`);
+          ctx.indented(() => emitOwnSymbolProbe(ctx, accessor, extra, symbolKeys, knownSet));
+          ctx.write(`}`);
+        } else {
+          emitOwnSymbolProbe(ctx, accessor, extra, symbolKeys, knownSet);
+        }
       }
       ctx.write(`if (!${extra}) {`);
       ctx.indented(() => {
@@ -260,4 +260,30 @@ export function emitCoWObject(
   if (cName) ctx.write(`if (${cName}(out) === INVALID) return INVALID;`);
 
   return "out";
+}
+
+/**
+ * Emits the own-symbol probe: `extraVar` is set when the input carries an own symbol key the shape
+ * does not declare. `Object.getOwnPropertySymbols` lists non-enumerable symbols too, and stock's
+ * rebuild drops every one of them, so a pass-through has to prove there are none; it is the clean
+ * path's only allocation (one empty array per object, about 36 ns).
+ */
+function emitOwnSymbolProbe(
+  ctx: CodeCtx,
+  accessor: string,
+  extraVar: string,
+  symbolKeys: readonly symbol[],
+  knownSet: () => string,
+): void {
+  const syms = ctx.var();
+  ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
+  if (symbolKeys.length === 0) {
+    ctx.write(`if (${syms}.length !== 0) ${extraVar} = true;`);
+  } else {
+    ctx.write(`for (const s of ${syms}) {`);
+    ctx.indented(() => {
+      ctx.write(`if (!${knownSet()}.has(s)) { ${extraVar} = true; break; }`);
+    });
+    ctx.write(`}`);
+  }
 }

@@ -621,4 +621,95 @@ import { compile } from "../src/index.js";
   console.log("  a Proxy options object whose trap throws still gives TypeError ✓");
 }
 
+/* ── 13. ownSymbolKeys in strict and loose objects: the own-symbol probe runs in every mode (#42) ── */
+{
+  console.log("\n── ownSymbolKeys in strict and loose objects ──");
+  const sym = Symbol("undeclared");
+  const hidden = Symbol("hidden");
+  const shape = { a: z.string(), b: z.number().default(1) };
+  const modes = [
+    ["strict", z.strictObject(shape)],
+    ["loose", z.looseObject(shape)],
+  ] as const;
+  for (const [label, S] of modes) {
+    const clean = { a: "x", b: 2, [sym]: true };
+    assert.ok(!(sym in S.parse(clean)), `stock ${label} drops the undeclared symbol`);
+    // Default and explicit "probe": stock semantics, the undeclared own symbol forces a copy that
+    // drops it; the same input without the symbol is still returned by reference
+    for (const C of [compile(S), compile(S, { ownSymbolKeys: "probe" })]) {
+      assert.ok(!C.stock);
+      assert.ok(C.code!.includes("getOwnPropertySymbols"));
+      const out = C.parse(clean);
+      assert.notEqual(out, clean);
+      assert.ok(!(sym in out));
+      assert.deepEqual(out, S.parse(clean));
+      const plain = { a: "x", b: 2 };
+      assert.equal(C.parse(plain), plain);
+      // Non-enumerable undeclared symbols are dropped by stock too, so they force a copy as well
+      const withHidden = Object.defineProperty({ a: "x", b: 2 }, hidden, {
+        value: 1,
+        enumerable: false,
+      });
+      assert.ok(!(hidden in S.parse(withHidden)));
+      const hiddenOut = C.parse(withHidden);
+      assert.notEqual(hiddenOut, withHidden);
+      assert.ok(!(hidden in hiddenOut));
+    }
+    // "ignore": no probe in the generated code, the clean input keeps its symbol by reference
+    const I = compile(S, { ownSymbolKeys: "ignore" });
+    assert.ok(!I.stock);
+    assert.ok(!I.code!.includes("getOwnPropertySymbols"));
+    assert.equal(I.parse(clean), clean);
+    // The copy path drops the symbol under both settings, as it did before the probe
+    const defaulted = { a: "x", [sym]: true };
+    for (const C of [compile(S), I]) {
+      const copied = C.parse(defaulted);
+      assert.notEqual(copied, defaulted);
+      assert.deepEqual(copied, S.parse(defaulted));
+      assert.ok(!(sym in copied));
+    }
+    console.log(`  ${label}: default copies on an undeclared symbol, "ignore" shares ✓`);
+  }
+
+  // Strict still rejects an undeclared string key on every path (a symbol never counts as one)
+  const Strict = compile(z.strictObject(shape));
+  assert.equal(Strict.safeParse({ a: "x", b: 2, extra: 1 }).success, false);
+  assert.equal(Strict.safeParse({ a: "x", b: 2, extra: 1, [sym]: true }).success, false);
+  // Loose keeps an undeclared string key by reference when clean, and in the copy when the symbol
+  // forces one; the copy drops the symbol like stock
+  const LooseSchema = z.looseObject(shape);
+  const Loose = compile(LooseSchema);
+  const looseClean = { a: "x", b: 2, extra: 1 };
+  assert.equal(Loose.parse(looseClean), looseClean);
+  const looseIn = { a: "x", b: 2, extra: 1, [sym]: true };
+  const looseOut = Loose.parse(looseIn) as Record<string | symbol, unknown>;
+  assert.notEqual(looseOut, looseIn);
+  assert.deepEqual(looseOut, LooseSchema.parse(looseIn));
+  assert.ok("extra" in looseOut && !(sym in looseOut));
+  console.log("  strict rejects undeclared string keys, loose keeps them and drops the symbol ✓");
+
+  // A declared symbol key is known, not extra: the input is shared; an undeclared one next to it still copies
+  const declared = Symbol("declared");
+  const D = compile(z.strictObject({ a: z.string(), [declared]: z.number() }));
+  const dIn = { a: "x", [declared]: 1 };
+  assert.equal(D.parse(dIn), dIn);
+  const dExtra = { a: "x", [declared]: 1, [sym]: true };
+  const dOut = D.parse(dExtra) as Record<symbol, unknown>;
+  assert.notEqual(dOut, dExtra);
+  assert.equal(dOut[declared], 1);
+  assert.ok(!(sym in dOut));
+  console.log("  declared symbol keys are known keys in strict mode ✓");
+
+  // The probe reaches a nested loose object under a strip object, and "ignore" switches it off there too
+  const Nested = z.object({ inner: z.looseObject({ v: z.string() }) });
+  const nIn = { inner: { v: "x", [sym]: 1 } };
+  const nOut = compile(Nested).parse(nIn);
+  assert.notEqual(nOut, nIn);
+  assert.notEqual(nOut.inner, nIn.inner);
+  assert.ok(!(sym in nOut.inner));
+  assert.deepEqual(nOut, Nested.parse(nIn));
+  assert.equal(compile(Nested, { ownSymbolKeys: "ignore" }).parse(nIn), nIn);
+  console.log('  nested loose object: default copies, "ignore" shares ✓');
+}
+
 console.log("\nAll smoke assertions passed ✓");

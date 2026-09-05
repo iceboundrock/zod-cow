@@ -7,17 +7,18 @@
 /** Options accepted by `compile(schema, options)`. Every field is optional; the defaults give stock semantics. */
 export interface CompileOptions {
   /**
-   * What a strip-mode object skeleton does about own symbol keys of the input (#43).
+   * What an object skeleton, in every object mode (strip, strict, loose), does about own symbol
+   * keys of the input (#43, #42).
    *
    *   "probe"   (default) before returning the input by reference, prove that it carries no
    *             undeclared own symbol key (`Object.getOwnPropertySymbols`, which lists non-enumerable
-   *             ones too), because stock's rebuild drops such keys. Exact stock semantics; about
-   *             36 ns per object.
+   *             ones too), because stock's rebuild drops such keys in every mode. Exact stock
+   *             semantics; about 36 ns per object.
    *   "ignore"  skip that probe. An input whose declared keys are unchanged and which carries no
-   *             undeclared string key is returned by reference even when it carries an own symbol
-   *             key, which then survives where stock would drop it. For data known to carry no
-   *             symbol keys (JSON input, structured-clone output) the two modes give the same
-   *             result. Strict and loose objects never probe (#42); the copy path is unchanged.
+   *             undeclared string key that the mode would strip or reject is returned by reference
+   *             even when it carries an own symbol key, which then survives where stock would drop
+   *             it. For data known to carry no symbol keys (JSON input, structured-clone output)
+   *             the two modes give the same result. The copy path is unchanged.
    */
   ownSymbolKeys?: "probe" | "ignore";
 }

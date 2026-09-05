@@ -47,7 +47,7 @@ pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的�
 
 > 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
-> 的 [run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973)：GitHub 托管的 `ubuntu-latest` runner，node v24，`BENCH_N=50 000`，构建后的 `zod-cow-v4` 包，预热与计时都按候选顺序的完整轮换进行（每个候选至少 2 轮预热加 3 轮计时，向上取整到候选数的整数倍：五个候选时为 5 加 5 轮），取中位。
+> 的 [run 33948313612](https://github.com/iceboundrock/zod-cow/actions/runs/33948313612)：GitHub 托管的 `ubuntu-latest` runner，node v24，`BENCH_N=50 000`，构建后的 `zod-cow-v4` 包，预热与计时都按候选顺序的完整轮换进行（每个候选至少 2 轮预热加 3 轮计时，向上取整到候选数的整数倍：五个候选时为 5 加 5 轮），取中位。
 > 该 workflow 在手动触发（或每周）时先构建 `zod-cow-v4`，再跑 `bench-v4` 和 `bench-v3`，把表格打印到 job summary。
 > 在这个记录数下 runner 噪声有几毫秒，接近 1.0x 的比值（S1 对公开编译 API、对 ArkType）应视为持平。
 > 本地 `pnpm run bench:v4` 使用脚本默认的 50 万条记录。
@@ -108,63 +108,63 @@ zod3 线则靠探针对齐（`packages/zod-cow-v3/src/probe.ts` 在运行时实�
 
 ## 基准
 
-zod4 线，[Benchmarks workflow run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，构建后的 `zod-cow-v4` 包，预热与计时都按候选顺序的完整轮换进行（每个候选至少 2 轮预热加 3 轮计时，向上取整到候选数的整数倍：五个候选时为 5 加 5 轮），取中位（`pnpm run bench:v4`，`BENCH_N=50000`）。"z.compile()"指 Zod 4.5 的公开编译 API：parse 场景用 `z.compile(schema).safeParse`，纯校验场景用 `z.validate(compiled, data)`。"ArkType"指 arktype 2.2.3 的常规公开 API（parse 用直接调用 `Type(data)`，纯校验用 `.allows()`），schema 与 zod schema 约束逐项对齐；基准在计时前用合法与非法 fixture 检查这一等价性，ArkType 没有原生等价物的场景打印 `N/A` 并给出原因（见下文[跨库对比](#跨库对比)）。公开 API 背后的内部 `compileFn` / `assertOnly` 产物是工程对照，在该次运行的诊断表里与公开列对比，二者持平、没有系统性方向（S1 1.26x，S2 0.77x，S3 0.89x～1.03x，S8 1.07x），因此不再作为这里的一列。
+zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock/zod-cow/actions/runs/33948313612)：5 万账户，GitHub 托管 `ubuntu-latest` runner，node v24，`--expose-gc`，构建后的 `zod-cow-v4` 包，预热与计时都按候选顺序的完整轮换进行（每个候选至少 2 轮预热加 3 轮计时，向上取整到候选数的整数倍：五个候选时为 5 加 5 轮），取中位（`pnpm run bench:v4`，`BENCH_N=50000`）。"z.compile()"指 Zod 4.5 的公开编译 API：parse 场景用 `z.compile(schema).safeParse`，纯校验场景用 `z.validate(compiled, data)`。"ArkType"指 arktype 2.2.3 的常规公开 API（parse 用直接调用 `Type(data)`，纯校验用 `.allows()`），schema 与 zod schema 约束逐项对齐；基准在计时前用合法与非法 fixture 检查这一等价性，ArkType 没有原生等价物的场景打印 `N/A` 并给出原因（见下文[跨库对比](#跨库对比)）。公开 API 背后的内部 `compileFn` / `assertOnly` 产物是工程对照，在该次运行的诊断表里与公开列对比，二者持平（S1 1.00x，S2 1.01x，S3 1.02x～1.06x，S8 1.04x），因此不再作为这里的一列。这个记录数下 runner 噪声大于 S1 / S3 的差距：同一分支上同一套件的上一次运行（[33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973)，在被回退的 tuple 内联实验之前）每一列都低 5%～20%，S3 对 `z.compile()` 读作 1.13x～1.18x，而本次读作 0.88x～0.97x。
 
 批量场景（一次调用解析整个数据集）：
 
 | 场景 | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|
-| S1 干净输入 parse（无未声明键） | 57 ms | 20 ms | **22 ms** | 22 ms |
-| S1 分配压力 / gc 后驻留 | +17.9 MB / +11.6 MB | +11.0 MB / +10.8 MB | **+3.1 MB / 0.0 MB** | +5.4 MB / 0.0 MB |
-| S2 10% default 注入 | 60 ms | 25 ms | **25 ms** | 765 ms |
-| S2 分配压力 / 驻留 | +19.8 MB / +11.6 MB | +18.2 MB / +11.6 MB | **+4.1 MB / +1.0 MB** | +91.4 MB / +11.6 MB |
-| S3 扫描 0% / 25% / 50% / 100% 脏 | 58 / 60 / 58 / 59 ms | 28 / 28 / 28 / 29 ms | **25 / 24 / 24 / 25 ms** | 759 / 746 / 754 / 737 ms |
+| S1 干净输入 parse（无未声明键） | 68 ms | 23 ms | **24 ms** | 23 ms |
+| S1 分配压力 / gc 后驻留 | +18.0 MB / +11.6 MB | +11.0 MB / +10.8 MB | **+3.1 MB / 0.0 MB** | +5.4 MB / 0.0 MB |
+| S2 10% default 注入 | 69 ms | 23 ms | **25 ms** | 805 ms |
+| S2 分配压力 / 驻留 | +19.8 MB / +11.6 MB | +18.2 MB / +11.6 MB | **+4.1 MB / +1.0 MB** | +91.2 MB / +11.6 MB |
+| S3 扫描 0% / 25% / 50% / 100% 脏 | 68 / 69 / 70 / 70 ms | 23 / 23 / 23 / 24 ms | **23 / 25 / 26 / 25 ms** | 806 / 806 / 799 / 781 ms |
 | S3 gc 后驻留 | +11.6～+12.3 MB | +11.6 MB 恒定 | **0.0 / 2.0 / 3.6 / 6.9 MB** | +11.6 MB 恒定 |
-| S4 纯校验 | N/A（没有纯校验 API） | 19 ms（`z.validate`） | **20 ms**（`validate()`） | 23 ms（`.allows()`） |
-| S5 record / map / set | 76 ms | 49 ms | **26 ms** | N/A（`Map` / `Set` 只做 instanceof；非等价参考 8 ms） |
-| S5 分配压力 / 驻留 | +54.1 MB / +21.7 MB | +61.6 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | N/A |
-| S6 tuple | 37 ms | 14 ms | **4 ms** | 2 ms |
-| S6 分配压力 / 驻留 | +55.2 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | +0.0 MB / 0.0 MB |
-| S7 async transform（5 千条） | 13 ms（safeParseAsync） | N/A（`z.compile()` 把 async schema 原样返回，不编译） | **7 ms（safeParseAsync）** | N/A（没有原生 async morph） |
-| S7 分配压力 | +14.3 MB | N/A | **+9.0 MB** | N/A |
-| S8 strip 未声明键 parse 对齐 | 70 ms | 35 ms | **27 ms** | 1 025 ms（`onDeepUndeclaredKey("delete")`） |
-| S8 分配压力 / 驻留 | +28.3 MB / +11.6 MB | +11.4 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +158.0 MB / +66.6 MB |
-| S10 parse 失败，逐行 `safeParse`，1% / 10% / 50% / 100% 非法行 | 58 / 76 / 125 / 200 ms | 19 / 37 / 108 / 201 ms | **24 / 44 / 116 / 203 ms** | 29 / 82 / 253 / 390 ms |
+| S4 纯校验 | N/A（没有纯校验 API） | 17 ms（`z.validate`） | **18 ms**（`validate()`） | 23 ms（`.allows()`） |
+| S5 record / map / set | 81 ms | 41 ms | **30 ms** | N/A（`Map` / `Set` 只做 instanceof；非等价参考 10 ms） |
+| S5 分配压力 / 驻留 | +54.0 MB / +21.7 MB | +49.6 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | N/A |
+| S6 tuple | 43 ms | 14 ms | **5 ms** | 2 ms |
+| S6 分配压力 / 驻留 | +55.0 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | +0.0 MB / 0.0 MB |
+| S7 async transform（5 千条） | 12 ms（safeParseAsync） | N/A（`z.compile()` 把 async schema 原样返回，不编译） | **7 ms（safeParseAsync）** | N/A（没有原生 async morph） |
+| S7 分配压力 | +12.8 MB | N/A | **+9.0 MB** | N/A |
+| S8 strip 未声明键 parse 对齐 | 79 ms | 29 ms | **24 ms** | 1 092 ms（`onDeepUndeclaredKey("delete")`） |
+| S8 分配压力 / 驻留 | +28.2 MB / +11.6 MB | +11.2 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +157.5 MB / +66.6 MB |
+| S10 parse 失败，逐行 `safeParse`，1% / 10% / 50% / 100% 非法行 | 69 / 88 / 151 / 224 ms | 18 / 40 / 128 / 227 ms | **25 / 47 / 132 / 231 ms** | 30 / 91 / 287 / 426 ms |
 
 单记录热循环（同一个小输入，每轮 5 万次操作，取每次操作的中位纳秒数；用于和公开的单对象基准形状对照，不是产品工作负载）：
 
 | 场景 | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|
-| 校准 parse（6 字段原始类型对象） | 466 ns | 42 ns | **82 ns** | 58 ns |
-| 校准 validate（同一记录） | N/A | 11 ns（`z.validate`） | **10 ns**（`validate()`） | 18 ns（`.allows()`） |
-| S9 纯校验失败：首字段 / 末字段 / 嵌套 / email / tuple 槽 | N/A | 1 402 / 1 520 / 1 656 / 2 269 / 1 223 ns | **18 / 243 / 242 / 132 / 47 ns** | 268 / 8 / 22 / 206 / 46 ns |
-| S10 带错误信息的 parse 失败：首键 / 末键 / 嵌套 / refine | 3 322 / 3 316 / 3 492 / 3 270 ns | 3 300 / 3 426 / 3 572 / 3 439 ns | **3 261 / 3 440 / 3 466 / 3 612 ns** | 6 386 / 11 157 / 6 783 / 5 813 ns |
+| 校准 parse（6 字段原始类型对象） | 608 ns | 30 ns | **99 ns** | 65 ns |
+| 校准 validate（同一记录） | N/A | 12 ns（`z.validate`） | **11 ns**（`validate()`） | 19 ns（`.allows()`） |
+| S9 纯校验失败：首字段 / 末字段 / 嵌套 / email / tuple 槽 | N/A | 1 611 / 1 772 / 1 881 / 2 538 / 1 192 ns | **19 / 222 / 229 / 151 / 46 ns** | 267 / 18 / 34 / 218 / 50 ns |
+| S10 带错误信息的 parse 失败：首键 / 末键 / 嵌套 / refine | 3 780 / 3 646 / 3 993 / 3 609 ns | 3 716 / 3 815 / 4 066 / 3 847 ns | **3 643 / 3 743 / 3 682 / 4 043 ns** | 7 053 / 12 225 / 7 469 / 6 206 ns |
 
 对 zod-cow-v4 的比值（大于 1 表示对方耗时更长，即 zod-cow 更快；N/A 单元不计算）：
 
 | 场景 | stock / zod-cow | z.compile() / zod-cow | ArkType / zod-cow |
 |---|---|---|---|
-| S1 干净输入 parse | 2.57x | 0.93x | 1.00x |
-| S2 10% default | 2.38x | 0.99x | 30.16x |
-| S3 0% / 25% / 50% / 100% 脏 | 2.33x / 2.45x / 2.37x / 2.39x | 1.14x / 1.13x / 1.15x / 1.18x | 30.53x / 30.49x / 30.97x / 29.85x |
-| S4 纯校验 | n/a | 0.96x | 1.17x |
-| S5 record / map / set | 2.94x | 1.89x | n/a |
-| S6 tuple | 9.19x | 3.50x | 0.45x |
-| S7 async transform | 1.88x | n/a | n/a |
-| S8 strip 未声明键 parse 对齐 | 2.58x | 1.28x | 37.83x |
-| S10 parse 失败，1% / 10% / 50% / 100% 非法 | 2.45x / 1.72x / 1.08x / 0.99x | 0.79x / 0.84x / 0.93x / 0.99x | 1.23x / 1.87x / 2.19x / 1.93x |
-| 校准 parse / validate | 5.68x / n/a | 0.52x / 1.14x | 0.71x / 1.81x |
+| S1 干净输入 parse | 2.80x | 0.95x | 0.97x |
+| S2 10% default | 2.72x | 0.90x | 31.90x |
+| S3 0% / 25% / 50% / 100% 脏 | 2.88x / 2.78x / 2.64x / 2.80x | 0.97x / 0.94x / 0.88x / 0.97x | 34.42x / 32.34x / 30.27x / 31.26x |
+| S4 纯校验 | n/a | 0.93x | 1.25x |
+| S5 record / map / set | 2.75x | 1.39x | n/a |
+| S6 tuple | 8.04x | 2.62x | 0.40x |
+| S7 async transform | 1.55x | n/a | n/a |
+| S8 strip 未声明键 parse 对齐 | 3.35x | 1.22x | 46.28x |
+| S10 parse 失败，1% / 10% / 50% / 100% 非法 | 2.79x / 1.89x / 1.15x / 0.97x | 0.73x / 0.86x / 0.98x / 0.98x | 1.20x / 1.94x / 2.18x / 1.85x |
+| 校准 parse / validate | 6.11x / n/a | 0.31x / 1.13x | 0.65x / 1.75x |
 
 怎么读：
 
-- 对 stock：同步批量场景 2.3x～9.2x（S1 2.57x，S2 2.38x，S3 2.33x～2.45x，S5 2.94x，S6 9.19x，S8 2.58x），干净输入下 gc 后驻留的 12～22 MB 降到零。async（S7）在 5 千条上是 1.88x，这个规模下几毫秒的 runner 噪声占比很大。
-- 对公开编译 API：干净对象输入在 runner 噪声内持平（S1 0.93x，S2 0.99x：5 万条上差 0～2 ms），行变脏后领先（S3 1.13x～1.18x：拷贝路径像编译 parser 一样从捕获的局部变量拼出输出，脏行的代价与编译 parser 相同，周围的干净行则零代价），strip 输入上领先（S8 1.28x：拷贝按构造就丢掉未声明键，未动过的 `tags` 数组保持共享），容器场景领先（S5 1.89x，S6 3.50x），因为 stock 语义的整树重建是固定开销，CoW 只为真正变化的路径付费。小对象逐条 parse 落后（校准 parse 0.52x，S10 1% 非法 0.79x）：骨架每个对象的固定开销是 strip 模式的探测，见下文。
-- 对 ArkType：干净 parse 持平（S1 1.00x），纯校验领先（S4 1.17x，校准 validate 1.81x），tuple 落后（S6 0.45x，2 ms 对 4 ms：ArkType 预编译的检查直接返回输入、零分配，骨架每行还要付 strip 探测），单记录 parse 落后（0.71x）。S2/S3/S8 的差距（zod-cow 领先 30x～38x）是架构性的：任何 morph（包括键默认值和未声明键删除）都会让 ArkType 2.2.3 离开预编译的 `allows` 路径，走解释执行的遍历，先深拷贝整个输入再套用排队的 morph（S3 在 5 万条上分配 +90 MB，S8 +158 MB，每一行都重建），而 zod-cow 把 default 当普通叶子编译，只拷贝真正变化的行。S1 只是对干净 fixture 的公平比较：zod 默认的对象模式会 strip 未声明键，ArkType 按引用保留，所以 S8 才是两边做同样工作的场景。
-- 失败路径：`validate()` 只靠编译 validator 就回答 `null`（18～243 ns），公开的 `z.validate` 失败时回退到 runtime parser（1.2～2.3 µs），ArkType 的 `.allows()` 按自己的代价顺序检查键（便宜的 `active` 键失败时 8 ns，`id` 失败时 268 ns）。带错误信息时（S10）每条 zod 路径对每个非法记录都是 3.3～3.6 µs：两个编译变体的快路径只占构建 `ZodError` 的 runtime parse 的一小部分，所以它们的重复工作看不出来；失败的 refine 谓词在 `z.compile()`、zod-cow 和 ArkType 上都跑两次（成功 parse 时各跑一次）。混合数据集上 zod-cow 随非法比例从 2.45x（1%）滑到 0.99x（100%）对 stock。
-- validate 快路径：`validate()` 就是同一 array schema 的官方整树 `assertOnly` 产物，所以 S4 按构造与 `z.validate` 持平（20 ms 对 19 ms，0.96x）。它的价值是纯校验成本：20 ms / 50 000 = 每账户 400 ns，gc 后零驻留。
+- 对 stock：同步批量场景 2.6x～8.0x（S1 2.80x，S2 2.72x，S3 2.64x～2.88x，S5 2.75x，S6 8.04x，S8 3.35x），干净输入下 gc 后驻留的 12～22 MB 降到零。async（S7）在 5 千条上是 1.55x，这个规模下几毫秒的 runner 噪声占比很大。
+- 对公开编译 API：对象输入在任何脏比例下都在 runner 噪声内持平（S1 0.95x，S2 0.90x，S3 0.88x～0.97x：5 万条上差 0～3 ms；run 33945725973 里 S3 为 1.13x～1.18x）。拷贝路径像编译 parser 一样从捕获的局部变量拼出输出，脏行的代价与编译 parser 相同，周围的干净行则零代价；改动之前（run 33940596453）S3 100% 脏读作 0.70x。strip 输入上领先（S8 1.22x：拷贝按构造就丢掉未声明键，未动过的 `tags` 数组保持共享），容器场景领先（S5 1.39x，S6 2.62x），因为 stock 语义的整树重建是固定开销，CoW 只为真正变化的路径付费。小对象逐条 parse 落后（校准 parse 0.31x，S10 1% 非法 0.73x）：骨架每个对象的固定开销是 strip 模式的探测，见下文。
+- 对 ArkType：干净 parse 持平（S1 0.97x），纯校验领先（S4 1.25x，校准 validate 1.75x），tuple 落后（S6 0.40x，2 ms 对 5 ms：ArkType 预编译的检查直接返回输入、零分配，骨架每行还要付 strip 探测），单记录 parse 落后（0.65x）。S2/S3/S8 的差距（zod-cow 领先 30x～46x）是架构性的：任何 morph（包括键默认值和未声明键删除）都会让 ArkType 2.2.3 离开预编译的 `allows` 路径，走解释执行的遍历，先深拷贝整个输入再套用排队的 morph（S3 在 5 万条上分配 +90 MB，S8 +158 MB，每一行都重建），而 zod-cow 把 default 当普通叶子编译，只拷贝真正变化的行。S1 只是对干净 fixture 的公平比较：zod 默认的对象模式会 strip 未声明键，ArkType 按引用保留，所以 S8 才是两边做同样工作的场景。
+- 失败路径：`validate()` 只靠编译 validator 就回答 `null`（19～229 ns），公开的 `z.validate` 失败时回退到 runtime parser（1.2～2.5 µs），ArkType 的 `.allows()` 按自己的代价顺序检查键（便宜的 `active` 键失败时 18 ns，`id` 失败时 267 ns）。带错误信息时（S10）每条 zod 路径对每个非法记录都是 3.6～4.1 µs：两个编译变体的快路径只占构建 `ZodError` 的 runtime parse 的一小部分，所以它们的重复工作看不出来；失败的 refine 谓词在 `z.compile()`、zod-cow 和 ArkType 上都跑两次（成功 parse 时各跑一次）。混合数据集上 zod-cow 随非法比例从 2.79x（1%）滑到 0.97x（100%）对 stock。
+- validate 快路径：`validate()` 就是同一 array schema 的官方整树 `assertOnly` 产物，所以 S4 按构造与 `z.validate` 持平（18 ms 对 17 ms，0.93x）。它的价值是纯校验成本：18 ms / 50 000 = 每账户 360 ns，gc 后零驻留。
 - S1 的 +3.1 MB 是 strip 模式探测产生的短命分配：每个对象恰好一个空的自有 symbol 数组（32 字节），这里是 10 万个对象，用来证明该对象可以按原引用返回。这个探测（`Object.getOwnPropertySymbols`）也是骨架每个对象的固定开销：本地 Node 24 上对一个 6 字段记录测得骨架调用 65 ns，其中约 36 ns 是它，`for...in` 探测约 9 ns，叶子 validator 调用测不出开销，同一 schema 的编译 parser 是 24 ns。它保留下来，因为 stock 会丢弃自有 symbol 键，透传必须证明没有；面向 JSON 形状数据的可选模式是 #40 里跟踪的设计问题，不是基准设置。
 
-zod3 线在同一次运行里对 stock zod 3.24.1 是 4.2x～4.7x（S1 4.22x，S2 4.67x；stock zod3 仍付解释器税）。run 33940596453 与 33837195401 的被取代表格和更早的本地 50 万条表格（包括 v0.5 的 zod4 表、已删除的 v0.2 前端和 v0.3 的表）在 [CHANGELOG](CHANGELOG.md) 里。
+zod3 线在同一次运行里对 stock zod 3.24.1 是 4.3x～4.6x（S1 4.29x，S2 4.56x；stock zod3 仍付解释器税）。run 33940596453 与 33837195401 的被取代表格和更早的本地 50 万条表格（包括 v0.5 的 zod4 表、已删除的 v0.2 前端和 v0.3 的表）在 [CHANGELOG](CHANGELOG.md) 里。
 
 ### 跨库对比
 

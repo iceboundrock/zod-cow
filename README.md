@@ -45,7 +45,7 @@ Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200
 
 > The benchmark tables in this README and in `docs/` come from the
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml),
-> [run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973):
+> [run 33948313612](https://github.com/iceboundrock/zod-cow/actions/runs/33948313612):
 > a GitHub-hosted `ubuntu-latest` runner, node v24, `BENCH_N=50 000`, the built
 > `zod-cow-v4` package, warmup and timed rounds in complete rotations of the candidate order
 > (at least 2 warmup and 3 timed rounds per candidate, rounded up to a multiple of the
@@ -112,63 +112,63 @@ The full design, with generated code dumped side by side against the official pr
 
 ## Benchmarks
 
-zod4 line, [Benchmarks workflow run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, the built `zod-cow-v4` package, warmup and timed rounds in complete rotations of the candidate order (at least 2 warmup and 3 timed rounds per candidate, rounded up to a multiple of the candidate count: 5 plus 5 with five candidates), medians (`pnpm run bench:v4` with `BENCH_N=50000`). "z.compile()" is the public compiled API of Zod 4.5: `z.compile(schema).safeParse` in the parse scenarios and `z.validate(compiled, data)` in the validation-only ones. "ArkType" is arktype 2.2.3 through its normal public API (direct `Type(data)` for parsing, `.allows()` for validation only) on a schema built to the same constraints as the zod schema; the bench checks that equivalence with valid and invalid fixtures before timing and prints `N/A` with the reason where ArkType has no native equivalent (see [Cross-library comparison](#cross-library-comparison)). The internal `compileFn` / `assertOnly` product, the engineering control behind the public API, is measured in a diagnostic table of the run and reads level with the public column (no systematic direction at this record count: 1.26x on S1, 0.77x on S2, 0.89x to 1.03x across S3, 1.07x on S8), so it is no longer a column here.
+zod4 line, [Benchmarks workflow run 33948313612](https://github.com/iceboundrock/zod-cow/actions/runs/33948313612): 50 000 accounts, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, the built `zod-cow-v4` package, warmup and timed rounds in complete rotations of the candidate order (at least 2 warmup and 3 timed rounds per candidate, rounded up to a multiple of the candidate count: 5 plus 5 with five candidates), medians (`pnpm run bench:v4` with `BENCH_N=50000`). "z.compile()" is the public compiled API of Zod 4.5: `z.compile(schema).safeParse` in the parse scenarios and `z.validate(compiled, data)` in the validation-only ones. "ArkType" is arktype 2.2.3 through its normal public API (direct `Type(data)` for parsing, `.allows()` for validation only) on a schema built to the same constraints as the zod schema; the bench checks that equivalence with valid and invalid fixtures before timing and prints `N/A` with the reason where ArkType has no native equivalent (see [Cross-library comparison](#cross-library-comparison)). The internal `compileFn` / `assertOnly` product, the engineering control behind the public API, is measured in a diagnostic table of the run and reads level with the public column (1.00x on S1, 1.01x on S2, 1.02x to 1.06x across S3, 1.04x on S8), so it is no longer a column here. Runner noise at this record count is larger than the S1 / S3 gaps: the previous run of the same suite on the same branch ([33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973), before the reverted tuple-inlining experiment) read every column 5 to 20% lower and S3 at 1.13x to 1.18x against `z.compile()` where this run reads 0.88x to 0.97x.
 
 Batch scenarios (one call parses the whole dataset):
 
 | Scenario | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|
-| S1 clean-input parse (no undeclared keys) | 57 ms | 20 ms | **22 ms** | 22 ms |
-| S1 allocation pressure / retained after GC | +17.9 MB / +11.6 MB | +11.0 MB / +10.8 MB | **+3.1 MB / 0.0 MB** | +5.4 MB / 0.0 MB |
-| S2 10% default injection | 60 ms | 25 ms | **25 ms** | 765 ms |
-| S2 allocation pressure / retained | +19.8 MB / +11.6 MB | +18.2 MB / +11.6 MB | **+4.1 MB / +1.0 MB** | +91.4 MB / +11.6 MB |
-| S3 sweep, 0% / 25% / 50% / 100% dirty | 58 / 60 / 58 / 59 ms | 28 / 28 / 28 / 29 ms | **25 / 24 / 24 / 25 ms** | 759 / 746 / 754 / 737 ms |
+| S1 clean-input parse (no undeclared keys) | 68 ms | 23 ms | **24 ms** | 23 ms |
+| S1 allocation pressure / retained after GC | +18.0 MB / +11.6 MB | +11.0 MB / +10.8 MB | **+3.1 MB / 0.0 MB** | +5.4 MB / 0.0 MB |
+| S2 10% default injection | 69 ms | 23 ms | **25 ms** | 805 ms |
+| S2 allocation pressure / retained | +19.8 MB / +11.6 MB | +18.2 MB / +11.6 MB | **+4.1 MB / +1.0 MB** | +91.2 MB / +11.6 MB |
+| S3 sweep, 0% / 25% / 50% / 100% dirty | 68 / 69 / 70 / 70 ms | 23 / 23 / 23 / 24 ms | **23 / 25 / 26 / 25 ms** | 806 / 806 / 799 / 781 ms |
 | S3 retained after GC | +11.6 to +12.3 MB | +11.6 MB constant | **0.0 / 2.0 / 3.6 / 6.9 MB** | +11.6 MB constant |
-| S4 validation only | N/A (no validation-only API) | 19 ms (`z.validate`) | **20 ms** (`validate()`) | 23 ms (`.allows()`) |
-| S5 record / map / set | 76 ms | 49 ms | **26 ms** | N/A (`Map` / `Set` are instanceof-only; non-equivalent reference 8 ms) |
-| S5 allocation pressure / retained | +54.1 MB / +21.7 MB | +61.6 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | N/A |
-| S6 tuple | 37 ms | 14 ms | **4 ms** | 2 ms |
-| S6 allocation pressure / retained | +55.2 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | +0.0 MB / 0.0 MB |
-| S7 async transform (5 000 rows) | 13 ms (safeParseAsync) | N/A (`z.compile()` hands an async schema back uncompiled) | **7 ms (safeParseAsync)** | N/A (no native async morph) |
-| S7 allocation pressure | +14.3 MB | N/A | **+9.0 MB** | N/A |
-| S8 strip-unknown parse parity | 70 ms | 35 ms | **27 ms** | 1 025 ms (`onDeepUndeclaredKey("delete")`) |
-| S8 allocation pressure / retained | +28.3 MB / +11.6 MB | +11.4 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +158.0 MB / +66.6 MB |
-| S10 parse failures, per-row `safeParse`, 1% / 10% / 50% / 100% invalid rows | 58 / 76 / 125 / 200 ms | 19 / 37 / 108 / 201 ms | **24 / 44 / 116 / 203 ms** | 29 / 82 / 253 / 390 ms |
+| S4 validation only | N/A (no validation-only API) | 17 ms (`z.validate`) | **18 ms** (`validate()`) | 23 ms (`.allows()`) |
+| S5 record / map / set | 81 ms | 41 ms | **30 ms** | N/A (`Map` / `Set` are instanceof-only; non-equivalent reference 10 ms) |
+| S5 allocation pressure / retained | +54.0 MB / +21.7 MB | +49.6 MB / +21.7 MB | **+29.4 MB / 0.0 MB** | N/A |
+| S6 tuple | 43 ms | 14 ms | **5 ms** | 2 ms |
+| S6 allocation pressure / retained | +55.0 MB / +20.6 MB | +20.2 MB / +20.2 MB | **+1.5 MB / 0.0 MB** | +0.0 MB / 0.0 MB |
+| S7 async transform (5 000 rows) | 12 ms (safeParseAsync) | N/A (`z.compile()` hands an async schema back uncompiled) | **7 ms (safeParseAsync)** | N/A (no native async morph) |
+| S7 allocation pressure | +12.8 MB | N/A | **+9.0 MB** | N/A |
+| S8 strip-unknown parse parity | 79 ms | 29 ms | **24 ms** | 1 092 ms (`onDeepUndeclaredKey("delete")`) |
+| S8 allocation pressure / retained | +28.2 MB / +11.6 MB | +11.2 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +157.5 MB / +66.6 MB |
+| S10 parse failures, per-row `safeParse`, 1% / 10% / 50% / 100% invalid rows | 69 / 88 / 151 / 224 ms | 18 / 40 / 128 / 227 ms | **25 / 47 / 132 / 231 ms** | 30 / 91 / 287 / 426 ms |
 
 Single-record hot loops (one small input, 50 000 operations per timed round, median nanoseconds per operation; a calibration against the shape of public single-object benchmarks, not a product workload):
 
 | Scenario | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|
-| calibration parse (6-field primitive object) | 466 ns | 42 ns | **82 ns** | 58 ns |
-| calibration validate (same record) | N/A | 11 ns (`z.validate`) | **10 ns** (`validate()`) | 18 ns (`.allows()`) |
-| S9 validation-only failure: first field / last field / nested / email / tuple slot | N/A | 1 402 / 1 520 / 1 656 / 2 269 / 1 223 ns | **18 / 243 / 242 / 132 / 47 ns** | 268 / 8 / 22 / 206 / 46 ns |
-| S10 parse failure with errors: first key / last key / nested / refine | 3 322 / 3 316 / 3 492 / 3 270 ns | 3 300 / 3 426 / 3 572 / 3 439 ns | **3 261 / 3 440 / 3 466 / 3 612 ns** | 6 386 / 11 157 / 6 783 / 5 813 ns |
+| calibration parse (6-field primitive object) | 608 ns | 30 ns | **99 ns** | 65 ns |
+| calibration validate (same record) | N/A | 12 ns (`z.validate`) | **11 ns** (`validate()`) | 19 ns (`.allows()`) |
+| S9 validation-only failure: first field / last field / nested / email / tuple slot | N/A | 1 611 / 1 772 / 1 881 / 2 538 / 1 192 ns | **19 / 222 / 229 / 151 / 46 ns** | 267 / 18 / 34 / 218 / 50 ns |
+| S10 parse failure with errors: first key / last key / nested / refine | 3 780 / 3 646 / 3 993 / 3 609 ns | 3 716 / 3 815 / 4 066 / 3 847 ns | **3 643 / 3 743 / 3 682 / 4 043 ns** | 7 053 / 12 225 / 7 469 / 6 206 ns |
 
 Ratios against zod-cow-v4 (a value above 1 means the other implementation took longer, so zod-cow was faster; not computed for N/A cells):
 
 | Scenario | stock / zod-cow | z.compile() / zod-cow | ArkType / zod-cow |
 |---|---|---|---|
-| S1 clean-input parse | 2.57x | 0.93x | 1.00x |
-| S2 10% default | 2.38x | 0.99x | 30.16x |
-| S3 0% / 25% / 50% / 100% dirty | 2.33x / 2.45x / 2.37x / 2.39x | 1.14x / 1.13x / 1.15x / 1.18x | 30.53x / 30.49x / 30.97x / 29.85x |
-| S4 validation only | n/a | 0.96x | 1.17x |
-| S5 record / map / set | 2.94x | 1.89x | n/a |
-| S6 tuple | 9.19x | 3.50x | 0.45x |
-| S7 async transform | 1.88x | n/a | n/a |
-| S8 strip-unknown parse parity | 2.58x | 1.28x | 37.83x |
-| S10 parse failures, 1% / 10% / 50% / 100% invalid | 2.45x / 1.72x / 1.08x / 0.99x | 0.79x / 0.84x / 0.93x / 0.99x | 1.23x / 1.87x / 2.19x / 1.93x |
-| calibration parse / validate | 5.68x / n/a | 0.52x / 1.14x | 0.71x / 1.81x |
+| S1 clean-input parse | 2.80x | 0.95x | 0.97x |
+| S2 10% default | 2.72x | 0.90x | 31.90x |
+| S3 0% / 25% / 50% / 100% dirty | 2.88x / 2.78x / 2.64x / 2.80x | 0.97x / 0.94x / 0.88x / 0.97x | 34.42x / 32.34x / 30.27x / 31.26x |
+| S4 validation only | n/a | 0.93x | 1.25x |
+| S5 record / map / set | 2.75x | 1.39x | n/a |
+| S6 tuple | 8.04x | 2.62x | 0.40x |
+| S7 async transform | 1.55x | n/a | n/a |
+| S8 strip-unknown parse parity | 3.35x | 1.22x | 46.28x |
+| S10 parse failures, 1% / 10% / 50% / 100% invalid | 2.79x / 1.89x / 1.15x / 0.97x | 0.73x / 0.86x / 0.98x / 0.98x | 1.20x / 1.94x / 2.18x / 1.85x |
+| calibration parse / validate | 6.11x / n/a | 0.31x / 1.13x | 0.65x / 1.75x |
 
 How to read it:
 
-- Against stock: 2.3x to 9.2x on the sync batch scenarios (S1 2.57x, S2 2.38x, S3 2.33x to 2.45x, S5 2.94x, S6 9.19x, S8 2.58x), and the 12 to 22 MB retained after GC drops to zero on clean input. Async (S7) is 1.88x at 5 000 rows, where a few milliseconds of runner noise weigh heavily.
-- Against the public compiled API: level on clean object input within runner noise (S1 0.93x, S2 0.99x: 0 to 2 ms at 50 000 rows), ahead once rows are dirty (S3 1.13x to 1.18x: the copy path assembles the output from the captured locals exactly as the compiled parser does, so a dirty row costs the same literal, while the clean rows around it cost nothing) and on strip input (S8 1.28x: the copy drops undeclared keys by construction and shares the untouched `tags` arrays), and ahead on the container scenarios (S5 1.89x, S6 3.50x), where the whole-tree rebuild of stock semantics is a fixed cost and CoW pays only for the paths that changed. Behind on per-row parses of small objects (calibration parse 0.52x, S10 1% invalid 0.79x): the per-object cost of the skeleton is the strip-mode probes, see below.
-- Against ArkType: level on the clean parse (S1 1.00x), ahead on validation-only (S4 1.17x, calibration validate 1.81x), behind on tuples (S6 0.45x, 2 ms against 4 ms: ArkType's precompiled check returns the input and allocates nothing, while the skeleton pays the strip probes per row) and on the single-record parse (0.71x). The S2/S3/S8 gap (30x to 38x in zod-cow's favor) is architectural: any morph, a key default or an undeclared-key deletion included, moves ArkType 2.2.3 off its precompiled `allows` path onto an interpreted traversal that deep-clones the whole input before applying the queued morphs (+90 MB allocated at 50 000 rows in S3, +158 MB in S8, every row rebuilt), whereas zod-cow compiles the default like every other leaf and copies only the rows that changed. S1 is a fair comparison of the clean fixture only: zod's default object mode strips undeclared keys and ArkType's keeps them by reference, so S8 is the scenario where both do the same work.
-- Failure paths: `validate()` answers `null` from the compiled validator alone (18 to 243 ns), while the public `z.validate` falls back to the runtime parser on failure (1.2 to 2.3 µs) and ArkType's `.allows()` checks keys in its own cost order (8 ns when the cheap `active` key fails, 268 ns when `id` does). With detailed errors (S10) every zod path costs the same 3.3 to 3.6 µs per invalid record: the fast path of both compiled variants is a small fraction of the runtime parse that builds the `ZodError`, so their double work is not visible; a failing refine predicate runs twice for `z.compile()`, zod-cow and ArkType (once per successful parse everywhere). On mixed datasets zod-cow follows the invalid share from 2.45x (1%) to 0.99x (100%) against stock.
-- validate fast path: `validate()` is the official whole-tree `assertOnly` product of the same array schema, so S4 reads level with `z.validate` by construction (20 ms against 19 ms, 0.96x). Its value is the validation-only cost: 20 ms / 50 000 = 400 ns per account, with nothing retained after GC.
+- Against stock: 2.6x to 8.0x on the sync batch scenarios (S1 2.80x, S2 2.72x, S3 2.64x to 2.88x, S5 2.75x, S6 8.04x, S8 3.35x), and the 12 to 22 MB retained after GC drops to zero on clean input. Async (S7) is 1.55x at 5 000 rows, where a few milliseconds of runner noise weigh heavily.
+- Against the public compiled API: level on object input within runner noise at every dirty share (S1 0.95x, S2 0.90x, S3 0.88x to 0.97x: 0 to 3 ms at 50 000 rows, and 1.13x to 1.18x for S3 in run 33945725973). The copy path assembles the output from the captured locals exactly as the compiled parser does, so a dirty row costs the same literal while the clean rows around it cost nothing; before that change (run 33940596453) S3 read 0.70x at 100% dirty. Ahead on strip input (S8 1.22x: the copy drops undeclared keys by construction and shares the untouched `tags` arrays) and on the container scenarios (S5 1.39x, S6 2.62x), where the whole-tree rebuild of stock semantics is a fixed cost and CoW pays only for the paths that changed. Behind on per-row parses of small objects (calibration parse 0.31x, S10 1% invalid 0.73x): the per-object cost of the skeleton is the strip-mode probes, see below.
+- Against ArkType: level on the clean parse (S1 0.97x), ahead on validation-only (S4 1.25x, calibration validate 1.75x), behind on tuples (S6 0.40x, 2 ms against 5 ms: ArkType's precompiled check returns the input and allocates nothing, while the skeleton pays the strip probes per row) and on the single-record parse (0.65x). The S2/S3/S8 gap (30x to 46x in zod-cow's favor) is architectural: any morph, a key default or an undeclared-key deletion included, moves ArkType 2.2.3 off its precompiled `allows` path onto an interpreted traversal that deep-clones the whole input before applying the queued morphs (+90 MB allocated at 50 000 rows in S3, +158 MB in S8, every row rebuilt), whereas zod-cow compiles the default like every other leaf and copies only the rows that changed. S1 is a fair comparison of the clean fixture only: zod's default object mode strips undeclared keys and ArkType's keeps them by reference, so S8 is the scenario where both do the same work.
+- Failure paths: `validate()` answers `null` from the compiled validator alone (19 to 229 ns), while the public `z.validate` falls back to the runtime parser on failure (1.2 to 2.5 µs) and ArkType's `.allows()` checks keys in its own cost order (18 ns when the cheap `active` key fails, 267 ns when `id` does). With detailed errors (S10) every zod path costs the same 3.6 to 4.1 µs per invalid record: the fast path of both compiled variants is a small fraction of the runtime parse that builds the `ZodError`, so their double work is not visible; a failing refine predicate runs twice for `z.compile()`, zod-cow and ArkType (once per successful parse everywhere). On mixed datasets zod-cow follows the invalid share from 2.79x (1%) to 0.97x (100%) against stock.
+- validate fast path: `validate()` is the official whole-tree `assertOnly` product of the same array schema, so S4 reads level with `z.validate` by construction (18 ms against 17 ms, 0.93x). Its value is the validation-only cost: 18 ms / 50 000 = 360 ns per account, with nothing retained after GC.
 - The +3.1 MB in S1 is short-lived allocation from the strip-mode probe: exactly one empty own-symbol array (32 bytes) per object, 100 000 objects here, read to prove that the object can be returned by reference. That probe (`Object.getOwnPropertySymbols`) is also the skeleton's per-object cost: about 36 ns of a 65 ns skeleton call on a 6-field record measured locally on Node 24, next to about 9 ns for the `for...in` probe and nothing measurable for the leaf validator calls, against 24 ns for the compiled parser of the same schema. It stays because stock drops own symbol keys and a pass-through has to prove there are none; an opt-in mode for JSON-shaped data is a design question tracked in #40, not a benchmark setting.
 
-The zod3 line measured 4.2x to 4.7x against stock zod 3.24.1 in the same run (S1 4.22x, S2 4.67x; stock zod3 still pays the interpreter tax). The superseded tables from runs 33940596453 and 33837195401 and the earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
+The zod3 line measured 4.3x to 4.6x against stock zod 3.24.1 in the same run (S1 4.29x, S2 4.56x; stock zod3 still pays the interpreter tax). The superseded tables from runs 33940596453 and 33837195401 and the earlier local 500 000-record tables, including the v0.5 zod4 table and those of the removed v0.2 front-end and of v0.3, are in the [CHANGELOG](CHANGELOG.md).
 
 ### Cross-library comparison
 

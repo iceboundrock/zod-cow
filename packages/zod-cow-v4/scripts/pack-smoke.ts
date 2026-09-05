@@ -164,6 +164,12 @@ try {
   assert.equal(r.success, false);
   assert.ok(r.error instanceof z.ZodError, "the failure path must yield the consumer's ZodError");
   assert.equal(pkg.name, "zod-cow-v4", "./package.json export must resolve");
+  const sym = Symbol("undeclared");
+  const withSymbol = { id: 3, name: "Cy", role: "admin", address: { city: "LAX" }, [sym]: 1 };
+  assert.notEqual(fast.parse(withSymbol), withSymbol, "the default probe must copy on an own symbol key");
+  const lax = compile(User, { ownSymbolKeys: "ignore" });
+  assert.equal(lax.parse(withSymbol), withSymbol, 'ownSymbolKeys: "ignore" must return the input by reference');
+  assert.throws(() => compile(User, { ownSymbolKeys: "drop" }), TypeError, "an unknown option value must throw");
   `;
   writeFileSync(
     join(consumer, "esm.mjs"),
@@ -192,7 +198,7 @@ console.log("cjs ok");
   const esmOut = run(process.execPath, ["esm.mjs"], consumer).trim();
   if (esmOut !== "esm ok") fail(`esm run printed ${esmOut}`);
   ok(
-    'import("zod-cow-v4"): CoW parse, validate, ZodError, ./package.json export, deep import refused',
+    'import("zod-cow-v4"): CoW parse, validate, ZodError, ownSymbolKeys option, ./package.json export, deep import refused',
   );
   const cjsOut = run(process.execPath, ["cjs.cjs"], consumer).trim();
   if (cjsOut !== "cjs ok") fail(`cjs run printed ${cjsOut}`);
@@ -209,20 +215,24 @@ const name: string | undefined = out.name;
 const wrong: string = out.id;
 const validated: unknown = fast.validate({ id: 1 });
 const code: string | null = fast.code;
+const options: CompileOptions = { ownSymbolKeys: "ignore" };
+const lax: Compiled<typeof User> = compile(User, options);
+// @ts-expect-error "drop" is not a value of ownSymbolKeys
+const wrongOption: CompileOptions = { ownSymbolKeys: "drop" };
 const safe = fast.safeParse({ id: 1 });
 if (!safe.success) {
   const issues: number = safe.error.issues.length;
   void issues;
 }
-void [id, name, wrong, validated, code];
+void [id, name, wrong, validated, code, lax, wrongOption];
 `;
   writeFileSync(
     join(consumer, "types.mts"),
-    `import { z } from "zod";\nimport { compile, type Compiled } from "zod-cow-v4";\n${typeBody}`,
+    `import { z } from "zod";\nimport { compile, type Compiled, type CompileOptions } from "zod-cow-v4";\n${typeBody}`,
   );
   writeFileSync(
     join(consumer, "types.cts"),
-    `import { z } from "zod";\nimport { compile, type Compiled } from "zod-cow-v4";\n${typeBody}`,
+    `import { z } from "zod";\nimport { compile, type Compiled, type CompileOptions } from "zod-cow-v4";\n${typeBody}`,
   );
   writeFileSync(
     join(consumer, "tsconfig.json"),

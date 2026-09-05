@@ -4,10 +4,18 @@
  *   1. success/failure parity  2. deepStrictEqual output  3. zero input distortion
  * Also reports top-level reference-sharing rate (CoW hit rate) and stock degradation rate.
  * Failures print seed/case for replay (REPRO=seed:case).
+ *
+ * Two passes over the same seeds (#43):
+ *   1. default options: the generator emits every input, extra own symbol keys included;
+ *   2. `ownSymbolKeys: "ignore"`: the generator draws the same random numbers but never emits the
+ *      extra own symbol (the one input the option is documented to treat differently from stock),
+ *      so every case is the same schema and the same input minus that symbol; the pass also checks
+ *      that no generated top-level code carries the own-symbol probe. Its sharing rate is expected
+ *      at or above the first pass (the inputs that carried the symbol are clean now).
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
-import { compile } from "../src/index.js";
+import { compile, type CompileOptions } from "../src/index.js";
 
 interface RNG {
   next(): number;
@@ -291,6 +299,8 @@ function bWrap(rng: RNG, inner: Built): Built {
 /** Declared symbol key shared by every object schema that rolls one; the extra own symbol the strip-mode input may carry */
 const DECLARED_SYMBOL = Symbol("declared");
 const EXTRA_SYMBOL = Symbol("extra");
+/** Pass switch: the "ignore" pass keeps the RNG stream and drops only the emission of EXTRA_SYMBOL */
+let emitExtraSymbol = true;
 
 function bObject(rng: RNG, depth: number): Built {
   // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to 17
@@ -346,7 +356,7 @@ function bObject(rng: RNG, depth: number): Built {
       // Extra own symbol, strip mode only: strict and loose do not probe own symbols, so a clean
       // input keeps its symbol by reference where stock's rebuild drops it (a copy made by the
       // skeleton drops it like stock); both listed under known limitations
-      if (modeRoll >= 2 && r.chance(0.1)) out[EXTRA_SYMBOL] = true;
+      if (modeRoll >= 2 && r.chance(0.1) && emitExtraSymbol) out[EXTRA_SYMBOL] = true;
       return out;
     },
   };
@@ -539,117 +549,143 @@ function bAny(rng: RNG, depth: number): Built {
 const SEEDS = Number(process.env.SEEDS ?? 200);
 const CASES_PER_SEED = Number(process.env.CASES ?? 100);
 const REPRO = process.env.REPRO ?? null;
-let total = 0;
-let bothOk = 0;
-let bothFail = 0;
-let refShared = 0;
-let stockDowngraded = 0;
-const failures: string[] = [];
 
-for (let seed = 1; seed <= SEEDS; seed++) {
-  const rng = makeRng(seed);
-  for (let i = 0; i < CASES_PER_SEED; i++) {
-    const built = bAny(rng, 3);
-    let input = built.gen(rng);
-    if (input === ABSENT) input = undefined;
-    if (REPRO && `${seed}:${i}` !== REPRO) continue;
-    const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
-    total++;
+interface PassStats {
+  label: string;
+  total: number;
+  bothOk: number;
+  bothFail: number;
+  refShared: number;
+  stockDowngraded: number;
+  failures: string[];
+}
 
-    const compiled = compile(built.schema);
-    if (compiled.stock) stockDowngraded++;
-    const useAsync = compiled.async; // async skeleton → both sides go through safeParseAsync
+async function runPass(
+  label: string,
+  compileOptions: CompileOptions | undefined,
+  withExtraSymbol: boolean,
+): Promise<PassStats> {
+  emitExtraSymbol = withExtraSymbol;
+  let total = 0;
+  let bothOk = 0;
+  let bothFail = 0;
+  let refShared = 0;
+  let stockDowngraded = 0;
+  const failures: string[] = [];
 
-    if (REPRO) {
-      console.log("=== REPRO ===");
-      console.log("desc:", built.desc);
-      console.log("input:", repr(input));
-      console.log("stock:", compiled.stock, "async:", compiled.async);
-      console.log(
-        `cow code:\n${(compiled.code ?? "(stock)")
-          .split("\n")
-          .map((l) => `  ${l}`)
-          .join("\n")}`,
-      );
-    }
+  for (let seed = 1; seed <= SEEDS; seed++) {
+    const rng = makeRng(seed);
+    for (let i = 0; i < CASES_PER_SEED; i++) {
+      const built = bAny(rng, 3);
+      let input = built.gen(rng);
+      if (input === ABSENT) input = undefined;
+      if (REPRO && `${seed}:${i}` !== REPRO) continue;
+      const caseId = `[${label}] seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
+      total++;
 
-    const snapshot = snapshotInput(input);
+      const compiled = compile(built.schema, compileOptions);
+      if (compiled.stock) stockDowngraded++;
+      if (
+        compileOptions?.ownSymbolKeys === "ignore" &&
+        compiled.code?.includes("getOwnPropertySymbols")
+      ) {
+        failures.push(`OWN-SYMBOL PROBE EMITTED UNDER ownSymbolKeys: "ignore" → ${caseId}`);
+        continue;
+      }
+      const useAsync = compiled.async; // async skeleton → both sides go through safeParseAsync
 
-    let stock: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
-    let stockThrew: Error | null = null;
-    try {
-      const rp = useAsync
-        ? (
-            built.schema as unknown as { safeParseAsync: (d: unknown) => Promise<never> }
-          ).safeParseAsync(input)
-        : built.schema.safeParse(input as never);
-      const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
-      stock = r.success
-        ? { success: true, data: r.data }
-        : { success: false, error: r.error as never };
-    } catch (e) {
-      stockThrew = e as Error;
-    }
-
-    let ours: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
-    let oursThrew: Error | null = null;
-    try {
-      const rp = useAsync ? compiled.safeParseAsync(input) : compiled.safeParse(input);
-      const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
-      ours = r.success
-        ? { success: true, data: r.data }
-        : { success: false, error: r.error as never };
-    } catch (e) {
-      oursThrew = e as Error;
-    }
-
-    if (!assertDeepEqual(input, snapshot)) {
-      failures.push(`INPUT MUTATED → ${caseId}`);
-      continue;
-    }
-
-    if (stockThrew !== null || oursThrew !== null) {
-      if ((stockThrew === null) !== (oursThrew === null)) {
-        failures.push(
-          `THROW MISMATCH (stock=${stockThrew?.message} ours=${oursThrew?.message}) → ${caseId}`,
+      if (REPRO) {
+        console.log("=== REPRO ===");
+        console.log("desc:", built.desc);
+        console.log("input:", repr(input));
+        console.log("stock:", compiled.stock, "async:", compiled.async);
+        console.log(
+          `cow code:\n${(compiled.code ?? "(stock)")
+            .split("\n")
+            .map((l) => `  ${l}`)
+            .join("\n")}`,
         );
       }
-      continue;
-    }
 
-    if (stock!.success !== ours!.success) {
-      failures.push(
-        `SUCCESS MISMATCH stock=${stock!.success} ours=${ours!.success}\n      ${caseId}` +
-          (ours!.success
-            ? `\n      stock issues: ${JSON.stringify((stock!.error as any)?.issues?.slice(0, 3))}`
-            : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(
-                compiled.code ?? "(stock)"
-              )
-                .split("\n")
-                .map((l) => `        ${l}`)
-                .join("\n")}`),
-      );
-      continue;
-    }
+      const snapshot = snapshotInput(input);
 
-    if (stock!.success) {
-      bothOk++;
-      if (!assertDeepEqual(ours!.data, stock!.data)) {
+      let stock: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
+      let stockThrew: Error | null = null;
+      try {
+        const rp = useAsync
+          ? (
+              built.schema as unknown as { safeParseAsync: (d: unknown) => Promise<never> }
+            ).safeParseAsync(input)
+          : built.schema.safeParse(input as never);
+        const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
+        stock = r.success
+          ? { success: true, data: r.data }
+          : { success: false, error: r.error as never };
+      } catch (e) {
+        stockThrew = e as Error;
+      }
+
+      let ours: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
+      let oursThrew: Error | null = null;
+      try {
+        const rp = useAsync ? compiled.safeParseAsync(input) : compiled.safeParse(input);
+        const r = (await rp) as { success: boolean; data?: unknown; error?: { issues: unknown[] } };
+        ours = r.success
+          ? { success: true, data: r.data }
+          : { success: false, error: r.error as never };
+      } catch (e) {
+        oursThrew = e as Error;
+      }
+
+      if (!assertDeepEqual(input, snapshot)) {
+        failures.push(`INPUT MUTATED → ${caseId}`);
+        continue;
+      }
+
+      if (stockThrew !== null || oursThrew !== null) {
+        if ((stockThrew === null) !== (oursThrew === null)) {
+          failures.push(
+            `THROW MISMATCH (stock=${stockThrew?.message} ours=${oursThrew?.message}) → ${caseId}`,
+          );
+        }
+        continue;
+      }
+
+      if (stock!.success !== ours!.success) {
         failures.push(
-          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(
-            compiled.code ?? "(stock)"
-          )
-            .split("\n")
-            .map((l) => `        ${l}`)
-            .join("\n")}`,
+          `SUCCESS MISMATCH stock=${stock!.success} ours=${ours!.success}\n      ${caseId}` +
+            (ours!.success
+              ? `\n      stock issues: ${JSON.stringify((stock!.error as any)?.issues?.slice(0, 3))}`
+              : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}\n      cow code:\n${(
+                  compiled.code ?? "(stock)"
+                )
+                  .split("\n")
+                  .map((l) => `        ${l}`)
+                  .join("\n")}`),
         );
         continue;
       }
-      if (ours!.data === input) refShared++;
-    } else {
-      bothFail++;
+
+      if (stock!.success) {
+        bothOk++;
+        if (!assertDeepEqual(ours!.data, stock!.data)) {
+          failures.push(
+            `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(
+              compiled.code ?? "(stock)"
+            )
+              .split("\n")
+              .map((l) => `        ${l}`)
+              .join("\n")}`,
+          );
+          continue;
+        }
+        if (ours!.data === input) refShared++;
+      } else {
+        bothFail++;
+      }
     }
   }
+  return { label, total, bothOk, bothFail, refShared, stockDowngraded, failures };
 }
 
 function defRepr(schema: any, depth = 0): string {
@@ -679,17 +715,43 @@ function defRepr(schema: any, depth = 0): string {
   }
 }
 
-/* ─────────────────────────── report ─────────────────────────── */
+/* ─────────────────────────── run + report ─────────────────────────── */
 
-console.log(`zc-z4 differential test: ${total} cases (seeds=${SEEDS} × ${CASES_PER_SEED})`);
+const passes = [
+  await runPass("default options", undefined, true),
+  await runPass(
+    'ownSymbolKeys: "ignore", no extra own symbol in the inputs',
+    { ownSymbolKeys: "ignore" },
+    false,
+  ),
+];
+
 console.log(
-  `  success-consistent: ${bothOk}   failure-consistent: ${bothFail}   top-level reference sharing: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}% (${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}% among successful cases)`,
+  `zc-z4 differential test: ${passes[0]!.total} cases (seeds=${SEEDS} × ${CASES_PER_SEED}) × ${passes.length} passes`,
 );
-console.log(`  stock degradations (compile gave up): ${stockDowngraded}`);
-if (failures.length > 0) {
-  console.log(`\n✗ ${failures.length} differences (first 10):`);
-  for (const f of failures.slice(0, 10)) console.log(`\n${f}`);
+let failed = 0;
+for (const p of passes) {
+  const { total, bothOk, bothFail, refShared, stockDowngraded, failures } = p;
+  console.log(`  pass: ${p.label}`);
+  console.log(
+    `    success-consistent: ${bothOk}   failure-consistent: ${bothFail}   top-level reference sharing: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}% (${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}% among successful cases)`,
+  );
+  console.log(`    stock degradations (compile gave up): ${stockDowngraded}`);
+  if (failures.length > 0) {
+    failed += failures.length;
+    console.log(`\n✗ ${failures.length} differences in pass "${p.label}" (first 10):`);
+    for (const f of failures.slice(0, 10)) console.log(`\n${f}`);
+  }
+}
+const [base, ignore] = passes as [PassStats, PassStats];
+if (ignore.refShared < base.refShared) {
+  failed++;
+  console.log(
+    `\n✗ the "ignore" pass shared fewer top-level references (${ignore.refShared}) than the default pass (${base.refShared}); the option must not lose a CoW path`,
+  );
+}
+if (failed > 0) {
   process.exit(1);
 } else {
-  console.log("  all cases agree with stock zod4 ✓");
+  console.log("  all cases of every pass agree with stock zod4 ✓");
 }

@@ -29,8 +29,9 @@ const MAX_INLINE_KEY_COMPARISONS = 16;
  * Two paths, decided at runtime per object:
  *
  *   clean   every key's product returned its input (or validated a pure leaf) and, in strip
- *           mode, the input carries no undeclared string or symbol key: the container checks run
- *           on the input and the input reference is returned;
+ *           mode, the input carries no undeclared string key and (unless the tree was compiled
+ *           with `ownSymbolKeys: "ignore"`, #43) no undeclared own symbol key: the container
+ *           checks run on the input and the input reference is returned;
  *   copy    something changed (a value producer fired, a nested container was copied) or strip
  *           found an undeclared key: the output is a fresh object assembled in shape order from
  *           the locals captured while validating, with the official presence rules
@@ -42,6 +43,12 @@ const MAX_INLINE_KEY_COMPARISONS = 16;
  * and produce the input's key order instead of stock's shape order. Assembling from the locals
  * gives stock's output exactly and lets strip mode skip both undeclared-key probes once a key is
  * known dirty: the probes only decide whether the input can be returned by reference.
+ *
+ * The own-symbol probe (`Object.getOwnPropertySymbols`, about 36 ns per object, the whole gap of
+ * the clean path to the compiled parser) exists because stock's rebuild drops own symbol keys and
+ * a pass-through has to prove there are none. `ownSymbolKeys: "ignore"` drops the probe: the
+ * input is then returned by reference on the strength of the string probe alone, and an own symbol
+ * key survives where stock would drop it, the behavior strict and loose objects already have (#42).
  */
 export function emitCoWObject(
   ctx: CodeCtx,
@@ -113,7 +120,7 @@ export function emitCoWObject(
 
     if (cowSafeContainerForChild(child)) {
       // Container key (including optional/nullable wrapping): CoW sub-skeleton (nested CoW + strip semantics intact)
-      const vFn = containerChildFn(child, seen);
+      const vFn = containerChildFn(child, seen, ctx.options);
       const v = ctx.addConst(vFn);
       const isA = isAsyncProduct(vFn);
       if (isA) ctx.async = true;
@@ -195,22 +202,24 @@ export function emitCoWObject(
         ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
       });
       ctx.write(`}`);
-      ctx.write(`if (!${extra}) {`);
-      ctx.indented(() => {
-        // Official strip discards extra enumerable own symbol keys, which a pass-through would keep → probe for them
-        const syms = ctx.var();
-        ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
-        if (symbolKeys.length === 0) {
-          ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
-        } else {
-          ctx.write(`for (const s of ${syms}) {`);
-          ctx.indented(() => {
-            ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
-          });
-          ctx.write(`}`);
-        }
-      });
-      ctx.write(`}`);
+      if (ctx.options.ownSymbolKeys === "probe") {
+        ctx.write(`if (!${extra}) {`);
+        ctx.indented(() => {
+          // Official strip discards every extra own symbol key (non-enumerable ones too), which a pass-through would keep → probe for them
+          const syms = ctx.var();
+          ctx.write(`const ${syms} = Object.getOwnPropertySymbols(${accessor});`);
+          if (symbolKeys.length === 0) {
+            ctx.write(`if (${syms}.length !== 0) ${extra} = true;`);
+          } else {
+            ctx.write(`for (const s of ${syms}) {`);
+            ctx.indented(() => {
+              ctx.write(`if (!${knownSet()}.has(s)) { ${extra} = true; break; }`);
+            });
+            ctx.write(`}`);
+          }
+        });
+        ctx.write(`}`);
+      }
       ctx.write(`if (!${extra}) {`);
       ctx.indented(() => {
         if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);

@@ -191,6 +191,88 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
   );
   printRatios(parseRun);
 
+  // The opt-in that drops the own-symbol probe of strip-mode objects (#43), measured as its own
+  // clearly labelled row: the zod-cow-v4 column of every other scenario keeps the default, because
+  // the option is a semantic choice of the caller and not a benchmark setting. Only the columns the
+  // option can change are runnable here; the others are the default row above.
+  const Z4Lax = compile(Simple, { ownSymbolKeys: "ignore" });
+  assert.ok(!Z4Lax.stock);
+  const symbolKey = Symbol("undeclared");
+  const laxImpls: Impl[] = [
+    parseImpls[0]!,
+    parseImpls[1]!,
+    {
+      column: "zc",
+      label: 'zod-cow safeParse, ownSymbolKeys: "ignore"',
+      accepts: (i) => Z4Lax.safeParse(i).success,
+      output: (i) => Z4Lax.parse(i),
+    },
+  ];
+  const withSymbolKey = { ...rec, [symbolKey]: 1 };
+  await gate('calibration parse, ownSymbolKeys "ignore"', laxImpls, [
+    ...fixtures,
+    {
+      name: "valid record with an own symbol key",
+      input: withSymbolKey,
+      accept: true,
+      outputDiffers:
+        'zod strips the undeclared own symbol key into a copy; ownSymbolKeys: "ignore" returns the input by reference with the symbol kept (the documented divergence of the option)',
+    },
+  ]);
+  // The declared divergence, stated and asserted per implementation (an `outputDiffers` fixture
+  // skips the output comparison, so the shape of the difference is pinned here, as S8 does):
+  // every zod parser strips the symbol, the opt-in alone keeps it, and it does so by reference.
+  {
+    const has = (o: unknown) => Object.getOwnPropertySymbols(o as object).length > 0;
+    const outputs = laxImpls.map((i) => [i, i.output!(withSymbolKey)] as const);
+    console.log(
+      `  calibration own symbol key → ${outputs.map(([i, o]) => `${i.label}: ${has(o) ? "kept" : "stripped"}`).join(" · ")}`,
+    );
+    for (const [i, o] of outputs) {
+      if (i.column === "zc")
+        assert.equal(o, withSymbolKey, `${i.label} must return the input by reference`);
+      else assert.ok(!has(o), `${i.label} must strip the undeclared symbol key`);
+    }
+    assert.ok(has(withSymbolKey), "the symbol-key fixture was mutated");
+  }
+  const laxRun = await runScenario(
+    'calibration parse, ownSymbolKeys "ignore" (opt-in)',
+    `the same record parsed ${K.toLocaleString()} times per round by zod-cow-v4 compiled with the opt-in that skips the own-symbol probe`,
+    [
+      {
+        column: "stock",
+        label: "stock zod4 safeParse",
+        na: "unchanged from the default row above",
+      },
+      {
+        column: "public",
+        label: "z.compile() safeParse",
+        run: () => {
+          let ok = 0;
+          for (let i = 0; i < K; i++) if (Public.safeParse(rec).success) ok++;
+          return ok === K ? ok : fail("z.compile()");
+        },
+      },
+      {
+        column: "official",
+        label: "internal compileFn parser",
+        na: "unchanged from the default row above",
+      },
+      {
+        column: "zc",
+        label: 'zod-cow-v4 safeParse, ownSymbolKeys: "ignore"',
+        run: () => {
+          let ok = 0;
+          for (let i = 0; i < K; i++) if (Z4Lax.safeParse(rec).success) ok++;
+          return ok === K ? ok : fail("zod-cow ownSymbolKeys ignore");
+        },
+      },
+      { column: "ark", label: "ArkType Type(data)", na: "unchanged from the default row above" },
+    ],
+    { iterations: K },
+  );
+  printRatios(laxRun);
+
   const validateRun = await runScenario(
     "calibration validate (single record)",
     `the same record validated ${K.toLocaleString()} times per round, boolean verdict only`,
@@ -236,5 +318,5 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
     { iterations: K },
   );
   printRatios(validateRun);
-  return [parseRun, validateRun];
+  return [parseRun, laxRun, validateRun];
 }

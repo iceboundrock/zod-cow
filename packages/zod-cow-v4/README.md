@@ -42,6 +42,8 @@ await fast.safeParseAsync(data);
 fast.async;                 // true = the skeleton holds an async subtree; the sync API then throws $ZodAsyncError, as stock does
 fast.stock;                 // true = this layer gave up on the whole tree and everything goes through stock (never a semantic loss)
 fast.code;                  // generated CoW skeleton source, for debugging (null when degraded to stock)
+
+compile(User, { ownSymbolKeys: "ignore" }); // opt-in for data known to carry no symbol keys (JSON input): skips the own-symbol probe, see CompileOptions
 ```
 
 Two consequences of structural sharing to keep in mind:
@@ -51,11 +53,19 @@ Two consequences of structural sharing to keep in mind:
 
 ## API
 
-### `compile(schema)`
+### `compile(schema, options?)`
 
-`compile<T extends z.ZodType>(schema: T): Compiled<T>`
+`compile<T extends z.ZodType>(schema: T, options?: CompileOptions): Compiled<T>`
 
-Compiles once and returns a `Compiled<T>`. Compilation never throws for a supported-or-degradable schema: subtrees the JIT cannot compile fall back to a runtime island, and a whole tree it refuses falls back to stock parsing (`stock === true`). The only errors that escape `compile` are errors that are not zod compile errors (a bug in the schema's own code, for example).
+Compiles once and returns a `Compiled<T>`. Compilation never throws for a supported-or-degradable schema: subtrees the JIT cannot compile fall back to a runtime island, and a whole tree it refuses falls back to stock parsing (`stock === true`). The only errors that escape `compile` are a `TypeError` for an option value it does not know (see below) and errors that are not zod compile errors (a bug in the schema's own code, for example).
+
+### `CompileOptions`
+
+Every field is optional. The defaults give exact stock semantics; `compile(schema)`, `compile(schema, {})` and the defaults spelled out compile to the same code.
+
+| Option | Values | Behavior |
+|---|---|---|
+| `ownSymbolKeys` | `"probe"` (default), `"ignore"` | What a strip-mode object (zod's default object mode) does about own symbol keys of the input. Stock zod rebuilds every object and so drops undeclared own symbol keys; to return the input by reference, the skeleton first has to prove there are none, which is one `Object.getOwnPropertySymbols` call per object, about 36 ns and the largest fixed cost of the clean path. `"ignore"` skips that probe at every depth of the compiled tree: an input whose declared keys are unchanged and which carries no undeclared string key is returned by reference even if it carries an own symbol key, which then survives where stock would drop it. For data that cannot carry symbol keys (JSON input, structured-clone output, records built from literals) the two modes give the same results. Declared symbol keys are unaffected, the copy path still drops undeclared symbols, and strict and loose objects never probe. A value other than the two strings throws a `TypeError` from `compile` (`null` included; an explicit `undefined` counts as the property being absent), as does an options argument that is not a plain object (an array, `null`, a class instance or any other object whose prototype is neither `Object.prototype` nor `null`); both rejections stay a `TypeError` even when the rejected object or value fights the diagnostic (a throwing `constructor` or `name` accessor on its prototype, a Proxy whose `getPrototypeOf` trap throws, a `toJSON` method or Proxy `get` trap on the rejected value, a bigint or a cyclic object), because the message is built from property descriptors and type tags and never runs the rejected thing's own code. Reading the option off the options object does run that object's own code (an accessor, a Proxy trap); a throw there is reported as a `TypeError` whose `cause` is the caller's error. Only an own `ownSymbolKeys` property is read, so the option cannot be inherited from a prototype: `compile(schema, {})` is `compile(schema)` even if `Object.prototype` has been given an `ownSymbolKeys` property. |
 
 ### `Compiled<T>`
 

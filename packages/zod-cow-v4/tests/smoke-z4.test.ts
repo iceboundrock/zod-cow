@@ -355,4 +355,270 @@ import { compile } from "../src/index.js";
   console.log("  loose copy keeps undeclared keys after the shape keys ✓");
 }
 
+/* ── 12. ownSymbolKeys: the opt-in that skips the own-symbol probe of strip-mode objects (#43) ── */
+{
+  console.log("\n── ownSymbolKeys option ──");
+  const S = z.object({ a: z.string(), b: z.number().default(1) });
+  const sym = Symbol("undeclared");
+  const withSymbol = { a: "x", b: 2, [sym]: true };
+
+  // Default and explicit "probe": stock semantics, the undeclared symbol forces a copy that drops it
+  for (const C of [compile(S), compile(S, {}), compile(S, { ownSymbolKeys: "probe" })]) {
+    const out = C.parse(withSymbol);
+    assert.notEqual(out, withSymbol);
+    assert.ok(!(sym in out));
+    assert.ok(C.code!.includes("getOwnPropertySymbols"));
+  }
+  console.log('  default / "probe": undeclared symbol still forces a copy ✓');
+
+  // "ignore": no probe in the generated code; a clean input keeps its own symbol by reference (the
+  // documented divergence from stock, the same one strict and loose objects have, #42)
+  const I = compile(S, { ownSymbolKeys: "ignore" });
+  assert.ok(!I.stock);
+  assert.ok(!I.code!.includes("getOwnPropertySymbols"));
+  assert.equal(I.parse(withSymbol), withSymbol);
+  assert.ok(sym in S.parse(withSymbol) === false, "stock drops the undeclared symbol");
+  console.log('  "ignore": clean input with an own symbol returned by reference ✓');
+
+  // Still strip semantics for string keys, and the copy path still drops the symbol like stock
+  const extraString = { a: "x", b: 2, extra: 1, [sym]: true };
+  const stripped = I.parse(extraString);
+  assert.notEqual(stripped, extraString);
+  assert.deepEqual(stripped, S.parse(extraString));
+  assert.ok(!("extra" in stripped) && !(sym in stripped));
+  const defaulted = { a: "x", [sym]: true };
+  const copied = I.parse(defaulted);
+  assert.notEqual(copied, defaulted);
+  assert.deepEqual(copied, S.parse(defaulted));
+  assert.ok(!(sym in copied));
+  console.log('  "ignore": undeclared string keys and the copy path unchanged ✓');
+
+  // Declared symbol keys are still validated and copied
+  const declared = Symbol("declared");
+  const D = compile(z.object({ a: z.string(), [declared]: z.number() }), {
+    ownSymbolKeys: "ignore",
+  });
+  const dIn = { a: "x", [declared]: 1 };
+  assert.equal(D.parse(dIn), dIn);
+  assert.equal(D.safeParse({ a: "x", [declared]: "no" }).success, false);
+  const dCopy = D.parse({ a: "x", [declared]: 1, extra: 1 });
+  assert.equal((dCopy as Record<symbol, unknown>)[declared], 1);
+  console.log('  "ignore": declared symbol keys still validated and written ✓');
+
+  // The option reaches nested sub-skeletons: a clean nested object with an own symbol is shared
+  const Nested = z.object({
+    inner: z.object({ v: z.string() }),
+    list: z.array(z.object({ w: z.number() })),
+  });
+  const NI = compile(Nested, { ownSymbolKeys: "ignore" });
+  const nIn = { inner: { v: "x", [sym]: 1 }, list: [{ w: 1, [sym]: 2 }] };
+  assert.equal(NI.parse(nIn), nIn);
+  const NP = compile(Nested);
+  const nOut = NP.parse(nIn) as typeof nIn;
+  assert.notEqual(nOut, nIn);
+  assert.notEqual(nOut.inner, nIn.inner);
+  assert.notEqual(nOut.list[0], nIn.list[0]);
+  console.log('  "ignore": propagates into nested object skeletons ✓');
+
+  // ... through every container skeleton, not only object and array: a strip object under a tuple,
+  // a record, a map and a set is shared under "ignore" and copied by default. Nested skeletons are
+  // separate Function builds, so this is pinned by behavior, not by inspecting `code`
+  const Inner = z.object({ v: z.string() });
+  const Containers = z.object({
+    tup: z.tuple([Inner]),
+    rec: z.record(z.string(), Inner),
+    map: z.map(z.string(), Inner),
+    set: z.set(Inner),
+  });
+  const cIn = {
+    tup: [{ v: "x", [sym]: 1 }] as const,
+    rec: { k: { v: "x", [sym]: 1 } },
+    map: new Map([["k", { v: "x", [sym]: 1 }]]),
+    set: new Set([{ v: "x", [sym]: 1 }]),
+  };
+  assert.equal(compile(Containers, { ownSymbolKeys: "ignore" }).parse(cIn), cIn);
+  const cOut = compile(Containers).parse(cIn) as z.output<typeof Containers>;
+  assert.notEqual(cOut, cIn);
+  assert.notEqual(cOut.tup[0], cIn.tup[0]);
+  assert.notEqual(cOut.rec.k, cIn.rec.k);
+  assert.notEqual(cOut.map.get("k"), cIn.map.get("k"));
+  assert.notEqual([...cOut.set][0], [...cIn.set][0]);
+  assert.deepEqual(cOut, Containers.parse(cIn));
+  console.log('  "ignore": propagates through tuple, record, map and set skeletons ✓');
+
+  // The probe covers every own symbol, non-enumerable ones included (`Object.getOwnPropertySymbols`
+  // lists them all, and stock's rebuild drops them all): the default copies, "ignore" shares
+  const hidden = Symbol("hidden");
+  const withHidden = Object.defineProperty({ a: "x", b: 2 }, hidden, {
+    value: 1,
+    enumerable: false,
+  });
+  assert.ok(!(hidden in S.parse(withHidden)), "stock drops a non-enumerable undeclared symbol");
+  const hiddenOut = compile(S).parse(withHidden);
+  assert.notEqual(hiddenOut, withHidden);
+  assert.ok(!(hidden in hiddenOut));
+  assert.equal(I.parse(withHidden), withHidden);
+  console.log('  non-enumerable undeclared symbol: default copies, "ignore" shares ✓');
+
+  // An unknown value is a programming error, reported at compile time
+  assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), TypeError);
+  assert.throws(() => compile(S, [] as never), TypeError);
+  assert.throws(() => compile(S, null as never), TypeError);
+  console.log("  unknown value, array or null options throw TypeError ✓");
+
+  // An explicit `undefined` is an absent property (the default); an explicit `null` is a value
+  // other than the two strings and throws like any other unknown value
+  assert.equal(compile(S, { ownSymbolKeys: undefined }).code, compile(S).code);
+  assert.throws(() => compile(S, { ownSymbolKeys: null as never }), TypeError);
+  console.log("  explicit undefined is the default, explicit null throws TypeError ✓");
+
+  // Only a plain object (Object.prototype or null prototype) is an options argument: a class
+  // instance, a Date or an object inheriting `ownSymbolKeys` from its prototype is rejected
+  class Opts {
+    ownSymbolKeys = "ignore" as const;
+  }
+  assert.throws(() => compile(S, new Opts()), TypeError);
+  assert.throws(() => compile(S, new Date() as never), TypeError);
+  assert.throws(() => compile(S, Object.create({ ownSymbolKeys: "ignore" })), TypeError);
+  const nullProto = Object.assign(Object.create(null), { ownSymbolKeys: "ignore" as const });
+  assert.ok(!compile(S, nullProto).code!.includes("getOwnPropertySymbols"));
+  console.log("  non-plain options object throws TypeError, null-prototype object accepted ✓");
+
+  // The rejection stays a TypeError whatever the rejected object does when inspected: the
+  // diagnostic reads `constructor` and `name` through property descriptors, so a throwing accessor
+  // never runs, and a Proxy whose `getPrototypeOf` trap throws counts as a non-plain object
+  const throwingCtor = Object.create(null, {
+    constructor: {
+      get() {
+        throw new Error("constructor getter ran");
+      },
+    },
+  });
+  assert.throws(() => compile(S, Object.create(throwingCtor)), TypeError);
+  class ThrowingName {}
+  Object.defineProperty(ThrowingName, "name", {
+    get() {
+      throw new Error("name getter ran");
+    },
+  });
+  assert.throws(() => compile(S, new ThrowingName() as never), TypeError);
+  const throwingTrap = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error("getPrototypeOf trap ran");
+      },
+    },
+  );
+  assert.throws(() => compile(S, throwingTrap), TypeError);
+  assert.throws(() => compile(S, new Date() as never), {
+    name: "TypeError",
+    message: /an instance of Date/,
+  });
+  console.log(
+    "  a throwing accessor or Proxy trap on a rejected options object still gives TypeError ✓",
+  );
+
+  // Only an own `ownSymbolKeys` property is read: a value inherited from `Object.prototype`
+  // (prototype pollution) does not turn `compile(S, {})` into the opt-in, so `compile(S)` and
+  // `compile(S, {})` stay equivalent whatever the prototype carries
+  const proto = Object.prototype as { ownSymbolKeys?: unknown };
+  proto.ownSymbolKeys = "ignore";
+  try {
+    assert.equal(compile(S, {}).code, compile(S).code);
+    assert.ok(compile(S, {}).code!.includes("getOwnPropertySymbols"));
+    assert.ok(!compile(S, { ownSymbolKeys: "ignore" }).code!.includes("getOwnPropertySymbols"));
+  } finally {
+    delete proto.ownSymbolKeys;
+  }
+  console.log("  ownSymbolKeys inherited from Object.prototype is ignored ✓");
+
+  // The same holds for a rejected *value*: its description never runs the value's own code
+  // (no `JSON.stringify`, which would call a `toJSON` or a Proxy `get` trap), and every kind of
+  // value has a description of its own instead of JSON's throw or "undefined"
+  const throwingToJSON = {
+    toJSON() {
+      throw new Error("toJSON ran");
+    },
+  };
+  assert.throws(() => compile(S, { ownSymbolKeys: throwingToJSON as never }), {
+    name: "TypeError",
+    message: /got a plain object$/,
+  });
+  const throwingGet = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("get trap ran");
+      },
+    },
+  );
+  assert.throws(() => compile(S, { ownSymbolKeys: throwingGet as never }), TypeError);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  assert.throws(() => compile(S, { ownSymbolKeys: circular as never }), {
+    name: "TypeError",
+    message: /got a plain object$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: 1n as never }), {
+    name: "TypeError",
+    message: /got 1n$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: Symbol("s") as never }), {
+    name: "TypeError",
+    message: /got a symbol$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: (() => "probe") as never }), {
+    name: "TypeError",
+    message: /got a function$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: new Date() as never }), {
+    name: "TypeError",
+    message: /got an instance of Date$/,
+  });
+  assert.throws(() => compile(S, { ownSymbolKeys: "drop" as never }), {
+    name: "TypeError",
+    message: /got "drop"$/,
+  });
+  console.log("  a rejected value is described without running its code ✓");
+
+  // Reading the option off a Proxy options object runs its traps (that read is the caller's own
+  // object doing what it was built to do); a trap that throws still surfaces as the promised
+  // TypeError, with the trap's error as `cause`, and a Proxy that behaves is an ordinary options object
+  const proxied = new Proxy({ ownSymbolKeys: "ignore" as const }, {});
+  assert.ok(!compile(S, proxied).code!.includes("getOwnPropertySymbols"));
+  const throwingDescriptorTrap = new Proxy(
+    {},
+    {
+      getOwnPropertyDescriptor() {
+        throw new Error("getOwnPropertyDescriptor trap ran");
+      },
+    },
+  );
+  assert.throws(
+    () => compile(S, throwingDescriptorTrap),
+    (e: unknown) =>
+      e instanceof TypeError && (e.cause as Error).message === "getOwnPropertyDescriptor trap ran",
+  );
+  const throwingGetTrap = new Proxy(
+    { ownSymbolKeys: "ignore" as const },
+    {
+      get() {
+        throw new Error("get trap ran");
+      },
+    },
+  );
+  assert.throws(
+    () => compile(S, throwingGetTrap),
+    (e: unknown) => e instanceof TypeError && (e.cause as Error).message === "get trap ran",
+  );
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  assert.throws(() => compile(S, revocable.proxy), {
+    name: "TypeError",
+    message: /got a revoked Proxy$/,
+  });
+  console.log("  a Proxy options object whose trap throws still gives TypeError ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

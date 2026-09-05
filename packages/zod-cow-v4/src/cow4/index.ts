@@ -34,24 +34,26 @@
 import { INVALID } from "zod/v4/core";
 import { buildFn, CodeCtx } from "./codectx.js";
 import { emitNode } from "./emit.js";
+import type { CowOptions } from "./options.js";
 import type { Fn, Node } from "./product.js";
 
 export { officialValidator } from "./official.js";
+export { type CompileOptions, resolveOptions } from "./options.js";
 export { type Fn, isAsyncProduct, ZC_ASYNC } from "./product.js";
 
 /* ═══════════════════ Top-level compilation ═══════════════════ */
 
 /** Builds the CoW monolithic function; throws when not compilable (async/recursion/exotic features), and the caller degrades the whole tree */
-export function compileCowFn(schema: Node): Fn {
-  const ctx = new CodeCtx();
+export function compileCowFn(schema: Node, options: CowOptions): Fn {
+  const ctx = new CodeCtx(options);
   const acc = emitNode(ctx, schema, "input", true, new Set());
   ctx.write(`return ${acc ?? "true"};`);
   return buildFn(ctx);
 }
 
 /** Same as above, but returns [function, source] for a debug dump */
-export function compileCowDebug(schema: Node): { fn: Fn; code: string } {
-  const ctx = new CodeCtx();
+export function compileCowDebug(schema: Node, options: CowOptions): { fn: Fn; code: string } {
+  const ctx = new CodeCtx(options);
   const acc = emitNode(ctx, schema, "input", true, new Set());
   ctx.write(`return ${acc ?? "true"};`);
   return { fn: buildFn(ctx), code: ctx.lines.join("\n") };

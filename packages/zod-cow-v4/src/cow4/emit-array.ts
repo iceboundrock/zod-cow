@@ -24,7 +24,7 @@ export function emitCoWArray(
   // Element handler: container (including a wrapper chain) → CoW sub-skeleton (strip semantics intact); pure leaf → official validator; everything else → official parser; async → async island
   let elemFn: Fn;
   if (elemIsContainer) {
-    elemFn = containerChildFn(element, childSeen);
+    elemFn = containerChildFn(element, childSeen, ctx.options);
   } else {
     elemFn = officialFn(element, elemPure);
   }

@@ -2,7 +2,7 @@
  * zc-z4 public API — the engine is "zod4 official codegen + CoW container skeletons"
  * (tuple skeletons and async schemas supported since Task 6).
  *
- *   compile(schema) returns:
+ *   compile(schema, options?) returns (options: { ownSymbolKeys?: "probe" | "ignore" }, see cow4/options.ts):
  *     .parse(data)      CoW semantics: returns the output on success (clean input === the input reference)
  *     .safeParse(data)  non-throwing variant; the failure path is stock safeParse (official issues/ZodError)
  *     .parseAsync(data)       async variant (the only usable entry when the skeleton holds an async subtree)
@@ -17,12 +17,16 @@
 import type { z } from "zod";
 import {
   INVALID,
+  type CompileOptions,
   compileCowDebug,
   officialValidator,
   isAsyncProduct,
+  resolveOptions,
   type Fn,
 } from "./cow4/index.js";
 import { ZodCompileAsyncError, ZodCompileUnsupportedError, $ZodAsyncError } from "zod/v4/core";
+
+export type { CompileOptions };
 
 export interface Compiled<T extends z.ZodType> {
   readonly schema: T;
@@ -46,11 +50,12 @@ export interface Compiled<T extends z.ZodType> {
 
 type SyncResult = { success: boolean; data?: unknown; error?: z.ZodError };
 
-export function compile<T extends z.ZodType>(schema: T): Compiled<T> {
+export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions): Compiled<T> {
+  const resolved = resolveOptions(options); // throws TypeError on an unknown value, before any codegen
   let cowFn: Fn | null = null;
   let code: string | null = null;
   try {
-    const compiled = compileCowDebug(schema);
+    const compiled = compileCowDebug(schema, resolved);
     cowFn = compiled.fn;
     code = compiled.code;
   } catch (e) {

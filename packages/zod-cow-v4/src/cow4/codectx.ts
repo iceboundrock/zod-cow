@@ -1,5 +1,6 @@
 /** Codegen context and the Function-constructor build step shared by all skeletons. */
 import { INVALID } from "zod/v4/core";
+import type { CowOptions } from "./options.js";
 import { type Fn, markAsync } from "./product.js";
 
 /* ═══════════════════ Codegen context (minimal equivalent of the official CodeCtx/Doc) ═══════════════════ */
@@ -12,6 +13,9 @@ export class CodeCtx {
   /** The tree contains an async subtree → the product is an async function (await emit points already in place) */
   async = false;
   private varN = 0;
+
+  /** The compile options of the tree; a sub-skeleton context is created with its parent's options */
+  constructor(readonly options: CowOptions) {}
 
   /** Equivalent of the official addConstant: runtime references are hoisted into function parameters (c0,c1,…), deduped by === */
   addConst(value: unknown): string {

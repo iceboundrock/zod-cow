@@ -211,7 +211,7 @@ The ArkType column is measured only where arktype 2.2.3 expresses the same workl
 A pnpm workspace, one package per zod major plus one benchmark package per line ([ADR 0001](docs/adr/0001-package-layout.md)):
 
 ```
-packages/zod-cow-v4/        published as zod-cow-v4 (the active line); peer zod >=4.5.4 <4.6.0, ESM + declarations in dist/
+packages/zod-cow-v4/        published as zod-cow-v4 (the primary line); peer zod >=4.5.4 <4.6.0, ESM + declarations in dist/
   README.md                 consumer document: install, usage, API, peer policy
   src/index.ts              compile() API
   src/cow4/                 engine: official codegen + CoW container skeletons + async channel

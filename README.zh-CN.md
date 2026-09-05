@@ -207,7 +207,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 一个 pnpm workspace：每个 zod 大版本一个包，每条线再配一个基准包（[ADR 0001](docs/adr/0001-package-layout.md)）：
 
 ```
-packages/zod-cow-v4/        以 zod-cow-v4 发布（活跃线）；peer zod >=4.5.4 <4.6.0，ESM + 类型声明输出到 dist/
+packages/zod-cow-v4/        以 zod-cow-v4 发布（主线）；peer zod >=4.5.4 <4.6.0，ESM + 类型声明输出到 dist/
   README.md                 面向使用者的文档：安装、用法、API、peer 策略
   src/index.ts              compile() API
   src/cow4/                 引擎：官方 codegen + CoW 容器骨架 + async 通道

@@ -56,6 +56,14 @@ export interface Ctx {
    * its per-node allocation.
    */
   path: PathSegment[];
+  /**
+   * Whether stock zod would have built a fresh output for the value the last branch-deciding node
+   * returned (a union whose options disagree, a catch whose fallback may hand back the input, a
+   * pipeline of two such nodes). Written only by those nodes and read only by a `readonly` above
+   * them that cannot decide statically (`stockRebuilds` in compile.ts returning `null`), so that it
+   * freezes a copy where stock froze its own fresh output and the input in place where stock did.
+   */
+  rebuilt: boolean;
 }
 
 export type Validator = (data: any, ctx: Ctx) => any;
@@ -135,6 +143,23 @@ export function pushInvalidType(
 }
 
 /** Stock zod's getParsedType, used for the `received` field of an issue */
+/**
+ * Stock's `ZodParsedType.object`: a non-null object that is not an array, a Date, a Map, a Set or
+ * a promise (`then` and `catch` functions), the same tests in the same order as `getParsedType`.
+ * The object, record and discriminated-union skeletons reject everything else as `invalid_type`.
+ */
+export function isObjectType(v: unknown): v is Record<string, unknown> {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    !(typeof (v as any).then === "function" && typeof (v as any).catch === "function") &&
+    !(v instanceof Map) &&
+    !(v instanceof Set) &&
+    !(v instanceof Date)
+  );
+}
+
 export function parsedType(v: unknown): string {
   switch (typeof v) {
     case "undefined":

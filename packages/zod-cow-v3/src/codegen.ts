@@ -18,7 +18,14 @@
  * through the same tests.
  */
 import type { z, ZodErrorMap } from "zod";
-import { type Ctx, FAILED, pushInvalidType, pushIssue, type Validator } from "./internal.js";
+import {
+  type Ctx,
+  FAILED,
+  isObjectType,
+  pushInvalidType,
+  pushIssue,
+  type Validator,
+} from "./internal.js";
 
 /** Whether `new Function` is available (false under a CSP without `unsafe-eval`) and not switched off */
 export const CODEGEN_AVAILABLE: boolean = (() => {
@@ -206,6 +213,14 @@ export function genObject(spec: ObjectSpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
   const n = spec.keys.length;
+  // A declared "__proto__" key is validated like any other but never written: stock's output
+  // assembly skips that key (`key.value !== "__proto__"` in `mergeObjectSync`), and writing it
+  // through `out["__proto__"] = v` would set the prototype of the copy instead of a property.
+  // An own "__proto__" on the input (`JSON.parse`) is therefore dropped from the output on every
+  // path; strip and strict mode drop an undeclared one through their key probe, passthrough mode
+  // and a declared one need the explicit copy below.
+  const protoIdx = spec.keys.indexOf("__proto__");
+  const outKeys = spec.keys.filter((k) => k !== "__proto__");
   const slots = spec.keys.map((k, i) =>
     childBlock(
       g,
@@ -214,10 +229,14 @@ export function genObject(spec: ObjectSpec): Validator {
       `data[${lit(k)}]`,
       lit(k),
       "{ ...data }",
-      (outVal) => `out[${lit(k)}] = ${outVal};`,
+      i === protoIdx ? () => "" : (outVal) => `out[${lit(k)}] = ${outVal};`,
       spec.undefStable[i]!,
     ),
   );
+  const dropOwnProto =
+    protoIdx !== -1 || spec.mode === "passthrough"
+      ? `if (hop.call(data, "__proto__")) { if (!dirty) { dirty = true; out = { ...data }; } delete out["__proto__"]; }`
+      : "";
   const keysName = g.hoist(spec.keys, "keys");
   // Undeclared-key probe: position hint, then the inline comparison chain (a Map above 16 keys)
   const knownTest =
@@ -237,14 +256,15 @@ export function genObject(spec: ObjectSpec): Validator {
     if (extras !== null) {
       ${spec.mode === "strict" ? `pushIssue(ctx, data, ${em}, { code: "unrecognized_keys", keys: extras }); if (anyFailed) return FAILED;` : ""}
       const src = out; out = {};
-      ${spec.keys.map((k) => `if (src[${lit(k)}] !== undefined || hop.call(data, ${lit(k)})) out[${lit(k)}] = src[${lit(k)}];`).join("\n      ")}
+      ${outKeys.map((k) => `if (src[${lit(k)}] !== undefined || hop.call(data, ${lit(k)})) out[${lit(k)}] = src[${lit(k)}];`).join("\n      ")}
       dirty = true;
     }`;
   const src = `return function generatedObject(data, ctx) {
-    if (data === null || typeof data !== "object" || Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "object"); return FAILED; }
+    if (!isObjectType(data)) { pushInvalidType(ctx, data, ${em}, "object"); return FAILED; }
     let out = data, dirty = false, anyFailed = false;
     ${slots.join("\n    ")}
     ${spec.mode === "strict" ? "" : "if (anyFailed) return FAILED;"}
+    ${dropOwnProto}
     ${probe}
     ${spec.mode === "strict" ? "if (anyFailed) return FAILED;" : ""}
     return out;
@@ -353,11 +373,20 @@ function build(
   const factory = new Function(
     "FAILED",
     "hop",
+    "isObjectType",
     "pushIssue",
     "pushInvalidType",
     "prefixIssues",
     ...g.names,
     src,
   );
-  return factory(FAILED, hop, pushIssue, pushInvalidType, prefixIssues, ...g.values) as Validator;
+  return factory(
+    FAILED,
+    hop,
+    isObjectType,
+    pushIssue,
+    pushInvalidType,
+    prefixIssues,
+    ...g.values,
+  ) as Validator;
 }

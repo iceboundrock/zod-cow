@@ -372,6 +372,269 @@ test("__proto__ as an extra key: no prototype pollution, input lossless", () => 
   assert.equal("__proto__" in evil, true); // input is lossless (it still carries that own property)
 });
 
+test("__proto__ as a declared key: validated, never written, dropped from the output like stock", () => {
+  // `{ ["__proto__"]: … }` creates an own shape key (a literal `__proto__:` would set the prototype)
+  const shape = { ["__proto__"]: z.object({ p: z.number() }).default({ p: 1 }), a: z.string() };
+  for (const S of [z.object(shape), z.object(shape).strict(), z.object(shape).passthrough()]) {
+    const C = compile(S);
+    // Own "__proto__" on the input (JSON): stock validates it and leaves it out of its output
+    const json = JSON.parse('{"a":"x","__proto__":{"p":2}}');
+    const out = C.parse(json) as any;
+    assert.deepEqual(S.parse(json), { a: "x" });
+    assert.notEqual(out, json);
+    assert.deepEqual(Object.keys(out), ["a"]);
+    assert.equal(Object.hasOwn(out, "__proto__"), false);
+    assert.equal(Object.getPrototypeOf(out), Object.prototype);
+    assert.equal(Object.hasOwn(json, "__proto__"), true); // input lossless
+    // The default fires on a null-prototype input (no accessor, so the key reads as undefined):
+    // the value is validated, the copy must not get it as its prototype
+    const bare = Object.assign(Object.create(null), { a: "x" });
+    const out2 = C.parse(bare) as any;
+    assert.deepEqual(S.parse(bare), { a: "x" });
+    assert.deepEqual(Object.keys(out2), ["a"]);
+    assert.equal(out2.p, undefined);
+    assert.equal(Object.getPrototypeOf(out2), Object.prototype);
+    assert.equal(Object.hasOwn(out2, "__proto__"), false);
+    // An invalid value under the key is reported at its path, as stock does
+    const bad = JSON.parse('{"a":"x","__proto__":{"p":"no"}}');
+    assert.deepEqual(C.safeParse(bad).success, false);
+    assert.deepEqual(
+      (C.safeParse(bad) as any).error.issues.map((i: any) => i.path),
+      S.safeParse(bad).error!.issues.map((i) => i.path),
+    );
+  }
+  // The strip copy path (an undeclared key next to the declared "__proto__") builds from the
+  // shape keys and skips it as well
+  const C = compile(z.object({ ["__proto__"]: z.string(), a: z.string() }));
+  const inp = JSON.parse('{"a":"x","__proto__":"q","extra":1}');
+  const out = C.parse(inp) as any;
+  assert.deepEqual(Object.keys(out), ["a"]);
+  assert.equal(Object.getPrototypeOf(out), Object.prototype);
+  // Passthrough mode: an undeclared own "__proto__" is dropped too (stock's assembly skips it)
+  const P = compile(z.object({ a: z.string() }).passthrough());
+  const pin = JSON.parse('{"a":"x","__proto__":{"p":1},"b":2}');
+  assert.deepEqual(P.parse(pin), { a: "x", b: 2 });
+  assert.equal(Object.hasOwn(P.parse(pin) as object, "__proto__"), false);
+  assert.equal(({} as any).p, undefined);
+});
+
+test("object / record / discriminated union reject a Date, Map, Set or promise-like input like stock (invalid_type, received date / map / set / promise)", () => {
+  const schemas = [
+    z.object({}),
+    z.record(z.string(), z.unknown()),
+    z.discriminatedUnion("k", [z.object({ k: z.literal("a") })]),
+  ];
+  // biome-ignore lint/suspicious/noThenProperty: an intentional thenable, which stock's detector (`instanceof Promise`) does not treat as async
+  const inputs = [new Date(0), new Map(), new Set(), { then() {}, catch() {} }];
+  for (const S of schemas) {
+    const C = compile(S);
+    for (const input of inputs) {
+      const s = S.safeParse(input);
+      const c = C.safeParse(input);
+      assert.equal(s.success, false);
+      assert.equal(c.success, false);
+      assert.deepEqual((c as any).error.issues, s.error!.issues);
+    }
+  }
+});
+
+console.log("── effects: stock's issue and status semantics ──");
+
+/** An issue list as plain data: a union's nested errors (ZodError / ZcError) by their own issue lists */
+function issueShape(issues: readonly any[]): unknown[] {
+  return issues.map((i) =>
+    i.unionErrors === undefined
+      ? i
+      : { ...i, unionErrors: i.unionErrors.map((e: any) => issueShape(e.issues)) },
+  );
+}
+
+/** Stock's issue list and the compiled one must be identical, in order, every property included */
+function issuesMatchStock(S: z.ZodTypeAny, input: unknown): void {
+  const s = S.safeParse(input);
+  const c = compile(S).safeParse(input);
+  assert.equal(s.success, false, "stock must reject");
+  assert.equal(c.success, false, "compiled must reject");
+  assert.deepEqual(issueShape((c as any).error.issues), issueShape(s.error!.issues));
+}
+
+test("preprocess: runs its inner schema even when an earlier sibling left an issue (only its own fatal issue aborts)", () => {
+  // The whole-context issue count is not the preprocess node's status
+  issuesMatchStock(z.object({ a: z.string().min(3), b: z.preprocess((v) => v, z.string()) }), {
+    a: "x",
+    b: 1,
+  });
+  // A non-fatal issue from the callback: the inner schema still runs on the mapped value
+  issuesMatchStock(
+    z.preprocess((v, ctx) => {
+      ctx.addIssue({ code: "custom", message: "pp" });
+      return v;
+    }, z.string()),
+    1,
+  );
+  const dirty = z.preprocess((v, ctx) => {
+    ctx.addIssue({ code: "custom", message: "pp" });
+    return v;
+  }, z.string());
+  issuesMatchStock(dirty, "x");
+  // A fatal issue aborts: the inner schema does not run
+  let ran = 0;
+  const fatal = z.preprocess(
+    (v, ctx) => {
+      ctx.addIssue({ code: "custom", message: "pp", fatal: true });
+      return v;
+    },
+    z.string().refine(() => {
+      ran++;
+      return true;
+    }),
+  );
+  issuesMatchStock(fatal, "x");
+  assert.equal(ran, 0); // neither side reaches the inner schema
+  // A fatal issue in a union option: that option is aborted, not the dirty result
+  issuesMatchStock(z.union([fatal, z.number()]), "x");
+  assert.equal(compile(z.union([dirty, z.number()])).safeParse("x").success, false);
+});
+
+test("transform: a fatal issue from the callback aborts (an ancestor refine does not run), a non-fatal one is dirty", () => {
+  let refined = 0;
+  const S = z
+    .string()
+    .transform((v, ctx) => {
+      ctx.addIssue({ code: "custom", message: "t", fatal: true });
+      return v;
+    })
+    .refine(() => {
+      refined++;
+      return false;
+    }, "r");
+  issuesMatchStock(S, "x");
+  assert.equal(refined, 0);
+  const D = z
+    .string()
+    .transform((v, ctx) => {
+      ctx.addIssue({ code: "custom", message: "t" });
+      return v;
+    })
+    .refine(() => false, "r");
+  issuesMatchStock(D, "x");
+});
+
+test("effects: an ordinary thenable is a sync result (stock's detector is `instanceof Promise`); a Promise throws ZcNotSupportedError", () => {
+  // biome-ignore lint/suspicious/noThenProperty: an intentional thenable, which stock's detector (`instanceof Promise`) does not treat as async
+  const thenable = { then() {} };
+  assert.deepEqual(compile(z.string().transform(() => thenable)).parse("x"), thenable);
+  assert.equal(compile(z.string().refine(() => thenable as any)).parse("x"), "x");
+  assert.equal(compile(z.preprocess(() => thenable, z.any())).parse("x"), thenable);
+  assert.throws(
+    () => compile(z.string().transform(async (v) => v)).parse("x"),
+    ZcNotSupportedError,
+  );
+  assert.throws(() => compile(z.string().refine(async () => true)).parse("x"), ZcNotSupportedError);
+  assert.throws(
+    () => compile(z.preprocess(async (v) => v, z.any())).parse("x"),
+    ZcNotSupportedError,
+  );
+});
+
+console.log("── readonly: what stock freezes ──");
+
+test("readonly over a union freezes the winning option's output: the input in place through a pass-through option, a copy through a container option", () => {
+  const S = z.union([z.any(), z.object({ a: z.string() })]).readonly();
+  const C = compile(S);
+  const stockIn = { a: "x" };
+  assert.equal(S.parse(stockIn), stockIn);
+  assert.equal(Object.isFrozen(stockIn), true);
+  const input = { a: "x" };
+  assert.equal(C.parse(input), input);
+  assert.equal(Object.isFrozen(input), true);
+  // Container option first: stock freezes its fresh output, the input stays unfrozen
+  const T = z.union([z.object({ a: z.string() }), z.any()]).readonly();
+  const stockIn2 = { a: "x" };
+  assert.notEqual(T.parse(stockIn2), stockIn2);
+  assert.equal(Object.isFrozen(stockIn2), false);
+  const input2 = { a: "x" };
+  const out2 = compile(T).parse(input2);
+  assert.notEqual(out2, input2);
+  assert.equal(Object.isFrozen(out2), true);
+  assert.equal(Object.isFrozen(input2), false);
+  // The pass-through option wins for a non-object shape, the container option for an object:
+  // one compiled union, both provenances
+  const U = z.union([z.object({ a: z.string() }), z.unknown()]).readonly();
+  const CU = compile(U);
+  const arr = [1];
+  assert.equal(CU.parse(arr), arr);
+  assert.equal(Object.isFrozen(arr), true);
+  const obj = { a: "x" };
+  assert.notEqual(CU.parse(obj), obj);
+  assert.equal(Object.isFrozen(obj), false);
+  // Discriminated union with a pass-through option (`passthrough` objects still rebuild in stock)
+  const V = z
+    .discriminatedUnion("k", [
+      z.object({ k: z.literal("a") }),
+      z.object({ k: z.literal("b") }).passthrough(),
+    ])
+    .readonly();
+  const vin = { k: "b", extra: 1 };
+  assert.notEqual(compile(V).parse(vin), vin);
+  assert.equal(Object.isFrozen(vin), false);
+});
+
+test("readonly over a transform / catch / pipeline follows the reference the callback handed back", () => {
+  // Identity transform over a pass-through leaf: stock freezes the input in place
+  const I = z
+    .any()
+    .transform((x) => x)
+    .readonly();
+  const sin = { a: 1 };
+  assert.equal(I.parse(sin), sin);
+  assert.equal(Object.isFrozen(sin), true);
+  const input = { a: 1 };
+  assert.equal(compile(I).parse(input), input);
+  assert.equal(Object.isFrozen(input), true);
+  // Identity transform over a container: stock's callback saw a fresh object, the input stays unfrozen
+  const O = z
+    .object({ a: z.number() })
+    .transform((x) => x)
+    .readonly();
+  const input2 = { a: 1 };
+  const out2 = compile(O).parse(input2);
+  assert.notEqual(out2, input2);
+  assert.equal(Object.isFrozen(out2), true);
+  assert.equal(Object.isFrozen(input2), false);
+  // A transform returning a new reference: frozen in place, as stock freezes what it is handed
+  const N = z
+    .object({ a: z.number() })
+    .transform((x) => ({ ...x }))
+    .readonly();
+  assert.equal(Object.isFrozen(compile(N).parse({ a: 1 })), true);
+  // catch handing back the raw input: stock freezes the input in place; the success path copies
+  const K = z
+    .object({ a: z.string() })
+    .catch(({ input }) => input)
+    .readonly();
+  const bad = { a: 1 };
+  assert.equal(K.parse(bad), bad);
+  assert.equal(Object.isFrozen(bad), true);
+  const bad2 = { a: 1 };
+  assert.equal(compile(K).parse(bad2), bad2);
+  assert.equal(Object.isFrozen(bad2), true);
+  const good = { a: "x" };
+  assert.notEqual(compile(K).parse(good), good);
+  assert.equal(Object.isFrozen(good), false);
+  // pipeline: a rebuilt `in` side stays fresh through a pass-through `out` side
+  const P = z
+    .union([z.object({ a: z.string() }), z.unknown()])
+    .pipe(z.union([z.string(), z.unknown()]))
+    .readonly();
+  const pin = { a: "x" };
+  assert.notEqual(compile(P).parse(pin), pin);
+  assert.equal(Object.isFrozen(pin), false);
+  const parr = [1];
+  assert.equal(compile(P).parse(parr), parr);
+  assert.equal(Object.isFrozen(parr), true);
+});
+
 test("failure path: nested issue paths are correct", () => {
   const C = compile(
     z.object({

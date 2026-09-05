@@ -77,7 +77,7 @@ export function compile<T extends z.ZodTypeAny>(schema: T): Compiled<T> {
     pure,
 
     parse(data: unknown): z.output<T> {
-      const ctx = { issues: [], path: [] as (string | number)[] };
+      const ctx = { issues: [], path: [] as (string | number)[], rebuilt: false };
       const r = validator(data, ctx);
       // FAILED = aborted; a value with issues = dirty (a failed check): both are a failed parse, as in stock
       if (r === FAILED || ctx.issues.length !== 0) throw new ZcError(ctx.issues as Issue[]);
@@ -89,7 +89,7 @@ export function compile<T extends z.ZodTypeAny>(schema: T): Compiled<T> {
     },
 
     safeParse(data: unknown): SafeParseResult<z.output<T>> {
-      const ctx = { issues: [], path: [] as (string | number)[] };
+      const ctx = { issues: [], path: [] as (string | number)[], rebuilt: false };
       const r = validator(data, ctx);
       if (r === FAILED || ctx.issues.length !== 0) return failure(ctx.issues as Issue[]);
       return { success: true, data: r as z.output<T> };

@@ -118,8 +118,9 @@ function shareReport(out: unknown[], input: unknown[], nested: string): string {
       name: "valid account with an extra key",
       input: variant(sample, { extra: 1 }),
       accept: true,
-      outputDiffers:
-        "zod strips undeclared keys into a copy, ArkType passes them through by reference (S8 measures the strip case)",
+      outputDiffers: {
+        ark: "zod strips undeclared keys into a copy, ArkType passes them through by reference (S8 measures the strip case)",
+      },
     },
     { name: "missing role", input: without(sample, "role"), accept: false },
     { name: "present-undefined role", input: variant(sample, { role: undefined }), accept: false },
@@ -228,6 +229,9 @@ const cowGateFixtures: Fixture[] = [
 for (const ratio of [0, 0.25, 0.5, 1.0]) {
   const ds = deriveMissingRole(data, ratio === 0 ? 0 : Math.round(1 / ratio), 3);
   const pct = `${(ratio * 100).toFixed(0)}%`;
+  // Every round(1 / ratio)-th row is marked, so the share is exact only when N is a multiple of
+  // that period; the realized count is printed next to the nominal share
+  const marked = ds.filter((a) => !("role" in a)).length;
   await gate(`S3 ${pct}`, parseImpls(AccountsCow, Z3Cow, ArkAccountsCow), [
     ...cowGateFixtures,
     {
@@ -237,19 +241,23 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
     },
   ]);
   console.log(`  S3 ${pct} zod-cow: ${shareReport(Z3Cow.parse(ds), ds, "address")}`);
-  const run = await runScenario(`S3 ${pct} dirty`, `missing-role ratio ${pct} (same S2 schemas)`, [
-    {
-      column: "stock",
-      label: `stock zod3 safeParse (${pct} missing)`,
-      run: stockRun(AccountsCow, ds),
-    },
-    { column: "zc", label: `zod-cow-v3 safeParse (${pct} missing)`, run: zcRun(Z3Cow, ds) },
-    {
-      column: "ark",
-      label: `ArkType Type(data) (${pct} missing)`,
-      run: arkRun(ArkAccountsCow, ds),
-    },
-  ]);
+  const run = await runScenario(
+    `S3 ${pct} dirty`,
+    `missing-role ratio ${pct} (${marked.toLocaleString()} of ${N.toLocaleString()} rows; same S2 schemas)`,
+    [
+      {
+        column: "stock",
+        label: `stock zod3 safeParse (${pct} missing)`,
+        run: stockRun(AccountsCow, ds),
+      },
+      { column: "zc", label: `zod-cow-v3 safeParse (${pct} missing)`, run: zcRun(Z3Cow, ds) },
+      {
+        column: "ark",
+        label: `ArkType Type(data) (${pct} missing)`,
+        run: arkRun(ArkAccountsCow, ds),
+      },
+    ],
+  );
   printRatios(run);
   runs.push(run);
 }

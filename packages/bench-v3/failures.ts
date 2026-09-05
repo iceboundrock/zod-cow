@@ -36,20 +36,24 @@ import {
   Z3Account,
 } from "./schemas.js";
 
-interface IssueView {
-  code: string;
-  path: (string | number)[];
-  message: string;
+/**
+ * An issue list as plain data, in collection order, every property included (`fatal`, the check
+ * params); a union's nested errors (ZodError / ZcError) are represented by their own issue lists.
+ */
+function issueShape(issues: readonly any[]): unknown[] {
+  return issues.map((i) => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(i).sort()) {
+      out[k] = k === "unionErrors" ? i[k].map((e: any) => issueShape(e.issues)) : i[k];
+    }
+    return out;
+  });
 }
-
-const view = (issues: readonly { code: string; path: (string | number)[]; message: string }[]) =>
-  issues
-    .map((i): IssueView => ({ code: i.code, path: [...i.path], message: i.message }))
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
 /**
  * Compare the issue lists of stock and zod-cow for one rejected input. Returns undefined when they
- * agree on count, codes, paths and messages, otherwise a one-line description of the difference.
+ * are identical (same order, same properties, nested union errors included), otherwise a one-line
+ * description of the difference.
  */
 function issueParity(
   schema: z.ZodTypeAny,
@@ -59,12 +63,16 @@ function issueParity(
   const s = schema.safeParse(input);
   const c = zc.safeParse(input);
   assert.ok(!s.success && !c.success, "parity check needs a rejected input");
-  const sv = view(s.error.issues);
-  const cv = view(c.error.issues);
-  if (JSON.stringify(sv) === JSON.stringify(cv)) return undefined;
-  const fmt = (v: IssueView[]) =>
-    v.map((i) => `${i.code}@${JSON.stringify(i.path)} "${i.message}"`).join(" ; ");
-  return `stock ${sv.length} issue(s) [${fmt(sv)}] · zod-cow ${cv.length} issue(s) [${fmt(cv)}]`;
+  const sv = issueShape(s.error.issues);
+  const cv = issueShape(c.error.issues);
+  try {
+    assert.deepStrictEqual(cv, sv);
+    return undefined;
+  } catch {
+    const fmt = (v: unknown[]) =>
+      v.map((i: any) => `${i.code}@${JSON.stringify(i.path)} "${i.message}"`).join(" ; ");
+    return `stock ${sv.length} issue(s) [${fmt(sv)}] · zod-cow ${cv.length} issue(s) [${fmt(cv)}]`;
+  }
 }
 
 export async function runFailures(): Promise<ScenarioRun[]> {
@@ -211,11 +219,14 @@ export async function runFailures(): Promise<ScenarioRun[]> {
   console.log(
     "\n═══ S9 issue-semantics parity: stock zod3 ZodError issues against zod-cow-v3 ZcError issues ═══",
   );
+  // Every fixture must give the identical issue list; a divergence is a failure of the run unless
+  // the fixture declares it (`divergence`), which none does today
   const parityCases: {
     name: string;
     schema: z.ZodTypeAny;
     zc: Compiled<z.ZodTypeAny>;
     input: unknown;
+    divergence?: string;
   }[] = [
     ...positions.map((p) => ({ name: p.what, schema: p.schema, zc: p.zc, input: p.input })),
     {
@@ -266,13 +277,17 @@ export async function runFailures(): Promise<ScenarioRun[]> {
     const diff = issueParity(c.schema, c.zc, c.input);
     if (diff === undefined) {
       agree++;
-      console.log(`    ✓ ${c.name}: same issues (code, path, message)`);
+      console.log(`    ✓ ${c.name}: identical issue list (order, every property, nested errors)`);
+      if (c.divergence !== undefined)
+        throw new Error(`S9 parity: "${c.name}" declares a divergence that does not occur`);
+    } else if (c.divergence !== undefined) {
+      console.log(`    ~ ${c.name}: declared divergence (${c.divergence}): ${diff}`);
     } else {
-      console.log(`    ~ ${c.name}: known divergence: ${diff}`);
+      throw new Error(`S9 parity: "${c.name}" gives a different issue list: ${diff}`);
     }
   }
   console.log(
-    `  ${agree} of ${parityCases.length} failure fixtures give the same issue list; the divergences above are the zod3 line's own failure semantics and are compared, not hidden, before the timings below`,
+    `  ${agree} of ${parityCases.length} failure fixtures give the identical issue list (an undeclared difference aborts the run), compared before the timings below`,
   );
 
   /* ─────────────────────────── (b) datasets with invalid rows ─────────────────────────── */

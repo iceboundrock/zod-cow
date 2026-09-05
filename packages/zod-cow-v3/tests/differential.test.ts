@@ -4,8 +4,8 @@
  *   2. On success, output values are deepStrictEqual (key-set semantics aligned: absent optional keys, present-undefined, etc.)
  *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place,
  *      and never freeze the input (readonly freezes a copy, #27)
- *   4. On failure, the issue lists agree on count, codes, paths and messages (the params beyond
- *      those are compared for the fields stock and this line both carry)
+ *   4. On failure, the issue lists are identical: same order, and per issue every property stock
+ *      carries (code, path, message, `fatal`, the check params, a union's nested errors)
  * Extra statistic: top-level reference sharing rate (CoW hit rate).
  *
  * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro.
@@ -79,12 +79,18 @@ const DATES = [
 function repr(v: unknown): string {
   try {
     return (
-      JSON.stringify(v, (_k, x) => {
-        if (typeof x === "bigint") return `${x}n`;
-        if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
-        if (typeof x === "symbol") return String(x);
+      // The replacer reads the raw value off its holder: JSON.stringify applies `toJSON` (a Date
+      // becomes its ISO string, an invalid Date `null`) before handing the value to the replacer
+      JSON.stringify({ v }, function (this: any, k, x) {
+        const raw = this[k];
+        if (typeof raw === "bigint") return `${raw}n`;
+        if (raw instanceof Date)
+          return Number.isNaN(raw.getTime()) ? "Date(NaN)" : raw.toISOString();
+        if (raw instanceof Map) return `Map(${repr([...raw])})`;
+        if (raw instanceof Set) return `Set(${repr([...raw])})`;
+        if (typeof raw === "symbol") return String(raw);
         return x;
-      }) ?? String(v)
+      })?.slice(5, -1) ?? String(v)
     );
   } catch {
     return String(v);
@@ -182,8 +188,10 @@ function bNumber(rng: RNG): Built {
   };
 }
 
+const ANYTHING = [1, "a", null, true, { a: 1 }, [1, 2], undefined] as const;
+
 function bLeaf(rng: RNG): Built {
-  const which = rng.int(9);
+  const which = rng.int(10);
   switch (which) {
     case 0:
       return bString(rng);
@@ -228,6 +236,17 @@ function bLeaf(rng: RNG): Built {
           r.chance(0.25) ? r.pick(["z", 4, null, true] as const) : r.pick(["a", "b", 3] as const),
       };
     }
+    case 8:
+      // A pass-through leaf that accepts a container too: stock returns the input itself, so a
+      // readonly above it (directly or through a union / transform / catch) freezes in place
+      return {
+        schema: z.unknown(),
+        desc: "unknown",
+        gen: (r) => {
+          const v = r.pick(ANYTHING);
+          return v !== null && typeof v === "object" ? structuredClone(v) : v;
+        },
+      };
     default:
       // create params: a required_error / invalid_type_error map on a plain string
       return {
@@ -477,13 +496,15 @@ function bDiscriminated(rng: RNG, depth: number): Built {
   };
 }
 
-function bUnion(rng: RNG, _depth: number): Built {
+function bUnion(rng: RNG, depth: number): Built {
   const n = 2 + rng.int(2);
   const branches: Built[] = [];
   const kinds: string[] = [];
   const used = new Set<string>();
   while (branches.length < n) {
-    const b = bLeaf(rng);
+    // An option is a leaf or, below the top level, any generated schema (a container, a nested
+    // union, a wrapper such as readonly / catch / transform), one option per kind
+    const b = depth > 0 && rng.chance(0.4) ? bChild(rng, depth) : bLeaf(rng);
     const tag = b.desc.split(/[.(]/)[0]!;
     if (used.has(tag)) continue;
     used.add(tag);
@@ -532,15 +553,16 @@ let issueMismatches = 0;
 const failures: string[] = [];
 
 /**
- * Canonical view of an issue list: code, path and message per issue, plus the params both sides
- * carry (a union's nested errors are compared by their own issue views), sorted so the order of
- * collection does not matter.
+ * Canonical view of an issue list, in collection order: code, path and message per issue, plus
+ * every other property the issue carries (`fatal`, the check params; a union's nested errors are
+ * compared by their own issue views). Two lists compare equal only when they hold the same issues
+ * in the same order, so the order of collection is part of what the fuzzer checks.
  */
 function issueView(issues: readonly any[]): string {
   const one = (i: any): string => {
     const params: Record<string, unknown> = {};
     for (const k of Object.keys(i).sort()) {
-      if (k === "code" || k === "path" || k === "message" || k === "fatal") continue;
+      if (k === "code" || k === "path" || k === "message") continue;
       if (k === "unionErrors") {
         params[k] = i[k].map((e: any) => issueView(e.issues));
         continue;
@@ -549,7 +571,7 @@ function issueView(issues: readonly any[]): string {
     }
     return `${i.code}@${repr(i.path)} ${repr(i.message)} ${repr(params)}`;
   };
-  return issues.map(one).sort().join(" ; ");
+  return issues.map(one).join(" ; ");
 }
 
 for (let seed = 1; seed <= SEEDS; seed++) {

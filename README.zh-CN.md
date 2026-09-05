@@ -34,7 +34,7 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 pnpm install
 pnpm run build       # 构建 zod-cow-v4（ESM + 类型声明，输出到 packages/zod-cow-v4/dist）
 pnpm run test:v4     # zod4 线：版本金丝 + 冒烟测试 + 20000 case 差分模糊（对比 stock zod4）
-pnpm run test:v3     # zod3 线：38 个单元测试 + 20000 case 差分模糊（对比 stock zod3，含 issue 列表），生成骨架与闭包骨架各跑一遍
+pnpm run test:v3     # zod3 线：45 个单元测试 + 20000 case 差分模糊（对比 stock zod3，含有序 issue 列表），生成骨架与闭包骨架各跑一遍
 pnpm run smoke:pack  # 打包 zod-cow-v4，并在临时消费者项目中验证 tarball
 pnpm run bench:v4    # zod4 基准，对构建产物测量，50 万条记录（需 node --expose-gc，脚本已配置）
 pnpm run bench:v3    # zod3 基准：S1～S9、单记录校准与规模扫描，ArkType 为一列
@@ -43,7 +43,7 @@ pnpm run probe:v3    # 实测 stock zod3 的边界语义（zod3 线）
 pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的承诺
 ```
 
-环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数（不小于 10 的整数）。
+环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数（不小于 10 的整数）。S2、S3、S9 的脏行 / 无效行比例按每 round(1 / 比例) 行标记一行，所以只有 `BENCH_N` 是该周期的倍数时比例才精确（1% 行需要 100 的倍数）；每个场景都会打印实际标记的行数。
 
 > 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)
@@ -75,7 +75,7 @@ zod3 线不发布。它位于 `packages/zod-cow-v3`，由自己的测试和 `ben
 | 特性 | 何时拷贝 |
 |---|---|
 | string / number / boolean / bigint / date / literal / enum / instanceof、refine（纯谓词）、optional / nullable / any / unknown | 永不 |
-| readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线通过对内层 schema 的静态分析得到同样的结果：stock zod3 会重建的地方（容器、`date`、transform）冻结副本，只有 `any` / `unknown` 之上原地冻结输入（#27） |
+| readonly | zod4 线把子树交给官方 parser（纯度分析把 `Object.freeze` 视为副作用），所以冻结的正是 stock zod 4 会冻结的东西。作用于容器（`object` / `array` / `tuple` / `record` / `map` / `set`）时那是一个新容器：副本被冻结，输入既不被冻结也不被共享。作用于透传叶子（`any` / `unknown` / `custom` 或其包装）时 stock 直接返回输入并原地冻结，本线同样如此（#28）。zod3 线通过分析内层 schema 得到同样的结果：stock zod3 会重建的地方（容器、`date` 及其包装）冻结副本，透传叶子（`any` / `unknown`）之上原地冻结输入。答案取决于运行时走到哪个分支时（各分支不一致的 union、回退值可能就是输入的 `catch`、由这类节点组成的 pipeline），由做决定的节点在运行时上报；transform / refine / preprocess 若原样返回收到的引用则沿用其内层 schema 的答案，返回别的引用则原地冻结，与 stock 冻结回调交回的东西一致（#27） |
 | object / array / tuple / record / map / set | 所有子值未变则永不：返回输入原引用 |
 | union / discriminatedUnion | 所有分支都是叶子（或 optional / nullable 包裹的叶子）且命中分支返回其输入则永不。带容器分支（object / array / tuple / record / map / set，含 optional / nullable 包裹）的 union 整体交给官方 parser，命中的容器按 stock 的方式重建，因此总会拷贝；保留 CoW 路径的 union 骨架是后续工作（#47） |
 | default | 仅当 `undefined` 实际被替换 |
@@ -179,9 +179,9 @@ zod3 线有自己的套件 `bench-v3`（`pnpm run bench:v3`），方法相同，
 | S8 strip 未声明键 | 278 ms | **37 ms（+23.7 MB / +9.5 MB）** | 1 113 ms | 7.52x | 30.14x |
 | S9 逐行 parse，1% / 10% / 50% / 100% 无效 | 265 / 273 / 299 / 340 ms | **33 / 37 / 58 / 79 ms** | 36 / 104 / 301 / 474 ms | 8.02x～4.29x | 1.08x～5.99x |
 | 校准 parse，6 字段记录 | 2 123 ns | **107 ns** | 80 ns | 19.8x | 0.75x |
-| S9 失败热循环（首键 / 末键 / 嵌套 / 三个兄弟 / 数组 / tuple） | 6.5 / 6.5 / 6.3 / 8.1 / 6.4 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.6 / 1.4 / 0.9 µs** | 7.3 / 12.4 / 7.5 / 20.3 / 7.9 / 6.3 µs | 4.5x～4.9x | 5.1x～7.8x |
+| S9 失败热循环（首键 / 末键 / 嵌套 / 三个兄弟 / 数组 / tuple） | 6.5 / 6.5 / 6.3 / 8.1 / 6.4 / 4.0 µs | **1.4 / 1.3 / 1.3 / 2.6 / 1.4 / 0.9 µs** | 7.3 / 12.4 / 7.5 / 20.3 / 7.9 / 6.3 µs | 3.1x～4.9x | 5.2x～9.4x |
 
-怎么读：zod3 线在干净 parse 上与 ArkType 持平（S1 0.99x，S4 0.93x，在这个规模下属 runner 噪声），叶子与 tuple 扫描也持平；深嵌套与长数组落后（该次运行的规模扫描：嵌套深度 5 为 195 ns 对 79 ns，100 元素数组 643 ns 对 170 ns，每个嵌套骨架和每个元素各一次单态调用）；凡 ArkType 的 morph 重建整棵树之处（S2、S3、S7、S8）则大幅领先。失败路径携带 stock 完全一致的 issue 列表（该次运行的一致性小节：16 / 16 个 fixture），成本为 stock 的五分之一。本轮之前 zod3 线在 S1 上对 stock 为 3.2x～3.7x（本地 50 万行：572 ms 对 2 101 ms），失败热循环慢于 stock；50 万行的前后对照表见 [CHANGELOG](CHANGELOG.md#unreleased)。run 33940596453 与 33837195401 的被取代表格和更早的本地 50 万记录表格（含 v0.5 的 zod4 表、已移除的 v0.2 前端与 v0.3 的表）见 [CHANGELOG](CHANGELOG.md)。
+怎么读：zod3 线在干净 parse 上与 ArkType 持平（S1 0.99x，在这个规模下属 runner 噪声；S4 把同一个 parse 运行时放在 ArkType 仅做校验的 `allows` 旁边，读作 0.93x，每行做的工作量并不相同），叶子与 tuple 扫描也持平；深嵌套与长数组落后（该次运行的规模扫描：嵌套深度 5 为 195 ns 对 79 ns，100 元素数组 643 ns 对 170 ns，每个嵌套骨架和每个元素各一次单态调用）；凡 ArkType 的 morph 重建整棵树之处（S2、S3、S7、S8）则大幅领先。失败路径携带 stock 的 issue 列表（该次运行的一致性小节：16 / 16 个 fixture 顺序与每个属性完全一致；未声明的差异会中止运行），成本为 stock 的五分之一。本轮之前 zod3 线在 S1 上对 stock 为 3.2x～3.7x（本地 50 万行：572 ms 对 2 101 ms），失败热循环慢于 stock；50 万行的前后对照表见 [CHANGELOG](CHANGELOG.md#unreleased)。run 33940596453 与 33837195401 的被取代表格和更早的本地 50 万记录表格（含 v0.5 的 zod4 表、已移除的 v0.2 前端与 v0.3 的表）见 [CHANGELOG](CHANGELOG.md)。
 
 ### 跨库对比
 
@@ -203,18 +203,19 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - 差分模糊（`packages/zod-cow-v4/tests/differential-z4.test.ts`）：随机嵌套 object / array / tuple / record / map / set / union（普通 union 取 2 到 3 个随机分支，因此会出现带未声明键的 object 分支；另有两个 object 分支的 discriminatedUnion；生成器自 #47 起才生成 union，此前尽管列表如此写，却从未生成过），套 optional / nullable / default / refine / transform 及 async refine / transform，与 stock zod4 比较成败奇偶、`deepStrictEqual` 输出（Map/Set 按条目集合比较）和输入零失真（structuredClone 快照）。v0.5 的 50 000 case 运行：成功 20 813 / 失败 29 187，成功 case 顶层引用共享率 89.1%，stock 降级 0 次。代码默认 200 × 100 = 20 000 case。每个 case 跑两遍：先用默认选项，再以 `ownSymbolKeys: "ignore"` 编译，输入相同但不带该选项被记录为与 stock 不同的那个额外自有 symbol（自 #42 起生成器在所有对象模式下都会发出它），并额外检查生成的顶层骨架不含探测、第二遍的引用共享不少于第一遍（加入 union 生成器与 #47 的 union 规则后，默认规模下成功 case 中分别为 85.6% 与 86.2%；此前为 88.8% 与 89.4%，#43）。
 - 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式与 record 三路径下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、async 贯穿全部容器、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
-- zod3 线有 38 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`）：随机的 object / array / tuple / record / map / set / union / discriminatedUnion schema，配 optional / nullable / default / catch / readonly / refine / transform 包装、创建参数 error map 以及 string 的 `length` / `includes` / `startsWith` 检查，对比 stock zod3 的成败一致性、`deepStrictEqual` 输出、零输入改动（structuredClone 快照）、输入与输出的冻结状态，并在每个失败 case 上比较完整的 issue 列表（数量、code、path、message 以及双方都携带的 params，含 union 的嵌套错误）。它跑两遍：生成骨架与闭包回退（`--no-codegen`）。成功 case 的顶层引用共享率在这个生成器下约 88%（在之前较小的生成器下为 92.1%，与本轮工作之前相同）。
+- zod3 线有 45 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`）：随机的 object / array / tuple / record / map / set / union / discriminatedUnion schema、接受容器的透传叶子 `unknown`、union 分支可以是叶子、容器或带包装的 schema（于是会出现 `readonly` 之下的 union，以及 union 分支上的 `readonly` / `catch` / `transform`），配 optional / nullable / default / catch / readonly / refine / transform 包装、创建参数 error map 以及 string 的 `length` / `includes` / `startsWith` 检查，对比 stock zod3 的成败一致性、`deepStrictEqual` 输出、零输入改动（structuredClone 快照）、输入与输出的冻结状态，并在每个失败 case 上比较有序的 issue 列表（每条 issue 按 stock 的顺序，带上它携带的每个属性：code、path、message、`fatal`、检查参数、union 的嵌套错误）。它跑两遍：生成骨架与闭包回退（`--no-codegen`）。成功 case 的顶层引用共享率在这个生成器下约 87%（在更早、较小的生成器下为 92.1%，与本轮工作之前相同）。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
 
 ## 已知限制（原型范围）
 
 - 结构共享可观察：两次 parse 同一输入返回同一引用；修改输出会影响输入。只有 zod3 线的 `validate()` 在类型层用 `DeepReadonly` 提示这一点；zod4 线的 `validate()` 返回 `unknown`，`parse` / `safeParse` 用普通的 zod 输出类型。需要独立副本时用 stock `schema.parse`。
 - refine 不得修改输入（CoW 前提）；开发期可 deep-freeze 输入抓违规。
+- 回调看到的是 CoW 输出而不是新容器：容器之上的 `refine` / `superRefine` / `transform` 在其下没有任何改动时收到的是输入引用，而 stock 的回调收到的是 stock 刚重建的容器。仅因自身长度 / 大小检查而变脏的容器（`array.max`、`set.size`）也包括在内：值按原引用继续向上，issue 已记录。只有在回调内比较引用身份时才能观察到。
 - 失败时的 refine 副作用：parse 失败时 refine 回调先在骨架里跑一次，再在 stock 回退里跑一次，共两次。官方 `zod/compile` shim 语义相同。
 - 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。zod4 对象骨架做出的拷贝按 shape 序排列，与 stock 一致。
 - 不支持，明确失败而非静默漂移：
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
-  - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`。编译期抛 `ZcNotSupportedError`；async refine / transform / preprocess（回调返回 thenable）在 parse 时抛出。
+  - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`。编译期抛 `ZcNotSupportedError`；async refine / transform / preprocess（回调返回 `Promise`）在 parse 时抛出。普通 thenable 与 stock 一样按同步结果处理（stock 的检测是 `instanceof Promise`）；stock 的同步 parser 会把 preprocess 返回的 `Promise` 当作数据交给内层 schema，本线则拒绝它。
 - 带容器分支的 union 总会拷贝：分支全为叶子的 union 按原引用返回输入，但只要有一个 object / array / tuple / record / map / set 分支（含 optional / nullable 包裹），整个 union 就交给官方 parser，因为分支拿不到自己的骨架，而官方 validator 会保留 stock 会剥掉的未声明键（#47）。stock 的 parser 会重建命中的容器，所以该 union 的值以及到根的路径每次 parse 都会拷贝。按顺序尝试各分支 CoW 产物的 union 骨架能恢复共享，是后续工作。
 - NaN：`z.nan()` 恒判脏（`NaN !== NaN`），输出仍正确，仅多一次拷贝。
 - symbol 键 / getter：stock 的重建在每条路径上都会丢弃未声明的自有 symbol 键（无论其是否可枚举），对象的所有模式与 record 皆然。默认情况下骨架先证明没有这样的键再按原引用返回输入，否则拷贝：对象骨架在所有模式下探测（strip 自 #33 起，strict 与 loose 自 #42 起），enum 键的 record 以同样方式探测，遍历键的 record 像 stock 一样把可枚举的 symbol 键当作键来校验，并在其键循环里把不可枚举的 symbol 键判脏（#51）。在 `compile(schema, { ownSymbolKeys: "ignore" })` 下跳过这些探测：干净输入按原引用返回并保留自有 symbol 键，而骨架做出的拷贝仍像 stock 一样丢弃它们，所以此时结果取决于容器是否为脏（#43）。zod4 对象骨架与 enum 键 record 骨架在两条路径上都只读取 getter 一次，与 stock 相同；数组、遍历键的 record、map、set 骨架在脏路径上用 `slice()` / `{ ...input }` / `new Map(input)` / `new Set(input)` 拷贝，会第二次读取访问器属性（#36）。

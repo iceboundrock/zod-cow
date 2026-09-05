@@ -31,6 +31,7 @@ import {
   pushInvalidType,
   pushIssue,
   safeSet,
+  isObjectType,
 } from "./internal.js";
 import { CODEGEN_AVAILABLE, genArray, genObject, genTuple } from "./codegen.js";
 import { PROBE } from "./probe.js";
@@ -706,6 +707,11 @@ function makeObject(def: any): Validator {
   // Key → shape index, for the undeclared-key probe below
   const keyIndex = new Map<string, number>();
   for (let i = 0; i < n; i++) keyIndex.set(keys[i]!, i);
+  // A declared "__proto__" key is validated but never written (stock's output assembly skips it,
+  // and `out["__proto__"] = v` would set the prototype of the copy); an own "__proto__" on the
+  // input is dropped from the output on every path (see the generated skeleton in codegen.ts)
+  const protoIdx = keys.indexOf("__proto__");
+  const dropOwnProto = protoIdx !== -1 || mode === "passthrough";
 
   // Probe-driven version compatibility. Measured on zod 3.24.1: an absent optional key is not materialized (output {}),
   // and present-undefined is kept — both agree naturally with pass-through semantics, so the branches below usually do not fire.
@@ -730,7 +736,7 @@ function makeObject(def: any): Validator {
   }
 
   return (data, ctx): any => {
-    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    if (!isObjectType(data)) {
       pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
@@ -779,12 +785,19 @@ function makeObject(def: any): Validator {
           dirty = true;
           out = { ...data };
         }
-        out[k] = outVal;
+        if (i !== protoIdx) out[k] = outVal;
       }
     }
     // An aborted child aborts the object, after the strict probe below has had its say (stock parses
     // every pair, then reports the unrecognized keys, then returns INVALID)
     if (anyFailed && mode !== "strict") return FAILED;
+    if (dropOwnProto && hop.call(data, "__proto__")) {
+      if (!dirty) {
+        dirty = true;
+        out = { ...data };
+      }
+      Reflect.deleteProperty(out, "__proto__");
+    }
 
     if (mode !== "passthrough") {
       // Undeclared-key probe. strip only needs to know whether an extra own key exists (stops at the
@@ -824,6 +837,7 @@ function makeObject(def: any): Validator {
         const src = out;
         out = {};
         for (let i = 0; i < n; i++) {
+          if (i === protoIdx) continue;
           const k = keys[i]!;
           // Aligned with alwaysSet semantics: stock keeps only keys that are "not undefined or present in the input"
           if (src[k] !== undefined || hop.call(data, k)) out[k] = src[k];
@@ -1026,7 +1040,7 @@ function makeRecord(def: any): Validator {
   const valV = go(def.valueType);
   const eager = subtreeHasEffect(def.keyType) || subtreeHasEffect(def.valueType);
   return (data, ctx): any => {
-    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    if (!isObjectType(data)) {
       pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
@@ -1189,10 +1203,22 @@ function makeSet(def: any): Validator {
 
 /* ════════════════════════════ Union / DiscriminatedUnion ════════════════════════════ */
 
+/**
+ * Per-option provenance reports for a union whose options disagree on whether stock rebuilds
+ * (see `stockRebuilds`): the report of the winning option, or `undefined` where the option reports
+ * for itself or the union needs no report at all.
+ */
+function unionReports(options: z.ZodTypeAny[]): (boolean | undefined)[] | null {
+  const answers = options.map((o) => stockRebuilds(o));
+  if (answers.every((a) => a === true) || answers.every((a) => a === false)) return null;
+  return answers.map((a) => (a === null ? undefined : a));
+}
+
 function makeUnion(def: any): Validator {
   const em: ZodErrorMap | undefined = def.errorMap;
   const opts: Validator[] = (def.options as z.ZodTypeAny[]).map(go);
   const n = opts.length;
+  const reports = unionReports(def.options);
   return (data, ctx): any => {
     const base = ctx.issues.length;
     // Same as stock: the first valid option wins; failing that, the first dirty option (a value with
@@ -1203,7 +1229,10 @@ function makeUnion(def: any): Validator {
     for (let i = 0; i < n; i++) {
       const r = opts[i]!(data, ctx);
       if (ctx.issues.length === base) {
-        if (r !== FAILED) return r;
+        if (r !== FAILED) {
+          if (reports !== null && reports[i] !== undefined) ctx.rebuilt = reports[i]!;
+          return r;
+        }
         continue; // an option that aborted without an issue cannot happen; keep looking
       }
       const issues = ctx.issues.splice(base); // Truncate the issues produced by this option
@@ -1234,8 +1263,16 @@ function makeDiscriminated(def: any): Validator {
   const map = new Map<unknown, Validator>();
   for (const [v, opt] of optionsMap) map.set(v, go(opt));
   const options = [...optionsMap.keys()];
+  const reports = unionReports(def.options);
+  const reportOf = new Map<unknown, boolean>();
+  if (reports !== null) {
+    (def.options as z.ZodTypeAny[]).forEach((opt, i) => {
+      if (reports[i] === undefined) return;
+      for (const [v, o] of optionsMap) if (o === opt) reportOf.set(v, reports[i]!);
+    });
+  }
   return (data, ctx): any => {
-    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    if (!isObjectType(data)) {
       pushInvalidType(ctx, data, em, "object");
       return FAILED;
     }
@@ -1244,7 +1281,12 @@ function makeDiscriminated(def: any): Validator {
       pushIssue(ctx, data, em, { code: "invalid_union_discriminator", options, path: [disc] });
       return FAILED;
     }
-    return option(data, ctx); // The option's result passes through as it is, issues included (same as stock)
+    const r = option(data, ctx); // The option's result passes through as it is, issues included (same as stock)
+    if (reports !== null) {
+      const report = reportOf.get(data[disc]);
+      if (report !== undefined) ctx.rebuilt = report;
+    }
+    return r;
   };
 }
 
@@ -1280,10 +1322,6 @@ function makeShim(holder: EffectHolder, em: ZodErrorMap | undefined): EffectShim
   };
 }
 
-function isThenable(v: unknown): boolean {
-  return v !== null && typeof v === "object" && typeof (v as any).then === "function";
-}
-
 function makeEffects(def: any): Validator {
   const em: ZodErrorMap | undefined = def.errorMap;
   const inner = go(def.schema);
@@ -1295,14 +1333,19 @@ function makeEffects(def: any): Validator {
     return (data, ctx) => {
       holder.ctx = ctx;
       holder.data = data;
+      holder.fatal = false;
       const mapped = eff.transform(data, shim); // May throw (same as stock, propagates upward)
-      if (isThenable(mapped)) {
+      // Stock's sync parser hands a Promise on to the inner schema as data; this line refuses it
+      // (an explicit failure, documented under known limitations) instead of validating a Promise
+      if (mapped instanceof Promise) {
         throw new ZcNotSupportedError(
           "async preprocess (the sync compiler only accepts sync data)",
         );
       }
-      // Same as stock: with any issue on the context at this point the raw input goes on as dirty
-      if (ctx.issues.length !== 0) return data;
+      // Same as stock: a fatal issue from the callback aborts; otherwise the inner schema runs on
+      // the mapped value, dirty when the callback left a non-fatal issue (issues from other
+      // nodes of the same parse do not matter here)
+      if (holder.fatal) return FAILED;
       return inner(mapped, ctx);
     };
   }
@@ -1315,13 +1358,16 @@ function makeEffects(def: any): Validator {
       if (ctx.issues.length !== base) return r; // dirty: stock does not run the transform
       holder.ctx = ctx;
       holder.data = data;
+      holder.fatal = false;
       const t = eff.transform(r, shim); // Returns a new value → the parent's reference comparison marks dirty automatically
-      if (isThenable(t)) {
+      // Stock's detector: an actual Promise, not any thenable (an object with a `then` method is
+      // an ordinary sync result there and here)
+      if (t instanceof Promise) {
         throw new ZcNotSupportedError(
           "async transforms (the sync compiler only accepts sync data)",
         );
       }
-      return t;
+      return holder.fatal ? FAILED : t; // a fatal issue from the callback aborts, as in stock
     };
   }
 
@@ -1334,7 +1380,7 @@ function makeEffects(def: any): Validator {
     holder.data = data;
     holder.fatal = false;
     const ret = eff.refinement(r, shim);
-    if (isThenable(ret)) {
+    if (ret instanceof Promise) {
       throw new ZcNotSupportedError("async refinements (the sync compiler only accepts sync data)");
     }
     return holder.fatal ? FAILED : r;
@@ -1356,10 +1402,19 @@ function makeDefault(def: any): Validator {
 function makeCatch(def: any): Validator {
   const inner = go(def.innerType);
   const catchValue: (p: { error: ZcError; input: unknown }) => unknown = def.catchValue;
+  // Provenance for a `readonly` above (see `stockRebuilds`): stock hands the fallback callback the
+  // raw input, so a callback returning it gives readonly the input to freeze in place, where the
+  // success path gives it the inner schema's output
+  const innerRebuilds = stockRebuilds(def.innerType);
+  const reports = innerRebuilds !== false;
   return (data, ctx) => {
     const base = ctx.issues.length;
     const r = inner(data, ctx); // A throwing callback propagates, as in stock (no try/catch)
-    if (r !== FAILED && ctx.issues.length === base) return r;
+    if (r !== FAILED && ctx.issues.length === base) {
+      if (reports && innerRebuilds !== null) ctx.rebuilt = innerRebuilds;
+      return r;
+    }
+    if (reports) ctx.rebuilt = false;
     // Aborted or dirty: the inner issues are dropped (stock parses into a separate context) and
     // handed to the catch callback, which gets the input too
     const issues = ctx.issues.splice(base);
@@ -1377,13 +1432,29 @@ function makeCatch(def: any): Validator {
  * tuple / record / map / set, or a wrapper around one), so that `readonly` freezes a copy there
  * and leaves the caller's input untouched. A pass-through leaf (`any` / `unknown`) returns the
  * input itself in stock and is frozen in place there too; a Date is rebuilt by stock as well.
- * Transforms are treated as rebuilding:
- * the callback saw a different reference in stock, so freezing a copy is the safe direction.
+ *
+ * `true`: always rebuilt; `false`: never (the input passes through); `null`: decided by the branch
+ * taken at run time, which the deciding node reports through `ctx.rebuilt` (a union whose options
+ * disagree, a catch whose fallback may hand back the input, a pipeline of two such nodes).
+ *
+ * A transform, refinement or preprocess reports its inner schema: `readonly` only consults this
+ * when the callback handed back the very reference it received, and stock's callback received the
+ * inner schema's output (fresh over a container, the input over a pass-through leaf). A callback
+ * returning another reference is frozen in place, as stock freezes what it is handed.
  */
-function stockRebuilds(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
-  if (seen.has(schema)) return true;
-  seen.add(schema);
-  const def: any = (schema as any)._def;
+function stockRebuilds(
+  schema: z.ZodTypeAny,
+  memo = new Map<z.ZodTypeAny, boolean | null>(),
+): boolean | null {
+  const known = memo.get(schema);
+  if (known !== undefined) return known;
+  memo.set(schema, true); // a cycle (through z.lazy) always runs through a container
+  const answer = stockRebuildsOf((schema as any)._def, memo);
+  memo.set(schema, answer);
+  return answer;
+}
+
+function stockRebuildsOf(def: any, memo: Map<z.ZodTypeAny, boolean | null>): boolean | null {
   switch (def.typeName) {
     case "ZodObject":
     case "ZodArray":
@@ -1394,22 +1465,34 @@ function stockRebuilds(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): bo
     case "ZodDate": // stock returns `new Date(input.getTime())`
       return true;
     case "ZodUnion":
-    case "ZodDiscriminatedUnion":
-      return (def.options as z.ZodTypeAny[]).some((o) => stockRebuilds(o, seen));
+    case "ZodDiscriminatedUnion": {
+      const answers = (def.options as z.ZodTypeAny[]).map((o) => stockRebuilds(o, memo));
+      if (answers.every((a) => a === true)) return true;
+      if (answers.every((a) => a === false)) return false;
+      return null;
+    }
     case "ZodEffects":
-      return def.effect.type === "transform" ? true : stockRebuilds(def.schema, seen);
+      return stockRebuilds(def.schema, memo);
+    case "ZodCatch":
+      // The fallback callback may return the raw input; only a never-rebuilding inner is static
+      return stockRebuilds(def.innerType, memo) === false ? false : null;
     case "ZodOptional":
     case "ZodNullable":
     case "ZodDefault":
-    case "ZodCatch":
     case "ZodReadonly":
-      return stockRebuilds(def.innerType, seen);
-    case "ZodPipeline":
-      return stockRebuilds(def.out, seen);
+      return stockRebuilds(def.innerType, memo);
+    case "ZodPipeline": {
+      // Either side rebuilding gives the `out` side a fresh reference in stock
+      const a = stockRebuilds(def.in, memo);
+      const b = stockRebuilds(def.out, memo);
+      if (a === true || b === true) return true;
+      if (a === false && b === false) return false;
+      return null;
+    }
     case "ZodBranded":
-      return stockRebuilds(def.type, seen);
+      return stockRebuilds(def.type, memo);
     case "ZodLazy":
-      return stockRebuilds(def.getter(), seen);
+      return stockRebuilds(def.getter(), memo);
     default:
       return false;
   }
@@ -1425,7 +1508,7 @@ function shallowCopy(v: object): object {
 
 function makeReadonly(def: any): Validator {
   const inner = go(def.innerType);
-  const copyBeforeFreeze = stockRebuilds(def.innerType);
+  const rebuilds = stockRebuilds(def.innerType);
   return (data, ctx) => {
     const base = ctx.issues.length;
     let r = inner(data, ctx);
@@ -1434,8 +1517,10 @@ function makeReadonly(def: any): Validator {
     if (r !== null && (typeof r === "object" || typeof r === "function")) {
       // Stock freezes the output it built. Where that output would be a fresh container, freeze a
       // copy so the caller's input is not frozen in place (#27); a pass-through leaf is frozen in
-      // place, exactly as stock does.
-      if (r === data && copyBeforeFreeze) r = shallowCopy(r);
+      // place, exactly as stock does. When the inner schema decides that per branch (a union, a
+      // catch) the deciding node reported it through `ctx.rebuilt`.
+      if (r === data && (rebuilds === true || (rebuilds === null && ctx.rebuilt)))
+        r = shallowCopy(r);
       Object.freeze(r);
     }
     return r;
@@ -1445,12 +1530,19 @@ function makeReadonly(def: any): Validator {
 function makePipe(def: any): Validator {
   const a = go(def.in);
   const b = go(def.out);
+  // Both sides deciding provenance at run time (see `stockRebuilds`): a rebuilt `in` output stays
+  // fresh through a pass-through `out` branch, so the reports combine as an OR
+  const bothReport = stockRebuilds(def.in) === null && stockRebuilds(def.out) === null;
   return (data, ctx) => {
     const base = ctx.issues.length;
     const r = a(data, ctx);
     if (r === FAILED) return FAILED;
     if (ctx.issues.length !== base) return r; // dirty: stock stops before the `out` side
-    return b(r, ctx); // The dirty mark propagates naturally along the chain
+    if (!bothReport) return b(r, ctx); // The dirty mark propagates naturally along the chain
+    const inRebuilt = ctx.rebuilt;
+    const out = b(r, ctx);
+    if (inRebuilt) ctx.rebuilt = true;
+    return out;
   };
 }
 

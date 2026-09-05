@@ -122,8 +122,9 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
       name: "valid record with an extra key",
       input: v({ extra: 1 }),
       accept: true,
-      outputDiffers:
-        "zod strips the undeclared key into a copy, ArkType passes it through (S8 covers strip parity)",
+      outputDiffers: {
+        ark: "zod strips the undeclared key into a copy, ArkType passes it through (S8 covers strip parity)",
+      },
     },
     { name: "non-integer id (1.5)", input: v({ id: 1.5 }), accept: false },
     { name: "name is a number", input: v({ name: 1 }), accept: false },

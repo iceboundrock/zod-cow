@@ -568,6 +568,13 @@ return out;
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
    Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
    pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+6. 运行时识别（#76 第四轮 review）：返回 `Promise` 的普通函数能通过所有静态探测（官方的 `isAsyncFunction`
+   与 `isAsyncFn` 都只看语法），所以 schema 是同步骨架，`Promise` 在运行时才遇到。checks 子程序与官方产物
+   在那里抛 `$ZodAsyncError`（`product.ts` 的 `throwAsync` 抛的是 stock 的类，与官方 `throwAsync` 一致；
+   transform 返回的 `Promise` 在官方产物里答 INVALID）。同步 API 让这个 throw 出去，与 stock 一致；
+   `parseAsync` / `safeParseAsync` 在两种骨架下都接住它，并像到达 async 入口的每个 INVALID 一样把这次 parse 交给
+   stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
+   在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。
 
 关键语义保留：同步 island（`makeIsland`）遇到 Promise 时抛 `$ZodAsyncError`（官方
 compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。
@@ -602,6 +609,9 @@ compile(schema)
 async 骨架（ctx.async = true）的顶层契约：
   Compiled.async = true → sync parse/safeParse/validate 抛 $ZodAsyncError；
   parseAsync/safeParseAsync 可用，失败路径回退 stock safeParseAsync。
+同步骨架（ctx.async = false）：
+  parseAsync/safeParseAsync 先跑快路径，遇到 INVALID 时回退到 stock safeParseAsync，
+  遇到普通函数返回 Promise 时快路径抛出的 $ZodAsyncError 也走同一回退（§5.5 第 6 条）。
 ```
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的

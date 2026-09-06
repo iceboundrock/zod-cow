@@ -73,12 +73,12 @@ Every field is optional. The defaults give exact stock semantics; `compile(schem
 |---|---|---|
 | `parse(data)` | `(data: unknown) => z.output<T>` | Returns the input reference when nothing changed, otherwise a copy along the dirty path only. Throws the stock `ZodError` on failure. Throws `$ZodAsyncError` when `async` is true. |
 | `safeParse(data)` | `(data: unknown) => { success: true; data: z.output<T> } \| { success: false; error: z.ZodError }` | Non-throwing `parse`. The failure branch is stock `safeParse`, so `error` is the official `ZodError` with the official issues. Throws `$ZodAsyncError` when `async` is true. |
-| `parseAsync(data)` | `(data: unknown) => Promise<z.output<T>>` | Async `parse`; works for sync and async schemas. |
-| `safeParseAsync(data)` | `(data: unknown) => Promise<…>` | Async `safeParse`. |
+| `parseAsync(data)` | `(data: unknown) => Promise<z.output<T>>` | Async `parse`; works for sync and async schemas. A plain function that returns a `Promise` is not an async function to zod's compiler or to this layer, so such a schema compiles as sync (`async` is `false`) and the fast path meets the `Promise` at runtime; that parse then runs on stock's async runtime, whose output is stock's copy, and the callbacks called before the `Promise` run a second time there, the same duplicate as on a failing parse. |
+| `safeParseAsync(data)` | `(data: unknown) => Promise<…>` | Async `safeParse`; the same runtime fallback as `parseAsync`. |
 | `validate(data)` | `(data: unknown) => unknown` | Validation only, no output construction: returns the input reference when the schema accepts it, `null` when it does not. Typed `unknown` on purpose: the result is the caller's own object. Throws `$ZodAsyncError` when `async` is true. |
 | `schema` | `T` | The schema that was compiled. |
 | `stock` | `boolean` | `true` when this layer gave up on the whole tree and every call goes through stock zod (same results, no CoW benefit). |
-| `async` | `boolean` | `true` when the schema holds an async refine or transform; then only the `*Async` methods are usable, and the sync ones throw `$ZodAsyncError` exactly as stock does. |
+| `async` | `boolean` | `true` when the schema holds an async refine or transform; then only the `*Async` methods are usable, and the sync ones throw `$ZodAsyncError` exactly as stock does. `false` when the only async signal is a plain function returning a `Promise` (see `parseAsync`): the sync methods then throw `$ZodAsyncError` when they meet it, as stock's do. |
 | `code` | `string \| null` | The generated CoW skeleton source, for debugging: the top-level skeleton, followed by every nested container skeleton the tree built (each under a `// ── nested skeleton #n ──` header, in build order). `null` when `stock` is true. |
 
 ### What is supported

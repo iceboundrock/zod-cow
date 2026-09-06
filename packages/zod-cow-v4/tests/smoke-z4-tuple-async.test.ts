@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod";
+import { $ZodAsyncError } from "zod/v4/core";
 import { compile } from "../src/index.js";
 
 let group = "";
@@ -1064,6 +1065,159 @@ head("mixed tree: a large pure container + a deep async leaf (CoW and async coex
   assert.ok(out.meta.flags === input.meta.flags, "pure record subtree is shared");
   assert.ok(out.users[0] === input.users[0], "element-level sharing");
   ok("CoW subtree sharing + async key dirtiness detection");
+}
+
+head(
+  "a plain function returning a Promise: the async entries run that parse on stock's async runtime (fourth review of #76)",
+);
+{
+  // Neither zod's compiler nor this layer detects a plain function that returns a Promise statically (both test
+  // `AsyncFunction`), so the schema compiles as sync (`async === false`) and the fast path meets the Promise at
+  // runtime, where the official code throws `$ZodAsyncError`. Stock's own `z.compile()` never runs its fast path on
+  // an async parse; here the async entries catch that throw (or the INVALID a plain-Promise transform answers) and
+  // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's class.
+  type Case = {
+    name: string;
+    make: (ok: boolean) => z.ZodType;
+    input: () => unknown;
+    validateThrows: boolean;
+  };
+  const plain = (ok: boolean) => () => Promise.resolve(ok);
+  const cases: Case[] = [
+    {
+      name: "top-level array refine",
+      make: (ok) => z.array(z.string()).refine(plain(ok)),
+      input: () => ["x"],
+      validateThrows: true,
+    },
+    {
+      name: "leaf refine under an object key",
+      make: (ok) => z.object({ a: z.string().refine(plain(ok)) }),
+      input: () => ({ a: "x" }),
+      validateThrows: true,
+    },
+    {
+      name: "refine on optional(object)",
+      make: (ok) => z.object({ a: z.string() }).optional().refine(plain(ok)),
+      input: () => ({ a: "x" }),
+      validateThrows: true,
+    },
+    {
+      name: "custom check returning a Promise",
+      make: (ok) =>
+        z.array(z.string()).check((ctx) => {
+          if (!ok) ctx.issues.push({ code: "custom", input: ctx.value, message: "no" });
+          return Promise.resolve();
+        }),
+      input: () => ["x"],
+      validateThrows: true,
+    },
+    {
+      name: "transform returning a Promise",
+      make: () => z.array(z.string()).transform((v) => Promise.resolve([...v, "t"])),
+      input: () => ["x"],
+      validateThrows: false, // the official assertOnly product answers INVALID for a Promise from a transform, so `validate` gives null
+    },
+  ];
+  for (const c of cases) {
+    for (const okCase of [true, false]) {
+      const S = c.make(okCase);
+      const C = compile(S);
+      assert.equal(C.async, false, `${c.name}: not detected statically`);
+      assert.equal(C.stock, false, `${c.name}: not degraded`);
+      const stock = await S.safeParseAsync(c.input());
+      const r = await C.safeParseAsync(c.input());
+      assert.equal(r.success, stock.success, `${c.name} ok=${okCase}: same verdict as stock`);
+      if (r.success && stock.success) {
+        assert.deepEqual(r.data, stock.data, `${c.name}: stock's output`);
+        assert.deepEqual(await C.parseAsync(c.input()), stock.data, `${c.name}: parseAsync too`);
+      } else if (!r.success && !stock.success) {
+        assert.deepEqual(r.error.issues, stock.error.issues, `${c.name}: stock's issues`);
+        await assert.rejects(
+          C.parseAsync(c.input()),
+          (e) => e instanceof z.ZodError,
+          `${c.name}: parseAsync rejects with the ZodError`,
+        );
+      }
+      assert.throws(
+        () => S.safeParse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: stock's sync API throws $ZodAsyncError`,
+      );
+      assert.throws(
+        () => C.safeParse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: safeParse throws stock's class`,
+      );
+      assert.throws(
+        () => C.parse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: parse throws stock's class`,
+      );
+      if (c.validateThrows) {
+        assert.throws(
+          () => C.validate(c.input()),
+          $ZodAsyncError,
+          `${c.name}: validate throws stock's class`,
+        );
+      } else {
+        assert.equal(C.validate(c.input()), null);
+      }
+    }
+    ok(c.name);
+  }
+
+  // The predicate runs on the fast path up to the throw and again in stock: the failure-path duplicate of the README
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine((v) => {
+      log.push(`A${v.length}`);
+      return true;
+    })
+    .refine(() => {
+      log.push("B");
+      return Promise.resolve(true);
+    });
+  const C = compile(S);
+  assert.ok(!C.async && !C.stock);
+  await S.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A1", "B"]);
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.ok(r.success);
+  assert.deepEqual(
+    log,
+    ["A1", "B", "A1", "B"],
+    "the fast path ran both predicates before the throw, then stock ran them",
+  );
+  assert.ok(!C.code?.includes("_zod"), "the skeleton is still the CoW skeleton");
+  ok(
+    "callbacks called before the throw run again in stock (the documented failure-path duplicate)",
+  );
+
+  // Inside an async skeleton the same leaf reaches the official validator, which throws too; the async entry catches it there as well
+  const M = z.object({ a: z.string().refine(plain(true)), b: z.string().refine(async () => true) });
+  const MC = compile(M);
+  assert.ok(MC.async && !MC.stock);
+  const stockM = await M.safeParseAsync({ a: "x", b: "y" });
+  const rM = await MC.safeParseAsync({ a: "x", b: "y" });
+  assert.ok(rM.success && stockM.success);
+  assert.deepEqual(rM.data, stockM.data);
+  const badM = await MC.safeParseAsync({ a: 1, b: "y" });
+  const stockBadM = await M.safeParseAsync({ a: 1, b: "y" });
+  assert.ok(!badM.success && !stockBadM.success);
+  assert.deepEqual(badM.error.issues, stockBadM.error.issues);
+  ok("a plain-Promise leaf inside an async skeleton");
+
+  // A sync schema failing the ordinary way through the async entries still answers stock's issues
+  const F = z.object({ a: z.string().min(2) });
+  const FC = compile(F);
+  const rF = await FC.safeParseAsync({ a: "x" });
+  const stockF = await F.safeParseAsync({ a: "x" });
+  assert.ok(!rF.success && !stockF.success);
+  assert.deepEqual(rF.error.issues, stockF.error.issues);
+  ok("the async entries of a sync skeleton keep stock's issues on an ordinary failure");
 }
 
 console.log("\nAll tuple + async smoke assertions passed ✓");

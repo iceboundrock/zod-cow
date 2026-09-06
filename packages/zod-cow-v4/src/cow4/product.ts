@@ -2,7 +2,7 @@
  * Product contract shared by every zod4-line module: the Fn type, the async-product marker
  * and the async-function probes.
  */
-import { ZodCompileAsyncError } from "zod/v4/core";
+import { $ZodAsyncError } from "zod/v4/core";
 
 /* zod4 core types (kept loose; the prototype semantic layer is authoritative) */
 export type Node = any;
@@ -29,6 +29,12 @@ export function isAsyncFn(fn: unknown): boolean {
   );
 }
 
+/**
+ * A Promise met on the synchronous fast path: stock's own `throwAsync` throws `$ZodAsyncError` there (the
+ * interpreter's class, and the one the sync API of a stock schema throws), so a plain function that returns
+ * a Promise, which no static detector sees, surfaces as stock's error through the sync entries and is
+ * caught by the async entries of `compile()`, which hand that parse to stock's async runtime (fourth review of #76).
+ */
 export function throwAsync(): never {
-  throw new ZodCompileAsyncError("async function on the synchronous fast path");
+  throw new $ZodAsyncError();
 }

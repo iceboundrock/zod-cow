@@ -657,6 +657,14 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
+6. runtime detection (fourth review of #76): a plain function that returns a `Promise` passes every static detector (the
+   official `isAsyncFunction` and `isAsyncFn` are syntactic), so the schema is a sync skeleton and the `Promise` is met at
+   runtime. The checks subroutine and the official products throw `$ZodAsyncError` there (`throwAsync` in `product.ts`
+   throws stock's class, as the official `throwAsync` does; a plain-`Promise` transform answers INVALID in the official
+   product). The sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
+   kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
+   own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
+   output is then stock's copy and the callbacks called before the `Promise` run twice, the failure-path duplicate of §6.
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
@@ -691,6 +699,9 @@ compile(schema)
 Top-level contract of an async skeleton (ctx.async = true):
   Compiled.async = true → sync parse/safeParse/validate throw $ZodAsyncError;
   parseAsync/safeParseAsync are available, and the failure path falls back to stock safeParseAsync.
+Sync skeleton (ctx.async = false):
+  parseAsync/safeParseAsync run the fast path and fall back to stock safeParseAsync on INVALID, and on the
+  $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6).
 ```
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`

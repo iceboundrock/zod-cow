@@ -1007,6 +1007,134 @@ head(
   );
 }
 
+head("the sync tuple layout slices the rest before running any rest element, like stock (#78)");
+{
+  // Stock's `$ZodTuple` runtime takes `input.slice(items.length)` after it ran every fixed slot and before it runs
+  // any rest element, so a sync rest callback that mutates a later rest slot is not observed by stock, while a
+  // fixed slot's callback that mutates a rest slot before the slice is. The sync layout read each rest element
+  // right before running it until #78; it now takes the same slice. (The mutation violates the CoW premise, but
+  // stock is unaffected by it.)
+  type Mut = (input: unknown[]) => void;
+  const holder = { input: [] as unknown[] };
+  const calls = { n: 0 };
+  /** A sync rest element whose first call mutates the parent through `holder` and returns its value unchanged; every later call appends "!" */
+  const mutatingSync = (mutate: Mut) =>
+    z.string().transform((v) => {
+      if (calls.n++ === 0) {
+        mutate(holder.input);
+        return v;
+      }
+      return `${v}!`;
+    });
+  /** Parses a fresh input on both sides with the sync API and compares the outputs, slot ownership included */
+  const run = (S: z.ZodType, make: () => unknown[], label: string) => {
+    const C = compile(S);
+    assert.ok(!C.async && !C.stock, `${label}: sync skeleton`);
+    assert.ok(!/_zod/.test(C.code ?? ""), `${label}: the container keeps its skeleton`);
+    calls.n = 0;
+    holder.input = make();
+    const stock = S.parse(holder.input) as unknown[];
+    calls.n = 0;
+    holder.input = make();
+    const cow = C.parse(holder.input) as unknown[];
+    assert.deepEqual(cow, stock, label);
+    assert.equal(cow.length, stock.length, `${label}: length`);
+    for (let i = 0; i < stock.length; i++) {
+      assert.equal(Object.hasOwn(cow, i), Object.hasOwn(stock, i), `${label}: slot ${i} ownership`);
+    }
+    ok(label);
+  };
+
+  // The reproduction of #78: the first rest element overwrites the second rest slot
+  run(
+    z.tuple(
+      [z.string()],
+      mutatingSync((a) => {
+        a[2] = "MUT";
+      }),
+    ),
+    () => ["h", "a", "b"],
+    "a rest element that overwrites a later rest slot is not observed, like stock",
+  );
+  // A rest element that fills a later rest hole: stock's slice kept the hole, so the output has an own undefined there
+  run(
+    z.tuple(
+      [z.string()],
+      z
+        .string()
+        .optional()
+        .transform((v) => {
+          if (calls.n++ === 0) holder.input[2] = "filled";
+          return v;
+        }),
+    ),
+    () => {
+      const a: unknown[] = ["h", "a"];
+      a.length = 3;
+      return a;
+    },
+    "a rest hole filled by an earlier rest element stays a hole, like stock",
+  );
+  // The order pin: a fixed slot's callback runs before the slice, so its write to a rest slot is observed by both sides
+  run(
+    z.tuple(
+      [
+        z.string().transform((v) => {
+          holder.input[1] = "MUT";
+          return v;
+        }),
+      ],
+      z.string().transform((v) => `${v}!`),
+    ),
+    () => ["h", "a", "b"],
+    "a fixed slot that overwrites a rest slot before the slice is observed, like stock",
+  );
+  // A rest element that pushes: stock's slice bounds the rest loop, so the pushed element is neither validated nor output
+  run(
+    z.tuple(
+      [z.string()],
+      mutatingSync((a) => {
+        a.push(42);
+      }),
+    ),
+    () => ["h", "a", "b"],
+    "an element pushed by a rest element is outside the slice, like stock",
+  );
+  // A validator-shaped rest (a pure leaf with a `.refine` predicate) runs on the sliced values too: the predicate
+  // sees the value stock's slice holds, not the one an earlier rest element wrote. The clean output is the input
+  // by reference, as it then is (the output may alias the input), so only the verdict is compared
+  {
+    const S = z.tuple(
+      [z.string()],
+      z.string().refine((v) => {
+        if (calls.n++ === 0) holder.input[2] = "";
+        return v.length > 0;
+      }),
+    );
+    const C = compile(S);
+    assert.ok(!C.async && !C.stock && !/_zod/.test(C.code ?? ""));
+    calls.n = 0;
+    holder.input = ["h", "a", "b"];
+    assert.ok(S.safeParse(holder.input).success, "stock validates the sliced value");
+    calls.n = 0;
+    holder.input = ["h", "a", "b"];
+    const r = C.safeParse(holder.input);
+    assert.ok(r.success, "the skeleton validates the sliced value too");
+    assert.equal(r.data, holder.input, "the clean output is still the input by reference");
+    ok("a refine predicate on the rest sees the sliced value, like stock");
+  }
+  // Code pin: a rest tuple's sync skeleton takes the slice once; a fixed tuple allocates nothing on its clean path
+  assert.ok(
+    /\.slice\(1\)/.test(compile(z.tuple([z.string()], z.string())).code ?? ""),
+    "the sync rest layout slices at items.length",
+  );
+  assert.ok(
+    !/\.slice\(/.test(compile(z.tuple([z.string(), z.number().optional()])).code ?? ""),
+    "a tuple without a rest takes no slice",
+  );
+  ok("the slice is emitted for a rest tuple only");
+}
+
 head("async failure path falls back to stock safeParseAsync (official issues structure)");
 {
   const S = z.object({

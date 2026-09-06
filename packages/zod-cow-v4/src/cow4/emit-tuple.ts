@@ -22,18 +22,25 @@ import type { Node } from "./product.js";
  *   Segment 2 [optoutStart, N): the official tail-slot gate (out.length === i) + absent truncation / IIFE fill
  *         → the fillLen variable mirrors the official out.length (under CoW the output may still be the input reference,
  *           so .length cannot be read and has to be tracked explicitly)
- *   Segment 3 rest [N, L): the official ungated per-slot write → write back on reference comparison
+ *   Segment 3 rest [N, L): the official ungated per-slot write → write back on reference comparison; both layouts
+ *         walk stock's `input.slice(N)`, taken after the fixed slots ran and before any rest element runs (#78)
  *
  * Cleanliness: out === input (a copy never happened) ⇔ every slot reference is unchanged, no hole was seen and there
  * was no truncation/fill. Once copied, every visited slot is written.
  * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
  *
+ * The rest slice (#78): stock's runtime takes `const rest = input.slice(items.length)` after it started every
+ * fixed slot and before it runs any rest element, so a sync rest callback that mutates a later rest slot is
+ * not observed by stock, while a fixed slot's callback that mutates a rest slot before the slice is. Both
+ * layouts take the same slice at the same point and walk it: the rest loop reads its elements off the slice,
+ * a rest hole is `Object.hasOwn` on the slice, and the prefix rebuild takes the rest part from it. It is the
+ * one allocation on the clean path of a tuple with a rest element (a tuple without one allocates nothing).
+ *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
  * then awaits them together. The skeleton then reads every fixed slot once and starts its product,
- * takes `input.slice(N)` and starts every rest element from that slice (stock's own read order: a
- * rest callback that mutates a later rest slot is not observed, a fixed slot's callback that ran
- * before the slice is), awaits one `Promise.all` over the async ones, and runs the three segments
+ * takes the rest slice and starts every rest element from it, awaits one `Promise.all` over the
+ * async ones, and runs the three segments
  * above on the captured reads and the settled results, so a slot with two async children settles in
  * the same round as one with a single child (a sync slot's result is captured in the same pass, in
  * stock's order). Nothing returns between the first start and the `Promise.all`, and nothing is read
@@ -83,9 +90,10 @@ export function emitCoWTuple(
   const slotRead: string[] = [];
   const slotHole: string[] = [];
   const slotResult: string[] = [];
-  /** Async layout: the rest elements (stock's `input.slice(items.length)`, taken after the fixed slots started and
-   *  before any rest product runs, holes preserved) and their settled results, indexed by `i - N` */
-  const restReads = anyAsync && rest ? ctx.var() : "";
+  /** The rest elements: stock's `input.slice(items.length)`, taken after the fixed slots ran (started, in the async
+   *  layout) and before any rest product runs, holes preserved, indexed by `i - N` (#78); the async layout's local
+   *  holding their settled results */
+  const restReads = rest ? ctx.var() : "";
   const restResults = anyAsync && rest ? ctx.var() : "";
   if (anyAsync) {
     const started: string[] = [];
@@ -104,7 +112,7 @@ export function emitCoWTuple(
     const restStarted = rest ? ctx.var() : "";
     if (rest) {
       // Stock slices the rest before it runs any rest element, so a rest callback that mutates a later rest slot
-      // is not observed (second review of #76); a fixed slot's callback that ran before the slice is, like stock
+      // is not observed (second review of #76, #78); a fixed slot's callback that ran before the slice is, like stock
       ctx.write(`const ${restReads} = ${accessor}.slice(${N}), ${restStarted} = [];`);
       ctx.write(`for (let i = 0; i < ${restReads}.length; i++) {`);
       ctx.indented(() => {
@@ -143,11 +151,16 @@ export function emitCoWTuple(
     anyAsync ? slotResult[i]! : `${ctx.addConst(itemProducts[i]!.fn)}(${argExpr})`;
 
   /** The first forced change at slot `idxExpr` (a fixed slot's literal index, or `i` inside the rest loop): a fresh array
-   *  holding the clean prefix [0, idxExpr). The sync layout reads it from the input a second time (#36); the async layout
-   *  takes it from the captured reads (#77). Every later slot is written from the loop's single read (review of #70) */
+   *  holding the clean prefix [0, idxExpr). The sync layout reads the fixed slots from the input a second time (#36) and
+   *  the rest part from the slice (#78); the async layout takes both from its captured reads (#77). Every later slot is
+   *  written from the loop's single read (review of #70) */
   const copyAt = (idxExpr: string): string => {
     if (!anyAsync) {
-      return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
+      if (idxExpr !== "i") {
+        return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
+      }
+      // Inside the rest loop the fixed prefix is [0, N) in full: an absent fixed slot copied through its truncation / fill
+      return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${N}; j++) ${out}[j] = ${accessor}[j]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
     }
     if (idxExpr !== "i") {
       // A clean prefix holds present, unchanged slots only (an absent slot, a hole or a truncation copies), so the captured reads are the prefix
@@ -155,12 +168,13 @@ export function emitCoWTuple(
     }
     return `if (${out} === ${accessor}) { ${out} = [${slotRead.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
   };
-  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); the
-   *  async layout decided a fixed slot's before the await and reads a rest element's off the slice, which kept it (#77) */
+  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); a
+   *  rest element's is read off the slice, which kept it (#77, #78), and the async layout decided a fixed slot's before
+   *  the await */
   const isHole = (eVar: string, idxExpr: string): string => {
+    if (idxExpr === "i") return `${eVar} === undefined && !Object.hasOwn(${restReads}, i - ${N})`;
     if (!anyAsync) return `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
-    if (idxExpr !== "i") return slotHole[Number(idxExpr)]!;
-    return `${eVar} === undefined && !Object.hasOwn(${restReads}, i - ${N})`;
+    return slotHole[Number(idxExpr)]!;
   };
   /** Value-shaped slot (parser/cow/async product), its result `res` (a call expression or a settled local): test for
    *  INVALID + reference comparison + prefix rebuild at the first dirt.
@@ -303,15 +317,15 @@ export function emitCoWTuple(
     ctx.write(`}`);
   }
 
-  /* Segment 3: rest [N, L) -- the official ungated per-slot write; the async layout walks the elements it sliced before the await, as stock does (#77) */
+  /* Segment 3: rest [N, L) -- the official ungated per-slot write over stock's slice, taken here in the sync layout
+     (after every fixed slot ran, before any rest element runs, #78) and before the await in the async one (#77) */
   if (rest && restProduct) {
-    ctx.write(
-      `for (let i = ${N}; i < ${anyAsync ? `${N} + ${restReads}.length` : `${accessor}.length`}; i++) {`,
-    );
+    if (!anyAsync) ctx.write(`const ${restReads} = ${accessor}.slice(${N});`);
+    ctx.write(`for (let i = ${N}; i < ${N} + ${restReads}.length; i++) {`);
     ctx.indented(() => {
-      // The sync layout reads and calls in the loop; the async one reads the captured element and its settled result
+      // The sync layout calls the rest product on the sliced element in the loop; the async one reads its settled result
       const e = ctx.var();
-      ctx.write(`const ${e} = ${anyAsync ? `${restReads}[i - ${N}]` : `${accessor}[i]`};`);
+      ctx.write(`const ${e} = ${restReads}[i - ${N}];`);
       const res = anyAsync ? `${restResults}[i - ${N}]` : `${restFn}(${e})`;
       if (restProduct.kind === "validator") {
         ctx.write(`if ((${res}) === INVALID) return INVALID;`);

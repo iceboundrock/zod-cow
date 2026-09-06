@@ -38,8 +38,12 @@ export function isPure(schema: Node): boolean {
     // (second review of #68).
     case "optional":
     case "nullable": {
-      const gate = unwrapsToContainer(def.innerType) ? wrapperChecksAreCowSafe : leafChecksArePure;
-      return gate(schema) && isPure(def.innerType);
+      if (!unwrapsToContainer(def.innerType))
+        return leafChecksArePure(schema) && isPure(def.innerType);
+      // Above a container the verdict holds only where the chain gets a skeleton, so an exact-optional
+      // layer is impure here for the same reason `cowSafeContainerForChild` declines it (#74)
+      if (isExactOptional(schema)) return false;
+      return wrapperChecksAreCowSafe(schema) && isPure(def.innerType);
     }
     // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
     // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
@@ -234,6 +238,11 @@ export function unionSkeletonOk(schema: Node): boolean {
   return def.inclusive !== false;
 }
 
+/** Stock's `isExactOptional` (compile.js): the trait `z.exactOptional` adds on top of `def.type === "optional"` */
+function isExactOptional(node: Node): boolean {
+  return node._zod.traits?.has("$ZodExactOptional") === true;
+}
+
 /** The value types stock's `literalEquality` compares (a literal or enum discriminator can hold nothing else, kept as a guard) */
 function isLiteralDiscriminatorValue(v: unknown): boolean {
   const t = typeof v;
@@ -254,14 +263,18 @@ function isLiteralDiscriminatorValue(v: unknown): boolean {
  * This is the only entry point for the key-position/element-position/top-level decision to "use a CoW sub-skeleton" --
  * testing def.type bare would misroute optional(object) to the official assertOnly and lose the strip semantics
  * (demonstrated by differential seed=104/133/137). A wrapper layer may carry `.refine` predicates, which the
- * skeleton runs (#56); any other check on a wrapper sends the chain to the official parser.
+ * skeleton runs (#56); any other check on a wrapper sends the chain to the official parser. So does an
+ * exact-optional layer (`z.exactOptional`, the `$ZodExactOptional` trait on `def.type === "optional"`):
+ * `emitBoxedContainer` shortcuts every optional layer on `undefined`, while stock's `generateOptionalCheck`
+ * compiles the inner directly for that trait so the container or union below rejects `undefined`. The
+ * official parser keeps stock's answer on both paths; restoring the CoW path for it is #74.
  */
 export function cowSafeContainerForChild(child: Node): boolean {
   let cur: Node = child;
   for (;;) {
     const t: string = cur._zod.def.type;
     if (t === "optional" || t === "nullable") {
-      if (!wrapperChecksAreCowSafe(cur)) return false;
+      if (isExactOptional(cur) || !wrapperChecksAreCowSafe(cur)) return false;
       cur = cur._zod.def.innerType;
       continue;
     }

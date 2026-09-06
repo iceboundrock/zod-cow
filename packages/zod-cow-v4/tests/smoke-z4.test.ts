@@ -1761,4 +1761,59 @@ import { compile } from "../src/index.js";
   console.log("  code dump: one nested skeleton per container option ✓");
 }
 
+/* ── 22. exactOptional above a container takes the official parser (review of #73, #74) ── */
+{
+  console.log("\n── exactOptional above a container (#74) ──");
+  // `$ZodExactOptional` shares `def.type === "optional"` with `$ZodOptional` but stock never
+  // shortcuts it: `undefined` reaches the inner schema and a container or union rejects it. The
+  // skeleton's wrapper chain shortcuts every optional layer, so the gate sends an exact-optional
+  // layer above a container (directly, under a further wrapper, or above a union with a container
+  // option) to the official parser, which keeps stock's answer on both paths until #74 restores
+  // the CoW path for it.
+  const O = z.object({ a: z.string() });
+  const shapes = [
+    z.exactOptional(z.union([O, z.number()])),
+    z.exactOptional(O),
+    z.exactOptional(z.union([O, z.number()])).nullable(),
+    z.nullable(z.exactOptional(z.array(z.number()))),
+    z.exactOptional(z.union([z.exactOptional(O), z.number()])),
+  ];
+  for (const S of shapes) {
+    const C = compile(S);
+    assert.ok(!C.stock);
+    assert.equal(S.safeParse(undefined).success, false);
+    assert.equal(C.safeParse(undefined).success, false);
+    assert.ok(!C.code!.includes("=== undefined) return"));
+  }
+  console.log("  undefined rejected like stock at the top level ✓");
+  // Strip semantics and the union's leaf options are kept on that route
+  const CU = compile(shapes[0]!);
+  assert.deepEqual(CU.parse({ a: "x", extra: 1 }), { a: "x" });
+  assert.equal(CU.parse(3), 3);
+  assert.equal(compile(shapes[2]!).parse(null), null);
+  assert.deepEqual(compile(shapes[1]!).parse({ a: "x", extra: 1 }), { a: "x" });
+  console.log("  strip and the leaf options kept on the official parser ✓");
+  // A key position: a present `undefined` is rejected like stock, absence and a value agree
+  const K = z.object({ k: z.exactOptional(z.union([O, z.number()])), d: z.exactOptional(O) });
+  const CK = compile(K);
+  for (const v of [
+    {},
+    { k: undefined },
+    { d: undefined },
+    { k: { a: "x" } },
+    { k: 1, d: { a: "y" } },
+  ]) {
+    assert.equal(CK.safeParse(v).success, K.safeParse(v).success, JSON.stringify(v));
+  }
+  assert.deepEqual(CK.parse({ k: { a: "x", extra: 1 } }), { k: { a: "x" } });
+  console.log("  key position: a present undefined rejected like stock ✓");
+  // exactOptional over a leaf stays on the validator, which answers like stock
+  const L = z.object({ s: z.exactOptional(z.string()) });
+  const lIn = { s: "x" };
+  assert.equal(compile(L).parse(lIn), lIn);
+  assert.equal(compile(L).safeParse({ s: undefined }).success, false);
+  assert.equal(compile(z.exactOptional(z.string())).safeParse(undefined).success, false);
+  console.log("  exactOptional over a leaf unchanged ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

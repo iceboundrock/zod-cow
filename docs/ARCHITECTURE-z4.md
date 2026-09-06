@@ -255,10 +255,53 @@ if (cChecks(out) === INVALID) return INVALID;       // dirty: aligned with stock
 return out;
 ```
 
-Supported set: `custom` (the pure predicate in `.refine()`'s `def.fn`) + array's
+Supported set: `custom` (the predicate in `.refine()`'s `def.fn`, sync or async) + array's
 `min_length/max_length/length_equals` (`.length` read directly) + map/set's
-`min_size/max_size/size_equals` (`.size` read directly). Everything else (superRefine rewriting
-`ctx.value`, overwrite, a custom `when`) → the whole node degrades to the official parser product.
+`min_size/max_size/size_equals` (`.size` read directly); a record has no length or size check, so only
+predicates reach its skeleton (a record with any check took the official parser until #13). Everything
+else (superRefine rewriting `ctx.value`, overwrite, a custom `when`) → the whole node degrades to the
+official parser product.
+
+An async predicate used to be rejected by the gate, so a container carrying one became a runtime island and
+came back as a copy on every parse (#13). Since #13 the subroutine is an async function whenever a predicate
+is async, on stock's schedule: `runChecks` calls every check synchronously in declaration order and only chains
+the awaits, so every predicate (sync or async) is called before the first `await`, a length / size check keeps
+its place, and the results are settled at the end in order by `settleChecks` (a `Promise` is awaited, any other
+result is read as is, a `false` does not stop the settlement of the later ones, a rejection throws at its
+position). A length / size check that fails after a predicate was started settles the started ones before
+returning `INVALID`, so no rejecting promise is left unattached. One exception to "every predicate is called":
+`runChecks` tracks its abort state synchronously until a check returns a `Promise`, so an `abort: true` predicate
+that fails synchronously while no promise has started skips every later check without a `when` (the length / size
+checks carry one and still run, side-effect free). The subroutine returns `INVALID` at that point instead of
+starting the later predicates, so a predicate stock never calls is never called here either (third review of #76);
+after the first promise stock updates the state inside its chain, too late for the loop, so nothing is skipped and
+the predicates are all started. Whether a promise has started is decided at runtime for the predicates that are
+not async functions, since a plain function may return a `Promise` too. Every predicate call, in both
+variants, is wrapped in a `try / catch` that hands a throw to `rethrowCallerError`: a `$ZodAsyncError` the
+predicate threw is recorded as the caller's before it propagates, so the async entries rethrow it instead of
+reading it as the fast path's Promise signal (§5.5 item 6; a rejection an awaited predicate settles with is
+recorded the same way in `settleChecks`). The call sites (the six container skeletons, the union skeleton and
+the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton becomes async (the wrapper is
+left out of the example):
+
+```js
+const x0 = f0(input);                                   // sync predicate
+const x1 = f1(input);                                   // sync predicate with abort: true
+if (!x1 && !(x0 instanceof Promise)) return INVALID;    // stock skips x2 here; x0 may still have returned a Promise
+const x2 = f2(input);                                   // async predicate, started
+if (input.length < 2) { await settle([x0, x1, x2]); return INVALID; }
+const x3 = f3(input);                                   // sync predicate, called before x2 settles
+if (!(await settle([x0, x1, x2, x3]))) return INVALID;
+return true;
+```
+
+That schedule is the success path's. A failing check answers `INVALID` like every other failure of this line (§6): the
+subroutine does not reach the checks declared after a failing length / size check, and the caller falls back to stock
+`safeParse` / `safeParseAsync`, which runs every check of the schema again from the start. A predicate that passed before
+the failure therefore runs twice (`A, A, B` for `refine(A).min(3).refine(B)` on a one-element array, where the runtime
+logs `A, B`), the case listed under Known limitations in the README; stock's own `z.compile()` fast path bails out at the
+same check and its fallback produces the same log. Before #13 the container was a runtime island whose failure fell back
+the same way, so every predicate ran twice (`A, B, A, B`).
 
 ## 4. Purity analysis: the whitelist and the four traps
 
@@ -268,7 +311,7 @@ A pure subtree goes through the official validator (value = input); anything unc
 | def.type | Verdict | Reason |
 |---|---|---|
 | string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | the official product passes the accessor through; checks are the exception, see below |
-| optional/nullable | the wrapper's own checks pass `leafChecksArePure` (above a container: `wrapperChecksAreCowSafe`, the gate the skeleton applies) and the inner is pure | the value passes through; an overwrite, a superRefine or an async refine on the wrapper rewrites or times the value as it would on a leaf (#57), and above a container the validator would also keep the undeclared keys stock strips (#56); a length / size check attached to a wrapper through `.check()` is a pure predicate on a leaf but not a check the skeleton runs, so above a container it must fail this gate too or the chain falls through to the validator (second review of #68) |
+| optional/nullable | the wrapper's own checks pass `leafChecksArePure` (above a container: `wrapperChecksAreCowSafe`, the gate the skeleton applies) and the inner is pure | the value passes through; an overwrite or a superRefine on the wrapper rewrites the value as it would on a leaf (#57; an async refine is a predicate the skeleton awaits since #13), and above a container the validator would also keep the undeclared keys stock strips (#56); a length / size check attached to a wrapper through `.check()` is a pure predicate on a leaf but not a check the skeleton runs, so above a container it must fail this gate too or the chain falls through to the validator (second review of #68) |
 | object/array (own checks safe + the whole subtree pure) | true | the skeleton takes over (strip is handled by the skeleton) |
 | record/map/set | true (once the skeleton takes over) | reference comparison of key names and values, see §5 |
 | union | the union's own checks pass `leafChecksArePure` (with a container option: `unionSkeletonOk`, the gate the union skeleton applies) and every option is pure | a leaf-only union is one official product whose options pass through; a union with a container option (directly, through optional / nullable, or in a nested union) gets the union skeleton (#58), whose options are skeleton positions, see trap four |
@@ -310,8 +353,8 @@ layer above it before returning, and the container's output runs every layer's c
 checks builds the container as a nested skeleton called once, because an inline skeleton returns the clean input from
 inside its own branch and nothing emitted after it would run on that path; a chain without checks emits the inline
 skeleton as before. The gate (`wrapperChecksAreCowSafe`) admits `.refine` predicates only, the checks `containerChecksFn`
-can emit; any other check on a wrapper (an overwrite, a superRefine, an async refine, a length or size check attached
-through `.check()`) sends the chain to the official parser, and `isPure` rejects it as well (it used to recurse into the
+can emit; any other check on a wrapper (an overwrite, a superRefine, a length or size check attached
+through `.check()`) sends the chain to the official parser (an async refine passes the gate since #13, the subroutine awaits it), and `isPure` rejects it as well (it used to recurse into the
 inner without looking at the wrapper's checks, so such a chain took the validator and kept the undeclared keys; the same
 line fixes the leaf case of #57). Above a container `isPure` applies the skeleton's gate rather than the leaf one: a
 length / size check on the wrapper is a pure predicate on a leaf, and judging it pure on a container chain the gate had
@@ -598,9 +641,19 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    settled results. So N async children cost one round trip instead of N, their side effects interleave as in stock (the
    second child's transform starts before the first settles), and a container with two async children settles in the same
    round as one with a single child, which decides its place in a parent set, map or record writing in settlement order.
-   Nothing returns between the first start and the `Promise.all`, so a rejecting promise is always attached. The async
-   refine predicate of container checks is awaited in place after the children, as stock runs checks after the parse. The
-   sync layout is unchanged.
+   Nothing returns between the first start and the `Promise.all`, so a rejecting promise is always attached. The
+   container's own checks run after the children have settled, as stock runs `runChecks` after the parse; an async
+   predicate among them makes the checks subroutine itself async on the same schedule (every predicate called before
+   its first `await`, §3.2, #13). Nothing is read from the input after the `Promise.all` except the tuple's length
+   (#77): the array skeleton takes the length before its loop, captures each read and each hole (`Object.hasOwn`) in
+   the first pass and rebuilds the clean prefix from the captured reads; the tuple skeleton does the same for its fixed
+   slots, takes stock's `input.slice(items.length)` after the fixed slots started and before any rest product runs (a
+   sync rest callback that mutates a later rest slot is not observed, a fixed slot's callback that ran before the slice
+   is, a rest hole is decided on the slice), starts every rest element from that slice, and keeps its presence guards
+   on the live `input.length`, as stock's `handleTupleResults` decides presence after the await. A child that mutates the input before its promise
+   settles is therefore not observed by the copy path, as stock, which reads every element once before any promise
+   settles, does not observe it either; the clean path still returns the input as it then is. The sync layout is
+   unchanged, with its documented second read of the prefix (#36).
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
@@ -608,9 +661,37 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
+   Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
+   (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
+   runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
+   function returned ends in a `TypeError` there), so no compiled fast path is lost, and the run is then owned by this layer.
+6. runtime detection (fourth review of #76): a plain function that returns a `Promise` passes every static detector (the
+   official `isAsyncFunction` and `isAsyncFn` are syntactic), so the schema is a sync skeleton and the `Promise` is met at
+   runtime. The checks subroutine and the official products throw `$ZodAsyncError` there (`throwAsync` in `product.ts`
+   throws stock's class, as the official `throwAsync` does; a plain-`Promise` transform answers INVALID in the official
+   product). The sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
+   kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
+   own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
+   output is then stock's copy and the callbacks called before the `Promise` run twice, the failure-path duplicate of §6.
+   A `$ZodAsyncError` a callback throws itself (a nested sync parse of an async schema does) is the caller's, not that
+   signal (fifth review of #76): the checks subroutine wraps every predicate call, `settleChecks` every awaited predicate
+   and both islands their run in `rethrowCallerError` (`product.ts`), which records the error in a WeakSet, and
+   the async entries rethrow a recorded one (`isPromiseSignal`), so the parse rejects after one call, as stock does. For
+   an island that covers a rejection of the async island's run and a throw that leaves either island's run synchronously
+   (`runIsland` in `official.ts`, sixth review of #76): the interpreter calls a sync callback before the run has come
+   back, and it never throws `$ZodAsyncError` on its own under the contexts the islands hand it (its three check and
+   parse chain sites fire only under `async: false`, the sync island's empty context chains a Promise instead; the
+   core transform node's site only under a falsy `async`, and the async island runs under `async: true`, the context
+   stock's async runtime hands the subtree), so a synchronous throw of that class out of `_zod.run` is a callback's.
+   A callback that stock's generated code calls (inside an official product, a `lazy` under a wrapper or in a pipe
+   inside one included) reports its `Promise` from stock's own `throwAsync`, which this layer cannot mark, so its
+   `$ZodAsyncError` still takes the fallback and the callback runs twice; tracked in #80 with the options (an upstream
+   marker on that throw is the cheap exact fix).
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
-compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
+compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive). That throw
+is this layer's own (`throwAsync` in `product.ts`), unrecorded, so the async entries hand the parse to stock's async runtime; a
+throw that leaves the island's `_zod.run` itself is a callback's and is recorded (§5.5 item 6).
 
 In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
 (S7 in run 33948313612: an async transform scenario over 5 000 rows, 1.55x vs stock safeParseAsync, allocation -30%; 1.83x in run 33940596453 and 2.67x in run 33837195401, all inside runner noise at that row count).
@@ -642,6 +723,10 @@ compile(schema)
 Top-level contract of an async skeleton (ctx.async = true):
   Compiled.async = true → sync parse/safeParse/validate throw $ZodAsyncError;
   parseAsync/safeParseAsync are available, and the failure path falls back to stock safeParseAsync.
+Sync skeleton (ctx.async = false):
+  parseAsync/safeParseAsync run the fast path and fall back to stock safeParseAsync on INVALID, and on the
+  $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6); a $ZodAsyncError a
+  callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
 ```
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
@@ -691,7 +776,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
 
 ## 8. Correctness evidence
 
-- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (22 groups of behavioral assertions; the twenty-second, the review of #73: `z.exactOptional` above a container, a further wrapper or a union with a container option rejects `undefined` like stock at the top level and under a key, keeps strip and the leaf options on the official parser, and over a leaf stays on the validator; the twenty-first #58: a union of strip objects shares the clean input through its first and through a later option, a fired default copies like stock, strip / strict / loose options behave like stock, a nested union shares with its parent when clean and copies only the dirty path, leaf and container options mix, a discriminated union dispatches and shares, `optional(union)`, `array(union)` and a nested union reach the skeleton, an optional over a union with a defaulted option fires the default like stock (also under a refine and under a further nullable), the union's own refine, overwrite and superRefine behave like stock, `z.xor` and an async option take the official product, a leaf-only union keeps the validator, and the dump lists one nested skeleton per container option; the twentieth #71: set members that are tuples, objects, enum records or arrays with two async children settle in stock's order, the children's side effects interleave like stock (the second key's transform starts before the first settles), a rejecting child next to a failing sync sibling rejects the parse with nothing reaching `unhandledRejection`, and the async layout of a tuple (fixed slots or rest), object, array and enum record awaits one `Promise.all` and nothing else while a sync tuple awaits nothing; the eighteenth #56: a refine on an optional / nullable wrapper above a container rejects like stock at the top level and nested (object and array, and the same above a record, a map, a set and a tuple), sees the shortcut value, runs in stock's order along a two-wrapper chain, sees the stripped copy and keeps sharing when it passes, an async refine or a superRefine on such a wrapper takes the official parser, and a length / size check attached to the wrapper through `.check()` takes the official parser and strips like stock above every container kind, at the top level and under a key; the nineteenth #57: an overwrite or a superRefine on a wrapper around a leaf rewrites like stock at the top level, under an object key and as a union option; the twelfth and thirteenth the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons under every container (object, array, tuple, record, map, set), treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value, an explicit `null` or a non-plain options object with `TypeError` (also when the rejected object carries a throwing `constructor` / `name` accessor or a throwing Proxy `getPrototypeOf` trap, when the rejected value carries a throwing `toJSON` or Proxy `get` trap, is a bigint, a symbol, a function or a cycle, and when the options object is a Proxy whose `getOwnPropertyDescriptor` / `get` trap throws, then with the trap's error as `cause`), treats an explicit `undefined` as the default, ignores an `ownSymbolKeys` inherited from `Object.prototype`; then the same probe in strict and loose mode, #42: default copies on an undeclared symbol, enumerable or not, and shares the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, strict still rejects an undeclared string key, loose keeps one in the copy while dropping the symbol, declared symbol keys count as known, a nested loose object is reached; the fourteenth #47: a union with a strip-object option drops an undeclared key like stock at the top level and nested with the sibling still shared, a strict option drops an undeclared own symbol, `optional(object)`, `array(object)` and discriminated-union options strip like stock, and a leaf-only union keeps the validator so its parent shares; the fifteenth #46: `code` of a schema with object, array, tuple, record, map and set children holds the top-level source first and one `nested skeleton` header per nested skeleton, carries a probe per object skeleton by default and none under `"ignore"`, and a schema without nested containers has no header; the sixteenth #51: strict and loose enum-keyed records copy and drop an undeclared own symbol, enumerable or not, under the default and `"probe"`, share the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, string-keyed, checked-string-keyed and number-keyed records still reject an enumerable symbol key and copy-and-drop a non-enumerable one without a probe call, a key schema that admits symbols and a loose record keep the symbol like stock, and a nested enum record under a strip object is reached; the seventeenth #48: a non-enumerable undeclared string key survives the clean path of every object mode and every record path (the number-keyed record included) and is dropped by the copy path like stock, a class instance is returned as it is while the copy is a plain object and records reject it on both sides, an inherited enumerable key is copied by strip like stock, rejected by strict on both sides and kept inherited by loose where stock writes it as an own key, a throwing `ownKeys`, `getOwnPropertyDescriptor` or `getPrototypeOf` trap throws from strip's `for...in` probe under both settings where stock's strip parses, throws on both sides for strict and for loose's `ownKeys` by default, and is not consulted by loose for `getOwnPropertyDescriptor` or `getPrototypeOf`, nor for any of the three under `"ignore"`, and the object skeleton's `code` carries no explicit descriptor or prototype probe) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts` (22 groups of behavioral assertions; the twenty-second, the review of #73: `z.exactOptional` above a container, a further wrapper or a union with a container option rejects `undefined` like stock at the top level and under a key, keeps strip and the leaf options on the official parser, and over a leaf stays on the validator; the twenty-first #58: a union of strip objects shares the clean input through its first and through a later option, a fired default copies like stock, strip / strict / loose options behave like stock, a nested union shares with its parent when clean and copies only the dirty path, leaf and container options mix, a discriminated union dispatches and shares, `optional(union)`, `array(union)` and a nested union reach the skeleton, an optional over a union with a defaulted option fires the default like stock (also under a refine and under a further nullable), the union's own refine, overwrite and superRefine behave like stock, `z.xor` and an async option take the official product, a leaf-only union keeps the validator, and the dump lists one nested skeleton per container option; the twentieth #71: set members that are tuples, objects, enum records or arrays with two async children settle in stock's order, the children's side effects interleave like stock (the second key's transform starts before the first settles), a rejecting child next to a failing sync sibling rejects the parse with nothing reaching `unhandledRejection`, and the async layout of a tuple (fixed slots or rest), object, array and enum record awaits one `Promise.all` and nothing else while a sync tuple awaits nothing; the eighteenth #56: a refine on an optional / nullable wrapper above a container rejects like stock at the top level and nested (object and array, and the same above a record, a map, a set and a tuple), sees the shortcut value, runs in stock's order along a two-wrapper chain, sees the stripped copy and keeps sharing when it passes, a superRefine on such a wrapper takes the official parser (an async refine keeps the skeleton and shares since #13), and a length / size check attached to the wrapper through `.check()` takes the official parser and strips like stock above every container kind, at the top level and under a key; the nineteenth #57: an overwrite or a superRefine on a wrapper around a leaf rewrites like stock at the top level, under an object key and as a union option; the twelfth and thirteenth the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons under every container (object, array, tuple, record, map, set), treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value, an explicit `null` or a non-plain options object with `TypeError` (also when the rejected object carries a throwing `constructor` / `name` accessor or a throwing Proxy `getPrototypeOf` trap, when the rejected value carries a throwing `toJSON` or Proxy `get` trap, is a bigint, a symbol, a function or a cycle, and when the options object is a Proxy whose `getOwnPropertyDescriptor` / `get` trap throws, then with the trap's error as `cause`), treats an explicit `undefined` as the default, ignores an `ownSymbolKeys` inherited from `Object.prototype`; then the same probe in strict and loose mode, #42: default copies on an undeclared symbol, enumerable or not, and shares the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, strict still rejects an undeclared string key, loose keeps one in the copy while dropping the symbol, declared symbol keys count as known, a nested loose object is reached; the fourteenth #47: a union with a strip-object option drops an undeclared key like stock at the top level and nested with the sibling still shared, a strict option drops an undeclared own symbol, `optional(object)`, `array(object)` and discriminated-union options strip like stock, and a leaf-only union keeps the validator so its parent shares; the fifteenth #46: `code` of a schema with object, array, tuple, record, map and set children holds the top-level source first and one `nested skeleton` header per nested skeleton, carries a probe per object skeleton by default and none under `"ignore"`, and a schema without nested containers has no header; the sixteenth #51: strict and loose enum-keyed records copy and drop an undeclared own symbol, enumerable or not, under the default and `"probe"`, share the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, string-keyed, checked-string-keyed and number-keyed records still reject an enumerable symbol key and copy-and-drop a non-enumerable one without a probe call, a key schema that admits symbols and a loose record keep the symbol like stock, and a nested enum record under a strip object is reached; the seventeenth #48: a non-enumerable undeclared string key survives the clean path of every object mode and every record path (the number-keyed record included) and is dropped by the copy path like stock, a class instance is returned as it is while the copy is a plain object and records reject it on both sides, an inherited enumerable key is copied by strip like stock, rejected by strict on both sides and kept inherited by loose where stock writes it as an own key, a throwing `ownKeys`, `getOwnPropertyDescriptor` or `getPrototypeOf` trap throws from strip's `for...in` probe under both settings where stock's strip parses, throws on both sides for strict and for loose's `ownKeys` by default, and is not consulted by loose for `getOwnPropertyDescriptor` or `getPrototypeOf`, nor for any of the three under `"ignore"`, and the object skeleton's `code` carries no explicit descriptor or prototype probe) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
   (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
@@ -727,7 +812,7 @@ The unsupported surface we depend on (all reachable through the public `zod/v4/c
 | `compileFn(schema, {assertOnly, debug})` | leaf/subtree products | signature change (low); behavior changes are backstopped by the differential tests |
 | `INVALID` | failure sentinel | extremely low (Symbol.for is stable) |
 | `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the async detector (v0.5) | low |
-| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton | low |
+| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton; the fast path's Promise signal the async entries catch (§5.5 item 6), a public class a callback can throw too, which is why a callback's own throw inside an official product is indistinguishable (#80) | low |
 | `regexes.number` / `util.isPlainObject` | record skeleton | low (the official internals depend on the same ones for consistency) |
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | medium: must be synced when zod changes the `when` semantics |
 | `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | medium: must be synced when zod changes the optin/optout ladder |

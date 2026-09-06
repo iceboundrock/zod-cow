@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod";
+import { $ZodAsyncError } from "zod/v4/core";
 import { compile } from "../src/index.js";
 
 let group = "";
@@ -327,10 +328,8 @@ head("async refine attached to array/map/set/record/tuple (async container check
   const input1 = ["a", "b"];
   const r1 = await C.safeParseAsync(input1);
   assert.ok(r1.success, "async container refine passes");
-  assert.deepEqual(r1.data, input1, "async container refine keeps the value");
-  // Reference sharing is NOT asserted here: checksAreCowSafe rejects async custom checks, so the
-  // container degrades to a runtime island and returns a copy. Tracked in #13; once fixed this
-  // should become assert.strictEqual(r1.data, input1).
+  assert.strictEqual(r1.data, input1, "async container refine keeps the input by reference (#13)");
+  assert.ok(!C.code!.includes("_zod"), "the container keeps its skeleton, no runtime island");
   const r2 = await C.safeParseAsync(["a"]);
   assert.ok(!r2.success, "async min predicate fails");
   // async map value
@@ -369,6 +368,643 @@ head("async refine attached to array/map/set/record/tuple (async container check
   assert.deepEqual(r6.data, ["a", "b!"]);
   assert.ok((r6.data as unknown[]) !== undefined && (r6.data as unknown[])[0] === "a");
   ok("all five containers + tuple async channels");
+}
+
+head("async container-level refine keeps the CoW path on every container (#13)");
+{
+  // Before #13 `checksAreCowSafe` rejected an async predicate, so a container carrying one became a
+  // runtime island and always came back as a copy; a sync predicate on the same container shared.
+  const nonEmpty = async (v: { size?: number; length?: number } | object) =>
+    (v as { size?: number }).size !== 0 && (v as { length?: number }).length !== 0;
+  const cases: { name: string; schema: z.ZodType; input: unknown }[] = [
+    { name: "object", schema: z.object({ a: z.string() }).refine(nonEmpty), input: { a: "x" } },
+    {
+      name: "array",
+      schema: z.array(z.string()).min(1).refine(nonEmpty),
+      input: ["a", "b"],
+    },
+    {
+      name: "tuple",
+      schema: z.tuple([z.string(), z.number()]).refine(nonEmpty),
+      input: ["a", 1],
+    },
+    {
+      name: "record",
+      schema: z.record(z.string(), z.number()).refine(nonEmpty),
+      input: { k: 1 },
+    },
+    {
+      name: "enum-keyed record",
+      schema: z.record(z.enum(["k"]), z.number()).refine(nonEmpty),
+      input: { k: 1 },
+    },
+    {
+      name: "map",
+      schema: z.map(z.string(), z.number()).max(5).refine(nonEmpty),
+      input: new Map([["k", 1]]),
+    },
+    { name: "set", schema: z.set(z.string()).refine(nonEmpty), input: new Set(["a"]) },
+    {
+      name: "optional(object) wrapper",
+      schema: z
+        .object({ a: z.string() })
+        .optional()
+        .refine(async (v) => v === undefined || v.a !== "no"),
+      input: { a: "x" },
+    },
+    {
+      name: "union with a container option",
+      schema: z.union([z.object({ a: z.string() }), z.string()]).refine(nonEmpty),
+      input: { a: "x" },
+    },
+  ];
+  for (const c of cases) {
+    const C = compile(c.schema);
+    assert.ok(!C.stock, `${c.name}: no whole-tree degradation`);
+    assert.ok(C.async, `${c.name}: async skeleton`);
+    assert.ok(!C.code!.includes("_zod"), `${c.name}: no runtime island in the generated code`);
+    const r = await C.safeParseAsync(c.input);
+    assert.ok(r.success, `${c.name}: passes`);
+    assert.strictEqual(r.data, c.input, `${c.name}: clean input shared by reference`);
+    const stock = await c.schema.safeParseAsync(c.input);
+    assert.deepEqual(r.data, stock.data, `${c.name}: same value as stock`);
+  }
+  ok("object / array / tuple / record / map / set / wrapper / union share the clean input");
+
+  // The dirty path: the predicate sees the copy, as stock hands it the rebuilt output
+  const seen: unknown[] = [];
+  const D = z.object({ a: z.string(), n: z.number().default(7) }).refine(async (o) => {
+    seen.push(o);
+    return o.n === 7;
+  });
+  const CD = compile(D);
+  const dIn = { a: "x" };
+  const rd = await CD.safeParseAsync(dIn);
+  assert.ok(rd.success);
+  assert.notStrictEqual(rd.data, dIn, "defaulted key → copy");
+  assert.deepEqual(rd.data, { a: "x", n: 7 });
+  assert.strictEqual(seen[0], rd.data, "the predicate ran on the output copy");
+  assert.deepEqual(dIn, { a: "x" }, "input untouched");
+  ok("dirty path: predicate runs on the copy");
+
+  // Failure parity with stock, the issue structure coming from stock's safeParseAsync
+  const F = z.array(z.string()).refine(async (a) => a.length > 1, { error: "too short" });
+  const CF = compile(F);
+  const rf = await CF.safeParseAsync(["a"]);
+  const sf = await F.safeParseAsync(["a"]);
+  assert.ok(!rf.success && !sf.success);
+  assert.deepEqual(rf.error.issues, sf.error.issues, "issues from stock");
+  ok("failure parity");
+
+  // A sync parse of an async skeleton throws like stock
+  assert.throws(
+    () => CF.parse(["a", "b"]),
+    (e: any) => e.constructor.name === "$ZodAsyncError",
+  );
+  ok("sync API throws $ZodAsyncError");
+}
+
+head("async container checks follow stock's schedule (every check started before the first await)");
+{
+  // stock's runChecks calls every check synchronously in order and only chains the awaits: both
+  // predicates start before either settles, and a sync predicate declared after an async one runs
+  // before the async one settles
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine(async (a) => {
+      log.push("A start");
+      await new Promise((r) => setTimeout(r, 5));
+      log.push("A end");
+      return a.length > 0;
+    })
+    .refine((a) => {
+      log.push("B sync");
+      return a.length > 0;
+    })
+    .refine(async (a) => {
+      log.push("C start");
+      log.push("C end");
+      return a.length > 0;
+    });
+  const input = ["x"];
+  await S.safeParseAsync(input);
+  const stockLog = [...log];
+  log.length = 0;
+  const C = compile(S);
+  const r = await C.safeParseAsync(input);
+  assert.ok(r.success);
+  assert.strictEqual(r.data, input);
+  assert.deepEqual(log, stockLog, "predicate start / settle order as stock");
+  assert.deepEqual(log, ["A start", "B sync", "C start", "C end", "A end"]);
+  ok("A, B, C all start before A settles, in declaration order");
+
+  // A length check failing after a predicate started: the started promise is settled before INVALID
+  // (no unhandled rejection), and a rejecting predicate surfaces as the thrown error like stock
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const R = z
+      .array(z.string())
+      .refine(async () => false)
+      .refine(async () => {
+        await null;
+        throw new Error("boom");
+      });
+    const CR = compile(R);
+    await assert.rejects(() => CR.safeParseAsync(["a"]), /boom/);
+    await assert.rejects(() => R.safeParseAsync(["a"] as never), /boom/);
+    const L = z
+      .array(z.string())
+      .refine(async () => {
+        await null;
+        throw new Error("late");
+      })
+      .min(3);
+    const CL = compile(L);
+    await assert.rejects(() => CL.safeParseAsync(["a"]), /late/);
+    await assert.rejects(() => L.safeParseAsync(["a"] as never), /late/);
+    await new Promise((r) => setTimeout(r, 10));
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.deepEqual(unhandled, [], "no promise left unattached");
+  ok("rejections surface like stock, nothing dangles");
+}
+
+head("a failing length check between two predicates: the stock fallback re-runs the schema");
+{
+  // The schedule above is the success path's. On a failure the subroutine answers INVALID like every
+  // other failure of this line: it does not reach B after the failing .min(), and the fallback to
+  // stock safeParseAsync runs A and B from the start, so A runs twice (the README's known limitation;
+  // stock's own z.compile() fast path bails at the same check and logs the same). Before #13 the
+  // container was a runtime island whose failure fell back the same way (A, B, A, B).
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine(async () => {
+      log.push("A");
+      return true;
+    })
+    .min(3)
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const C = compile(S);
+  assert.ok(!/_zod/.test(C.code ?? ""), "the container keeps its skeleton");
+  const stock = await S.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A", "B"], "stock's runChecks reaches B after the failing .min()");
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.deepEqual(
+    log,
+    ["A", "A", "B"],
+    "A started by the subroutine, then A and B by the fallback",
+  );
+  assert.ok(!r.success && !stock.success);
+  assert.deepEqual(r.error.issues, stock.error.issues, "issues from stock");
+  ok("the subroutine bails at .min(), the fallback runs every check once more");
+}
+
+head("an aborting sync failure before any promise: the later checks are not started");
+{
+  // stock's runChecks tracks `isAborted` synchronously until a check returns a Promise: an
+  // `abort: true` predicate that fails synchronously while no promise has started skips every later
+  // check without a `when` (a length / size check carries one and still runs, side-effect free). The
+  // subroutine returns INVALID at that point instead of starting the later predicates, so a predicate
+  // stock never calls is never called here either; the fallback then runs stock, which skips it too.
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      throw new Error("should-not-run");
+    });
+  const C = compile(S);
+  assert.ok(!/_zod/.test(C.code ?? ""), "the container keeps its skeleton");
+  const stock = await S.safeParseAsync(["x"]);
+  assert.ok(!stock.success);
+  assert.deepEqual(log, ["A"], "stock skips B after the aborting failure");
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.ok(!r.success, "a failure result, not a rejection");
+  assert.deepEqual(log, ["A", "A"], "A by the subroutine, A by the fallback, B never");
+  assert.deepEqual(r.error.issues, stock.error.issues, "issues from stock");
+  ok("abort: true + sync false → the async predicate is not started, safeParseAsync resolves");
+
+  // the same with a sync predicate and an async one after the aborting failure: neither is called
+  log.length = 0;
+  const S2 = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(() => {
+      log.push("B");
+      return true;
+    })
+    .refine(async () => {
+      log.push("C");
+      return true;
+    });
+  const C2 = compile(S2);
+  await S2.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A"]);
+  log.length = 0;
+  await C2.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A", "A"], "B and C are skipped like stock");
+  ok("every later check is skipped, sync or async");
+
+  // an optional wrapper above a container runs the same subroutine (#56)
+  log.length = 0;
+  const W = z
+    .object({ a: z.string() })
+    .optional()
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const CW = compile(W);
+  assert.ok(!/_zod/.test(CW.code ?? ""), "the wrapper keeps its nested skeleton");
+  await W.safeParseAsync({ a: "x" });
+  assert.deepEqual(log, ["A"]);
+  log.length = 0;
+  await CW.safeParseAsync({ a: "x" });
+  assert.deepEqual(log, ["A", "A"], "the wrapper's subroutine skips B too");
+  ok("optional(object): the aborting failure skips the async predicate");
+
+  // an aborting predicate that passes does not abort: B runs and the clean input is shared
+  log.length = 0;
+  const P = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return true;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const CP = compile(P);
+  const input = ["x"];
+  const rp = await CP.safeParseAsync(input);
+  assert.ok(rp.success);
+  assert.strictEqual(rp.data, input);
+  assert.deepEqual(log, ["A", "B"]);
+  ok("abort: true on a passing predicate changes nothing");
+
+  // once a check has returned a Promise the abort state is updated inside stock's chain, after the
+  // loop: an aborting sync failure declared after an async predicate skips nothing, and neither does
+  // one declared after a plain function that returned a Promise (decided at runtime, not from the
+  // predicate's declaration), so the later predicate is started as stock starts it
+  for (const [label, first] of [
+    ["an async function", async () => true],
+    ["a plain function returning a Promise", () => Promise.resolve(true)],
+  ] as const) {
+    log.length = 0;
+    const D = z
+      .array(z.string())
+      .refine(() => {
+        log.push("A");
+        return first();
+      })
+      .refine(
+        () => {
+          log.push("B");
+          return false;
+        },
+        { abort: true },
+      )
+      .refine(async () => {
+        log.push("C");
+        return true;
+      });
+    const CD = compile(D);
+    const sd = await D.safeParseAsync(["x"]);
+    assert.ok(!sd.success);
+    assert.deepEqual(log, ["A", "B", "C"], `${label}: stock still starts C`);
+    log.length = 0;
+    const rd = await CD.safeParseAsync(["x"]);
+    assert.ok(!rd.success);
+    assert.deepEqual(
+      log,
+      ["A", "B", "C", "A", "B", "C"],
+      `${label}: the subroutine starts C like stock, then the fallback runs the three again`,
+    );
+    assert.deepEqual(rd.error.issues, sd.error.issues);
+  }
+  ok("after a started promise an aborting sync failure defers like stock");
+}
+
+head(
+  "async array / tuple copy paths use the reads captured before the await, not the live input (#77)",
+);
+{
+  // A child may mutate the input before its promise settles (a violation of the CoW premise, but
+  // stock is unaffected by it: it reads every element once before any promise settles). The copy
+  // path must then carry the captured reads like stock; the clean path still returns the input as
+  // it then is, since the output may alias the input.
+  type Mut = (input: unknown[]) => void;
+  /** An element whose first call mutates the parent through `holder` after an await and returns its value unchanged; every later call appends "!" */
+  const mutating = (holder: { input: unknown[] }, mutate: Mut, calls = { n: 0 }) =>
+    z.string().transform(async (v) => {
+      if (calls.n++ === 0) {
+        await Promise.resolve();
+        mutate(holder.input);
+        return v;
+      }
+      return `${v}!`;
+    });
+  /** Parses a fresh input on both sides and compares with stock, or with `expected` where stock's own answer is the
+   *  quirk the README declines to match (an async rest element: stock's runtime writes every rest result to the last
+   *  index, so its output is sparse and loses elements, while the skeleton outputs the dense array) */
+  const run = async (
+    build: (holder: { input: unknown[] }, calls: { n: number }) => z.ZodType,
+    make: () => unknown[],
+    label: string,
+    expected?: unknown[],
+  ) => {
+    const holder = { input: [] as unknown[] };
+    const calls = { n: 0 };
+    const S = build(holder, calls);
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""), `${label}: the container keeps its skeleton`);
+    calls.n = 0;
+    holder.input = make();
+    const stock = expected ?? (await S.parseAsync(holder.input));
+    calls.n = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock, label);
+    assert.equal((cow as unknown[]).length, (stock as unknown[]).length, `${label}: length`);
+    for (let i = 0; i < (stock as unknown[]).length; i++) {
+      assert.equal(
+        Object.hasOwn(cow as object, i),
+        Object.hasOwn(stock as object, i),
+        `${label}: slot ${i} ownership`,
+      );
+    }
+    ok(label);
+  };
+
+  // array: the clean element 0 is overwritten while element 1 is dirty → the prefix rebuild must carry "a"
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a[0] = "MUT";
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: prefix rebuild carries the captured read",
+  );
+  // array: the input grows before settlement → stock's output keeps the length it read before the await
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a.push("c");
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: a pushed element after the await is not in the output",
+  );
+  // array: the input shrinks before settlement → every element read before the await is still written
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a.length = 1;
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: a truncation after the await loses nothing",
+  );
+  // array: a hole read before the await is a hole even when the child fills it before settling
+  {
+    const holder = { input: [] as unknown[] };
+    let calls = 0;
+    const S = z.array(
+      z
+        .string()
+        .optional()
+        .transform(async (v) => {
+          if (calls++ === 0) {
+            await Promise.resolve();
+            holder.input[0] = "filled";
+          }
+          return v;
+        }),
+    );
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""));
+    const make = () => {
+      const a: unknown[] = [];
+      a[1] = "b";
+      return a;
+    };
+    calls = 0;
+    holder.input = make();
+    const stock = await S.parseAsync(holder.input);
+    calls = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock);
+    assert.ok(
+      Object.hasOwn(cow as object, 0) && (cow as unknown[])[0] === undefined,
+      "the hole is an own undefined slot like stock",
+    );
+    ok("array: a hole filled after the await stays a hole");
+  }
+
+  // tuple, fixed slots: same prefix rebuild
+  await run(
+    (h, c) => {
+      const e = mutating(
+        h,
+        (a) => {
+          a[0] = "MUT";
+        },
+        c,
+      );
+      return z.tuple([e, e]);
+    },
+    () => ["a", "b"],
+    "tuple: prefix rebuild carries the captured slot read",
+  );
+  // tuple with an async rest: the rest element mutates a fixed slot and the earlier rest slot
+  await run(
+    (h, c) =>
+      z.tuple(
+        [z.string()],
+        mutating(
+          h,
+          (a) => {
+            a[0] = "MUT0";
+            a[1] = "MUT1";
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: the rest prefix and the fixed slots come from the captured reads",
+    ["h", "a", "b!"],
+  );
+  // tuple with an async rest: the input grows before settlement → only the sliced rest elements are in the output
+  await run(
+    (h, c) =>
+      z.tuple(
+        [z.string()],
+        mutating(
+          h,
+          (a) => {
+            a.push("c");
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a pushed rest element after the await is not in the output",
+    ["h", "a", "b!"],
+  );
+  // tuple: a hole in a fixed slot filled after the await stays a hole
+  {
+    const holder = { input: [] as unknown[] };
+    let calls = 0;
+    const S = z.tuple([
+      z
+        .string()
+        .optional()
+        .transform(async (v) => {
+          if (calls++ === 0) {
+            await Promise.resolve();
+            holder.input[0] = "filled";
+          }
+          return v;
+        }),
+      z.string(),
+    ]);
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""));
+    const make = () => {
+      const a: unknown[] = [];
+      a[1] = "b";
+      return a;
+    };
+    calls = 0;
+    holder.input = make();
+    const stock = await S.parseAsync(holder.input);
+    calls = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock);
+    assert.ok(
+      Object.hasOwn(cow as object, 0) && (cow as unknown[])[0] === undefined,
+      "the hole is an own undefined slot like stock",
+    );
+    ok("tuple: a hole filled after the await stays a hole");
+  }
+
+  // tuple rest under the async layout: stock takes `input.slice(items.length)` after it started the fixed slots
+  // and before it runs any rest element, so a sync rest callback that mutates a later rest slot is not observed
+  // by stock (second review of #76); a fixed slot's callback that mutates a rest slot before the slice is.
+  /** A sync rest element whose first call mutates the parent through `holder` and returns its value unchanged; every later call appends "!" */
+  const mutatingSync = (holder: { input: unknown[] }, mutate: Mut, calls: { n: number }) =>
+    z.string().transform((v) => {
+      if (calls.n++ === 0) {
+        mutate(holder.input);
+        return v;
+      }
+      return `${v}!`;
+    });
+  const asyncId = z.string().transform(async (v) => {
+    await Promise.resolve();
+    return v;
+  });
+  await run(
+    (h, c) =>
+      z.tuple(
+        [asyncId],
+        mutatingSync(
+          h,
+          (a) => {
+            a[2] = "MUT";
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a sync rest element that overwrites a later rest slot is read from the slice, like stock",
+  );
+  await run(
+    (h) =>
+      z.tuple(
+        [
+          z.string().transform(async (v) => {
+            h.input[1] = "MUT";
+            await Promise.resolve();
+            return v;
+          }),
+        ],
+        z.string().transform((v) => `${v}!`),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a fixed slot that overwrites a rest slot before the slice is observed, like stock",
+  );
+  await run(
+    (h, c) =>
+      z.tuple(
+        [asyncId],
+        z
+          .string()
+          .optional()
+          .transform((v) => {
+            if (c.n++ === 0) h.input[2] = "filled";
+            return v;
+          }),
+      ),
+    () => {
+      const a: unknown[] = ["h", "a"];
+      a.length = 3;
+      return a;
+    },
+    "tuple: a rest hole filled by an earlier rest element stays a hole, like stock",
+  );
 }
 
 head("async failure path falls back to stock safeParseAsync (official issues structure)");
@@ -429,6 +1065,473 @@ head("mixed tree: a large pure container + a deep async leaf (CoW and async coex
   assert.ok(out.meta.flags === input.meta.flags, "pure record subtree is shared");
   assert.ok(out.users[0] === input.users[0], "element-level sharing");
   ok("CoW subtree sharing + async key dirtiness detection");
+}
+
+head(
+  "a plain function returning a Promise: the async entries run that parse on stock's async runtime (fourth review of #76)",
+);
+{
+  // Neither zod's compiler nor this layer detects a plain function that returns a Promise statically (both test
+  // `AsyncFunction`), so the schema compiles as sync (`async === false`) and the fast path meets the Promise at
+  // runtime, where the official code throws `$ZodAsyncError`. Stock's own `z.compile()` never runs its fast path on
+  // an async parse; here the async entries catch that throw (or the INVALID a plain-Promise transform answers) and
+  // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's class.
+  type Case = {
+    name: string;
+    make: (ok: boolean) => z.ZodType;
+    input: () => unknown;
+    validateThrows: boolean;
+  };
+  const plain = (ok: boolean) => () => Promise.resolve(ok);
+  const cases: Case[] = [
+    {
+      name: "top-level array refine",
+      make: (ok) => z.array(z.string()).refine(plain(ok)),
+      input: () => ["x"],
+      validateThrows: true,
+    },
+    {
+      name: "leaf refine under an object key",
+      make: (ok) => z.object({ a: z.string().refine(plain(ok)) }),
+      input: () => ({ a: "x" }),
+      validateThrows: true,
+    },
+    {
+      name: "refine on optional(object)",
+      make: (ok) => z.object({ a: z.string() }).optional().refine(plain(ok)),
+      input: () => ({ a: "x" }),
+      validateThrows: true,
+    },
+    {
+      name: "custom check returning a Promise",
+      make: (ok) =>
+        z.array(z.string()).check((ctx) => {
+          if (!ok) ctx.issues.push({ code: "custom", input: ctx.value, message: "no" });
+          return Promise.resolve();
+        }),
+      input: () => ["x"],
+      validateThrows: true,
+    },
+    {
+      name: "transform returning a Promise",
+      make: () => z.array(z.string()).transform((v) => Promise.resolve([...v, "t"])),
+      input: () => ["x"],
+      validateThrows: false, // the official assertOnly product answers INVALID for a Promise from a transform, so `validate` gives null
+    },
+  ];
+  for (const c of cases) {
+    for (const okCase of [true, false]) {
+      const S = c.make(okCase);
+      const C = compile(S);
+      assert.equal(C.async, false, `${c.name}: not detected statically`);
+      assert.equal(C.stock, false, `${c.name}: not degraded`);
+      const stock = await S.safeParseAsync(c.input());
+      const r = await C.safeParseAsync(c.input());
+      assert.equal(r.success, stock.success, `${c.name} ok=${okCase}: same verdict as stock`);
+      if (r.success && stock.success) {
+        assert.deepEqual(r.data, stock.data, `${c.name}: stock's output`);
+        assert.deepEqual(await C.parseAsync(c.input()), stock.data, `${c.name}: parseAsync too`);
+      } else if (!r.success && !stock.success) {
+        assert.deepEqual(r.error.issues, stock.error.issues, `${c.name}: stock's issues`);
+        await assert.rejects(
+          C.parseAsync(c.input()),
+          (e) => e instanceof z.ZodError,
+          `${c.name}: parseAsync rejects with the ZodError`,
+        );
+      }
+      assert.throws(
+        () => S.safeParse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: stock's sync API throws $ZodAsyncError`,
+      );
+      assert.throws(
+        () => C.safeParse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: safeParse throws stock's class`,
+      );
+      assert.throws(
+        () => C.parse(c.input()),
+        $ZodAsyncError,
+        `${c.name}: parse throws stock's class`,
+      );
+      if (c.validateThrows) {
+        assert.throws(
+          () => C.validate(c.input()),
+          $ZodAsyncError,
+          `${c.name}: validate throws stock's class`,
+        );
+      } else {
+        assert.equal(C.validate(c.input()), null);
+      }
+    }
+    ok(c.name);
+  }
+
+  // The predicate runs on the fast path up to the throw and again in stock: the failure-path duplicate of the README
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine((v) => {
+      log.push(`A${v.length}`);
+      return true;
+    })
+    .refine(() => {
+      log.push("B");
+      return Promise.resolve(true);
+    });
+  const C = compile(S);
+  assert.ok(!C.async && !C.stock);
+  await S.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A1", "B"]);
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.ok(r.success);
+  assert.deepEqual(
+    log,
+    ["A1", "B", "A1", "B"],
+    "the fast path ran both predicates before the throw, then stock ran them",
+  );
+  assert.ok(!C.code?.includes("_zod"), "the skeleton is still the CoW skeleton");
+  ok(
+    "callbacks called before the throw run again in stock (the documented failure-path duplicate)",
+  );
+
+  // Inside an async skeleton the same leaf reaches the official validator, which throws too; the async entry catches it there as well
+  const M = z.object({ a: z.string().refine(plain(true)), b: z.string().refine(async () => true) });
+  const MC = compile(M);
+  assert.ok(MC.async && !MC.stock);
+  const stockM = await M.safeParseAsync({ a: "x", b: "y" });
+  const rM = await MC.safeParseAsync({ a: "x", b: "y" });
+  assert.ok(rM.success && stockM.success);
+  assert.deepEqual(rM.data, stockM.data);
+  const badM = await MC.safeParseAsync({ a: 1, b: "y" });
+  const stockBadM = await M.safeParseAsync({ a: 1, b: "y" });
+  assert.ok(!badM.success && !stockBadM.success);
+  assert.deepEqual(badM.error.issues, stockBadM.error.issues);
+  ok("a plain-Promise leaf inside an async skeleton");
+
+  // A sync schema failing the ordinary way through the async entries still answers stock's issues
+  const F = z.object({ a: z.string().min(2) });
+  const FC = compile(F);
+  const rF = await FC.safeParseAsync({ a: "x" });
+  const stockF = await F.safeParseAsync({ a: "x" });
+  assert.ok(!rF.success && !stockF.success);
+  assert.deepEqual(rF.error.issues, stockF.error.issues);
+  ok("the async entries of a sync skeleton keep stock's issues on an ordinary failure");
+}
+
+head(
+  "a $ZodAsyncError a callback throws is the caller's, not the fast path's Promise signal (fifth review of #76)",
+);
+{
+  // The async entries hand a parse to stock's async runtime when the fast path met a Promise a plain function
+  // returned, which the official code and this layer's `throwAsync` report by throwing `$ZodAsyncError`, stock's
+  // public class. A callback can throw the same class itself (a nested sync parse of an async schema does), and
+  // that throw is the caller's: stock rejects with it after one call. Every call site of this layer that runs a
+  // callback (the checks subroutine of the containers, the wrappers and the unions) or awaits one (the settlement
+  // of an async predicate, an async island) records a `$ZodAsyncError` the callback threw or rejected with, and the
+  // async entries rethrow a recorded one instead of rerunning the parse.
+  const nested = z.string().refine(async () => true);
+  const throwers: [string, () => void][] = [
+    ["a nested sync parse of an async schema", () => nested.parse("x")],
+    [
+      "an explicit throw",
+      () => {
+        throw new $ZodAsyncError();
+      },
+    ],
+  ];
+  // Throws on the first call only, so a rerun would pass: the review's reproduction
+  const once = (log: string[], thrower: () => void) => () => {
+    log.push("c");
+    if (log.length === 1) thrower();
+    return true;
+  };
+  type Case = {
+    name: string;
+    make: (fn: () => boolean) => z.ZodType;
+    input: () => unknown;
+    async: boolean;
+  };
+  const cases: Case[] = [
+    {
+      name: "array refine",
+      make: (fn) => z.array(z.string()).refine(fn),
+      input: () => ["x"],
+      async: false,
+    },
+    {
+      name: "record refine",
+      make: (fn) => z.record(z.string(), z.number()).refine(fn),
+      input: () => ({ a: 1 }),
+      async: false,
+    },
+    {
+      name: "refine on optional(object)",
+      make: (fn) => z.object({ a: z.string() }).optional().refine(fn),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "refine on a union's container option",
+      make: (fn) => z.union([z.array(z.string()).refine(fn), z.number()]),
+      input: () => ["x"],
+      async: false,
+    },
+    {
+      name: "sync container refine inside an async skeleton",
+      make: (fn) =>
+        z.object({ a: z.string().refine(async () => true), b: z.array(z.string()).refine(fn) }),
+      input: () => ({ a: "x", b: ["y"] }),
+      async: true,
+    },
+    {
+      name: "a plain predicate before an async one in the same subroutine",
+      make: (fn) =>
+        z
+          .array(z.string())
+          .refine(fn)
+          .refine(async () => true),
+      input: () => ["x"],
+      async: true,
+    },
+    {
+      name: "an async predicate rejecting",
+      make: (fn) => z.array(z.string()).refine(async () => fn()),
+      input: () => ["x"],
+      async: true,
+    },
+    {
+      name: "an async island rejecting (lazy over an async refine)",
+      make: (fn) => z.object({ a: z.lazy(() => z.string().refine(async () => fn())) }),
+      input: () => ({ a: "x" }),
+      async: true,
+    },
+    // The interpreter calls the callback before the island's run has come back, so the throw leaves
+    // `_zod.run` synchronously, never as a rejection (sixth review of #76). A bare `lazy` is this layer's
+    // island whether or not its subtree is async (stock's own product for it is a runtime island too).
+    {
+      name: "a lazy island inside an async skeleton (the sixth review's reproduction)",
+      make: (fn) =>
+        z.object({
+          a: z.lazy(() => z.string().refine(fn)),
+          b: z.string().refine(async () => true),
+        }),
+      input: () => ({ a: "x", b: "y" }),
+      async: true,
+    },
+    {
+      name: "a lazy island in a sync skeleton",
+      make: (fn) => z.object({ a: z.lazy(() => z.string().refine(fn)) }),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "a lazy island at the top level",
+      make: (fn) => z.lazy(() => z.string().refine(fn)),
+      input: () => "x",
+      async: false,
+    },
+    {
+      name: "an async island throwing synchronously (a sync predicate before an async one under a lazy)",
+      make: (fn) =>
+        z.object({
+          a: z.lazy(() =>
+            z
+              .string()
+              .refine(fn)
+              .refine(async () => true),
+          ),
+        }),
+      input: () => ({ a: "x" }),
+      async: true,
+    },
+    // A sync island: a subtree stock's compiler declines for a non-async reason (an exclusive union)
+    {
+      name: "a sync island in a sync skeleton (a refine on an xor)",
+      make: (fn) => z.object({ a: z.xor([z.string(), z.number()]).refine(fn) }),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "a sync island inside an async skeleton",
+      make: (fn) =>
+        z.object({
+          a: z.xor([z.string(), z.number()]).refine(fn),
+          b: z.string().refine(async () => true),
+        }),
+      input: () => ({ a: "x", b: "y" }),
+      async: true,
+    },
+    {
+      name: "a sync island at the top level",
+      make: (fn) => z.xor([z.string(), z.number()]).refine(fn),
+      input: () => "x",
+      async: false,
+    },
+  ];
+  for (const c of cases) {
+    for (const [tname, thrower] of throwers) {
+      const label = `${c.name}, ${tname}`;
+      const stockLog: string[] = [];
+      const S = c.make(once(stockLog, thrower));
+      await assert.rejects(S.safeParseAsync(c.input()), $ZodAsyncError, `${label}: stock rejects`);
+      assert.equal(stockLog.length, 1, `${label}: stock calls the callback once`);
+
+      const log: string[] = [];
+      const C = compile(c.make(once(log, thrower)));
+      assert.equal(C.async, c.async, `${label}: async flag`);
+      assert.equal(C.stock, false, `${label}: not degraded`);
+      await assert.rejects(
+        C.safeParseAsync(c.input()),
+        $ZodAsyncError,
+        `${label}: safeParseAsync rejects with the callback's error`,
+      );
+      assert.equal(log.length, 1, `${label}: the callback ran once, no rerun in stock`);
+      log.length = 0;
+      await assert.rejects(C.parseAsync(c.input()), $ZodAsyncError, `${label}: parseAsync too`);
+      assert.equal(log.length, 1, `${label}: parseAsync ran the callback once`);
+      if (!c.async) {
+        // The sync entries throw the callback's error like stock's sync API, unchanged
+        log.length = 0;
+        assert.throws(() => C.parse(c.input()), $ZodAsyncError, `${label}: parse throws it`);
+        assert.equal(log.length, 1);
+      }
+    }
+    ok(c.name);
+  }
+
+  // The thrown object itself comes back, not a fresh error
+  {
+    const mine = new $ZodAsyncError();
+    const C = compile(
+      z.array(z.string()).refine(() => {
+        throw mine;
+      }),
+    );
+    await assert.rejects(
+      C.safeParseAsync(["x"]),
+      (e) => e === mine,
+      "the callback's own error object",
+    );
+    ok("the caller's error object is the one rejected with");
+  }
+
+  // The Promise signal still falls back: a plain function returning a Promise in the same positions
+  {
+    const C = compile(z.array(z.string()).refine(() => Promise.resolve(true)));
+    const r = await C.safeParseAsync(["x"]);
+    assert.ok(
+      r.success,
+      "a plain Promise from the checks subroutine still reaches stock's async runtime",
+    );
+    const M = compile(
+      z.object({
+        a: z.string().refine(async () => true),
+        b: z.array(z.string()).refine(() => Promise.resolve(true)),
+      }),
+    );
+    const rM = await M.safeParseAsync({ a: "x", b: ["y"] });
+    assert.ok(rM.success, "the same inside an async skeleton");
+    // Through a sync island the interpreter chains the Promise and the island throws the signal on the thenable
+    // it gets back, so a plain Promise there still reaches stock's async runtime, whereas a throw that leaves
+    // `_zod.run` synchronously is the callback's (sixth review of #76)
+    const islandCases: [string, z.ZodType, unknown, boolean][] = [
+      [
+        "a plain-Promise refine on an xor under an object key",
+        z.object({ a: z.xor([z.string(), z.number()]).refine(() => Promise.resolve(true)) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise transform on an xor under an object key",
+        z.object({ a: z.xor([z.string(), z.number()]).transform((v) => Promise.resolve(v)) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise refine on a top-level xor",
+        z.xor([z.string(), z.number()]).refine(() => Promise.resolve(true)),
+        "x",
+        false,
+      ],
+      // Stock's own product for a lazy reads `.issues` off the thenable and throws a TypeError here
+      [
+        "a plain-Promise refine under a lazy",
+        z.object({ a: z.lazy(() => z.string().refine(() => Promise.resolve(true))) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise refine under a lazy inside an async skeleton",
+        z.object({
+          a: z.lazy(() => z.string().refine(() => Promise.resolve(true))),
+          b: z.string().refine(async () => true),
+        }),
+        { a: "x", b: "y" },
+        true,
+      ],
+    ];
+    for (const [name, S, input, isAsync] of islandCases) {
+      const stock = await S.safeParseAsync(input);
+      assert.ok(stock.success, `${name}: stock`);
+      const CI = compile(S);
+      assert.equal(CI.async, isAsync, `${name}: async flag`);
+      assert.equal(CI.stock, false, `${name}: not degraded`);
+      const rI = await CI.safeParseAsync(input);
+      assert.ok(rI.success, `${name}: still reaches stock's async runtime`);
+      assert.deepEqual(rI.data, stock.data, `${name}: stock's output`);
+      assert.throws(
+        () => CI.parse(input),
+        $ZodAsyncError,
+        `${name}: the sync API throws stock's class`,
+      );
+    }
+    ok("the fast path's own Promise signal still reaches stock's async runtime");
+  }
+
+  // Residual: a callback that stock's generated code calls (a leaf refine, a custom check or a superRefine inside
+  // an official product) reports its Promise signal with the same class from a throw site this layer cannot mark,
+  // so a `$ZodAsyncError` such a callback throws is handed to stock's async runtime like the signal: a callback that
+  // throws on every call rejects with the same error after running twice (the documented failure-path duplicate),
+  // one that throws on the first call only passes on the rerun where stock rejects. Pinned here; tracked in #80.
+  {
+    const always = (log: string[]) => () => {
+      log.push("c");
+      nested.parse("x");
+      return true;
+    };
+    const leafCases: [string, (fn: () => boolean) => z.ZodType, unknown][] = [
+      [
+        "leaf refine under an object key",
+        (fn) => z.object({ a: z.string().refine(fn) }),
+        { a: "x" },
+      ],
+      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
+    ];
+    for (const [name, make, input] of leafCases) {
+      const stockLog: string[] = [];
+      await assert.rejects(make(always(stockLog)).safeParseAsync(input), $ZodAsyncError);
+      assert.equal(stockLog.length, 1);
+      const log: string[] = [];
+      const C = compile(make(always(log)));
+      assert.ok(!C.async && !C.stock);
+      await assert.rejects(C.safeParseAsync(input), $ZodAsyncError, `${name}: the same rejection`);
+      assert.equal(
+        log.length,
+        2,
+        `${name}: the fast path and stock's async runtime each ran the callback`,
+      );
+      const onceLog: string[] = [];
+      const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+      const r = await CO.safeParseAsync(input);
+      assert.ok(r.success, `${name}: a first-call-only throw passes on the rerun (known, #80)`);
+      assert.equal(onceLog.length, 2);
+    }
+    ok(
+      "inside an official product the callback's $ZodAsyncError still takes the fallback (pinned, #80)",
+    );
+  }
 }
 
 console.log("\nAll tuple + async smoke assertions passed ✓");

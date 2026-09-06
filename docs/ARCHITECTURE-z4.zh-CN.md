@@ -248,10 +248,41 @@ if (cChecks(out) === INVALID) return INVALID;       // 脏：对齐 stock 的"�
 return out;
 ```
 
-支持集：`custom`（`.refine()` 的 `def.fn` 纯谓词）+ array 的
+支持集：`custom`（`.refine()` 的 `def.fn` 谓词，同步或 async）+ array 的
 `min_length/max_length/length_equals`（`.length` 直读）+ map/set 的
-`min_size/max_size/size_equals`（`.size` 直读）。其余（superRefine 改写
+`min_size/max_size/size_equals`（`.size` 直读）；record 没有长度或大小检查，所以只有谓词会到达它的骨架
+（#13 之前带任何 check 的 record 都走官方 parser）。其余（superRefine 改写
 `ctx.value`、overwrite、自定义 `when`）→ 该节点整体降级官方 parser 产物。
+
+async 谓词过去被门控拒绝，带它的容器变成 runtime island，每次解析都返回拷贝（#13）。自 #13 起只要有一个谓词是
+async，子程序本身就是 async 函数，并遵循 stock 的调度：`runChecks` 按声明顺序同步调用每个 check，只把 await 串起来，
+所以每个谓词（同步或 async）都在第一个 `await` 之前被调用，长度 / 大小检查保持原位，结果最后由 `settleChecks` 按顺序结算
+（`Promise` 被 await，其他结果原样读取，一个 `false` 不会中止后面结果的结算，rejection 在它自己的位置抛出）。在某个谓词已启动之后
+失败的长度 / 大小检查会先结算已启动的谓词再返回 `INVALID`，因此不会留下无人接住的 rejecting promise。"每个谓词都会被调用"有一个
+例外：`runChecks` 在某个 check 返回 `Promise` 之前是同步跟踪 abort 状态的，所以一个 `abort: true` 的谓词在尚无 promise 启动时同步失败，
+会跳过后面所有没有 `when` 的 check（长度 / 大小检查带 `when`，仍会运行，且无副作用）。子程序在这一点直接返回 `INVALID` 而不再启动后面的
+谓词，因此 stock 不会调用的谓词这里也不会被调用（#76 的第三轮评审）；第一个 promise 之后 stock 在自己的链里更新状态，对循环来说已经太晚，
+于是什么都不跳过，谓词全部启动。对于不是 async 函数的谓词，是否已有 promise 启动在运行时判断，因为普通函数也可能返回 `Promise`。
+两种变体里的每次谓词调用都包在 `try / catch` 里，把抛出交给 `rethrowCallerError`：谓词抛出的 `$ZodAsyncError` 在继续传播之前被记录为
+调用方的，async 入口于是原样重抛它，而不是把它读成快路径的 Promise 信号（§5.5 第 6 条；等待中的谓词以 rejection 结算时，`settleChecks`
+以同样方式记录）。调用位（六个容器骨架、union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async（示例里省略了包装）：
+
+```js
+const x0 = f0(input);                                   // 同步谓词
+const x1 = f1(input);                                   // 带 abort: true 的同步谓词
+if (!x1 && !(x0 instanceof Promise)) return INVALID;    // stock 在此跳过 x2；x0 仍可能返回了 Promise
+const x2 = f2(input);                                   // async 谓词，已启动
+if (input.length < 2) { await settle([x0, x1, x2]); return INVALID; }
+const x3 = f3(input);                                   // 同步谓词，在 x2 结算之前调用
+if (!(await settle([x0, x1, x2, x3]))) return INVALID;
+return true;
+```
+
+这一调度描述的是成功路径。某个 check 失败时，子程序像本线的其他失败一样返回 `INVALID`（§6）：失败的长度 / 大小检查之后声明的
+check 不会被子程序调用，调用方回退到 stock 的 `safeParse` / `safeParseAsync`，后者从头再跑一遍 schema 的所有 check。所以失败之前
+已通过的谓词会跑两次（`refine(A).min(3).refine(B)` 对单元素数组记录 `A, A, B`，runtime 记录 `A, B`），即 README 已知限制里列出的
+那一条；stock 自己的 `z.compile()` 快路径在同一个 check 处退出，其回退产生同样的日志。#13 之前该容器是 runtime island，失败时
+同样回退，所以每个谓词都跑两次（`A, B, A, B`）。
 
 ## 4. 纯度分析：白名单与四大陷阱
 
@@ -261,7 +292,7 @@ return out;
 | def.type | 判定 | 理由 |
 |---|---|---|
 | string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | 官方产物透传 accessor；但 checks 例外见下 |
-| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite、superRefine 或 async refine 像叶子上一样改写值或改变时序（#57），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
+| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite 或 superRefine 像叶子上一样改写值（#57；async refine 是骨架自 #13 起会 await 的谓词），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
 | union | union 自身 checks 通过 `leafChecksArePure`（有容器分支时：`unionSkeletonOk`，即 union 骨架用的闸门）且全分支纯 | 纯叶子 union 是一个官方产物，分支透传；带容器分支（直接、经 optional / nullable、或在嵌套 union 内）的 union 拿到 union 骨架（#58），其分支就是骨架位置，见陷阱四 |
@@ -300,7 +331,7 @@ size_equals/max_length/min_length/length_equals）。zc-z4 最初把任何 truth
 checks，容器输出则由内到外运行每一层的 checks。带这类 checks 的链把容器编译成只调用一次的嵌套骨架，因为内联骨架
 会在自己的分支里把干净输入直接返回，之后发射的任何代码在该路径上都不会运行；不带 checks 的链仍像以前一样内联。
 门控（`wrapperChecksAreCowSafe`）只放行 `.refine` 谓词，即 `containerChecksFn` 能发射的 checks；包装层上的其他
-check（overwrite、superRefine、async refine、经 `.check()` 附加的长度 / 大小检查）让整条链走官方 parser，`isPure`
+check（overwrite、superRefine、经 `.check()` 附加的长度 / 大小检查）让整条链走官方 parser（async refine 自 #13 起通过门控，由子程序 await），`isPure`
 同样拒绝它（它以前只递归 inner 而不看包装层的 checks，于是这样的链走了 validator 并保留未声明键；同一行也修复了
 #57 的叶子情形）。在容器之上 `isPure` 用的是骨架的门控而不是叶子的：包装层上的长度 / 大小检查在叶子上是纯谓词，
 而对门控刚拒绝的容器链再判纯，就把 `z.object({ a: z.number() }).optional().check(z.minLength(1))` 交给了
@@ -531,7 +562,7 @@ return out;
 
 1. async 岛：`makeAsyncIsland(schema)` = async 黑盒，返回 `Promise<输出 | INVALID>`，
    产物挂 `ZC_ASYNC` symbol 标记。
-2. await 发射：所有产物调用位检测 `isAsyncProduct(fn)` 并置 `ctx.async = true`。set、map 与迭代式 record 骨架在循环内启动每个条目并按 stock 的结算顺序写入（#70）。object、enum 键 record、array 与 tuple 骨架在任一子节点为 async 时采用 async 布局（#71）：所有产物先按 stock 的顺序在第一个 await 之前调用（同步子节点的结果直接捕获，async 子节点的 promise 启动；tuple 像 stock 的 runtime 一样以 `input[i]` 启动每个固定槽，包括缺席的槽，再启动 rest 元素），一次 `await Promise.all` 结算所有 async 结果，随后原有的检查、引用比较与拷贝逻辑在结算后的结果上运行。因此 N 个 async 子节点只花一个来回而非 N 个，副作用的交错与 stock 一致（第二个子节点的 transform 在第一个结算之前启动），带两个 async 子节点的容器与只带一个的容器在同一轮结算，这决定了它在按结算顺序写入的父 set、map 或 record 中的位置。第一次启动与 `Promise.all` 之间没有任何 return，因此被拒绝的 promise 总是有人接住。容器 checks 的 async refine 谓词在子节点之后就地 await，与 stock 在解析之后运行 checks 一致。同步布局不变。
+2. await 发射：所有产物调用位检测 `isAsyncProduct(fn)` 并置 `ctx.async = true`。set、map 与迭代式 record 骨架在循环内启动每个条目并按 stock 的结算顺序写入（#70）。object、enum 键 record、array 与 tuple 骨架在任一子节点为 async 时采用 async 布局（#71）：所有产物先按 stock 的顺序在第一个 await 之前调用（同步子节点的结果直接捕获，async 子节点的 promise 启动；tuple 像 stock 的 runtime 一样以 `input[i]` 启动每个固定槽，包括缺席的槽，再启动 rest 元素），一次 `await Promise.all` 结算所有 async 结果，随后原有的检查、引用比较与拷贝逻辑在结算后的结果上运行。因此 N 个 async 子节点只花一个来回而非 N 个，副作用的交错与 stock 一致（第二个子节点的 transform 在第一个结算之前启动），带两个 async 子节点的容器与只带一个的容器在同一轮结算，这决定了它在按结算顺序写入的父 set、map 或 record 中的位置。第一次启动与 `Promise.all` 之间没有任何 return，因此被拒绝的 promise 总是有人接住。容器自身的 checks 在子节点结算之后运行，与 stock 在解析之后运行 `runChecks` 一致；其中有 async 谓词时 checks 子程序本身按同一调度成为 async（每个谓词都在它的第一个 `await` 之前调用，§3.2，#13）。`Promise.all` 之后除 tuple 的长度外不再读取输入（#77）：数组骨架在循环之前取长度，在第一趟里捕获每次读取与每个空洞（`Object.hasOwn`），并用捕获的读取重建干净前缀；tuple 骨架对固定槽做同样的事，并在固定槽启动之后、任何 rest 产物运行之前取 stock 的 `input.slice(items.length)`，从该切片启动每个 rest 元素并在其上判定 rest 空洞（所以修改后面 rest 槽位的同步 rest 回调不会被观察到，而在切片之前运行的固定槽回调的修改会被观察到），并把存在性判断留在实时的 `input.length` 上，因为 stock 的 `handleTupleResults` 在 await 之后才判定存在性。因此子节点在其 promise 落定之前修改输入时，拷贝路径观察不到这次修改，正如 stock 在任何 promise 落定之前就把每个元素读完一次、同样观察不到它；干净路径仍按输入此刻的样子返回它。同步布局不变，保留其有文档记录的前缀第二次读取（#36）。
 3. 骨架 async 化：`buildFn` 依 `ctx.async` 决定 `async (input) =>` 还是 `(input) =>`，
    产物挂 `ZC_ASYNC` → 子骨架父层自动感知（`childProduct` 返回 `kind: "async"`）。
 4. 公开 API：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
@@ -539,9 +570,32 @@ return out;
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
    Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
    pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+   自 #76 第六轮 review 起，裸 `lazy` 不论子树是否 async 都走本层的岛（`officialFn`：`makeAsyncIsland` 或 `makeIsland`）：
+   stock 自己对它的产物也是 runtime island（`generateLazyCheck` 在空 context 下运行 getter 的 `_zod.run`，并直接读返回值的
+   `.issues`，所以普通函数返回的 thenable 在那里以 `TypeError` 告终），因此不损失任何编译快路径，而这次运行由本层接管。
+6. 运行时识别（#76 第四轮 review）：返回 `Promise` 的普通函数能通过所有静态探测（官方的 `isAsyncFunction`
+   与 `isAsyncFn` 都只看语法），所以 schema 是同步骨架，`Promise` 在运行时才遇到。checks 子程序与官方产物
+   在那里抛 `$ZodAsyncError`（`product.ts` 的 `throwAsync` 抛的是 stock 的类，与官方 `throwAsync` 一致；
+   transform 返回的 `Promise` 在官方产物里答 INVALID）。同步 API 让这个 throw 出去，与 stock 一致；
+   `parseAsync` / `safeParseAsync` 在两种骨架下都接住它，并像到达 async 入口的每个 INVALID 一样把这次 parse 交给
+   stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
+   在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。
+   回调自己抛出的 `$ZodAsyncError`（对 async schema 做嵌套同步 parse 就会这样）属于调用方，不是那个信号（#76 第五轮
+   review）：checks 子程序把每次谓词调用、`settleChecks` 把每个等待的谓词、两种岛把它们的运行都包在
+   `rethrowCallerError`（`product.ts`）里，它把该错误记入一个 WeakSet，async 入口对记录过的错误原样重抛（`isPromiseSignal`），
+   于是 parse 像 stock 一样在调用一次后拒绝。对岛而言这覆盖 async 岛运行的 rejection，以及同步地离开任一岛运行的抛出
+   （`official.ts` 的 `runIsland`，#76 第六轮 review）：解释器在运行返回之前就调用同步回调，而在岛交给它的 context 下它
+   自己从不抛 `$ZodAsyncError`（它 check 与 parse 链上的三处抛出点只在 `async: false` 下触发，同步岛的空 context 会把
+   Promise 链起来；core transform 节点的那一处只在 `async` 为假值时触发，而 async 岛以 `async: true` 运行，即 stock 的
+   async runtime 交给子树的 context），所以同步地从 `_zod.run` 抛出的这个类必然来自回调。由 stock 生成代码调用的回调
+   （官方产物内部，包括官方产物里包装器之下或 pipe 里的 `lazy`）遇到 `Promise` 时从 stock 自己的 `throwAsync` 报告，
+   本层无法标记它，所以那里抛出的 `$ZodAsyncError` 仍走回退、回调跑两次；#80 跟踪几种选项（上游给该抛出点加标记是
+   最便宜的精确修法）。
 
 关键语义保留：同步 island（`makeIsland`）遇到 Promise 时抛 `$ZodAsyncError`（官方
-compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。
+compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。这个抛出是本层自己的
+（`product.ts` 的 `throwAsync`），不记录，于是 async 入口把这次 parse 交给 stock 的 async runtime；从岛的 `_zod.run`
+本身抛出来的则属于回调，会被记录（§5.5 第 6 条）。
 
 混搭效果：一棵树里只有 async 子树位付 microtask 成本，其余全部保持引用比较骨架
 （S7：5 万条 async transform 场景 2.50x vs stock safeParseAsync，分配 -63%）。
@@ -573,6 +627,10 @@ compile(schema)
 async 骨架（ctx.async = true）的顶层契约：
   Compiled.async = true → sync parse/safeParse/validate 抛 $ZodAsyncError；
   parseAsync/safeParseAsync 可用，失败路径回退 stock safeParseAsync。
+同步骨架（ctx.async = false）：
+  parseAsync/safeParseAsync 先跑快路径，遇到 INVALID 时回退到 stock safeParseAsync，
+  遇到普通函数返回 Promise 时快路径抛出的 $ZodAsyncError 也走同一回退（§5.5 第 6 条）；回调经由本层自己的
+  调用位抛出的 $ZodAsyncError 会被记录并原样重抛（isPromiseSignal）。
 ```
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
@@ -621,7 +679,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser，经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 superRefine 走官方 parser（async refine 自 #13 起保留骨架并共享），经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套
@@ -656,7 +714,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 | `compileFn(schema, {assertOnly, debug})` | 叶子/子树产物 | 签名变化（低）；行为变化由差分兜底 |
 | `INVALID` | 失败哨兵 | 极低（Symbol.for 稳定） |
 | `ZodCompileUnsupportedError/AsyncError` | 降级判定 + async 探测器（v0.5） | 低 |
-| `$ZodAsyncError` | 同步 island 遇 Promise 的官方语义抛错；sync API 对 async 骨架 | 低 |
+| `$ZodAsyncError` | 同步 island 遇 Promise 的官方语义抛错；sync API 对 async 骨架；async 入口接住的快路径 Promise 信号（§5.5 第 6 条），这是个回调也能抛的公开类，所以官方产物内部回调自己的抛出无法区分（#80） | 低 |
 | `regexes.number` / `util.isPlainObject` | record 骨架 | 低（官方内部一致性依赖同款） |
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` 等语义谓词（照抄实现，非 import） | 纯度分析 | 中：zod 改 when 语义时需同步 |
 | `getTupleOptStart` / `dropsWhenAbsent`（照抄实现，非 import） | tuple 尾槽截断语义（v0.5） | 中：zod 改 optin/optout 梯子时需同步 |

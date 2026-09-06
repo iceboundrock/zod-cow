@@ -5,7 +5,7 @@
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
-import { containerChecksFn, containerChildFn } from "./emit.js";
+import { containerChecksCall, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
 import { type Fn, isAsyncProduct, type Node } from "./product.js";
@@ -219,8 +219,8 @@ export function emitCoWObject(
 
   // The container's own checks (.refine/.min and friends): a standalone validation subroutine,
   // called on both paths to match stock semantics (checks apply to the final output: the input when clean, the rebuilt out when dirty)
-  const checksFn = containerChecksFn(schema);
-  const cName = checksFn ? ctx.addConst(checksFn) : null;
+  const checksCall = containerChecksCall(ctx, schema);
+  const cName = checksCall ? `${checksCall.awaitKw}${checksCall.name}` : null;
 
   // ═══ CoW core: the branch the official template does not have ═══
   // Undeclared-key probes, only here: a copy assembled from the declared keys drops undeclared keys
@@ -254,12 +254,12 @@ export function emitCoWObject(
       }
       ctx.write(`if (!${extra}) {`);
       ctx.indented(() => {
-        if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
+        if (cName) ctx.write(`if ((${cName}(${accessor})) === INVALID) return INVALID;`);
         ctx.write(`return ${accessor};`);
       });
       ctx.write(`}`);
     } else {
-      if (cName) ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
+      if (cName) ctx.write(`if ((${cName}(${accessor})) === INVALID) return INVALID;`);
       ctx.write(`return ${accessor};`);
     }
   });
@@ -304,7 +304,7 @@ export function emitCoWObject(
     ctx.write(`}`);
   }
 
-  if (cName) ctx.write(`if (${cName}(out) === INVALID) return INVALID;`);
+  if (cName) ctx.write(`if ((${cName}(out)) === INVALID) return INVALID;`);
 
   return "out";
 }

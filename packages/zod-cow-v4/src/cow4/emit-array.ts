@@ -1,6 +1,6 @@
 /** Array skeleton: element-level reference comparison + prefix rebuild at the first change, holes materialized. */
 import type { CodeCtx } from "./codectx.js";
-import { containerChecksFn, containerChildFn } from "./emit.js";
+import { containerChildFn, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
 import { type Fn, isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
@@ -45,9 +45,19 @@ export function emitCoWArray(
   // a hole where stock writes an own undefined slot (#67, review of #70). A hole is an index the
   // input does not own (`Object.hasOwn`: an inherited undefined under a hole is still a hole, where
   // `in` called it present); an inherited value under a hole reads as that value and stays the
-  // prototype limitation of the clean path (#48).
-  const copy = `${dirty} = true; ${out} = new Array(${accessor}.length); for (let j = 0; j < ${i}; j++) ${out}[j] = ${accessor}[j];`;
-  const hole = `${e} === undefined && !Object.hasOwn(${accessor}, ${i})`;
+  // prototype limitation of the clean path (#48). The async layout below rebuilds the prefix from
+  // the reads it captured before the await and decides a hole in that same pass (#77): a child may
+  // mutate the input before its promise settles, and stock, which reads every element once before
+  // any promise settles, does not observe that mutation.
+  const reads = ctx.var();
+  const len0 = ctx.var();
+  const holes = ctx.var();
+  const copy = elemAsync
+    ? `${dirty} = true; ${out} = new Array(${len0}); for (let j = 0; j < ${i}; j++) ${out}[j] = ${reads}[j];`
+    : `${dirty} = true; ${out} = new Array(${accessor}.length); for (let j = 0; j < ${i}; j++) ${out}[j] = ${accessor}[j];`;
+  const hole = elemAsync
+    ? `${holes} !== null && ${holes}[${i}] === true`
+    : `${e} === undefined && !Object.hasOwn(${accessor}, ${i})`;
   ctx.write(`let ${out} = ${accessor}, ${dirty} = false;`);
   /** The comparison of element `i`, read once into `e`, against its settled result `res` (a call expression or a local) */
   const emitElement = (res: string): void => {
@@ -73,24 +83,31 @@ export function emitCoWArray(
     ctx.write(`}`);
   } else {
     // Async element (#71): stock's runtime starts every element's parse inside its loop and awaits
-    // them together. The first loop reads each element once and starts its product, one
-    // `Promise.all` settles them, and the second loop runs the comparisons above on the captured
+    // them together. The first loop reads each element once, notes a hole and starts its product,
+    // one `Promise.all` settles them, and the second loop runs the comparisons above on the captured
     // reads and the settled results (the async path allocates two arrays; the sync path none).
-    const reads = ctx.var();
+    // Nothing is read from the input after the await (#77): the length stock sizes its output with
+    // is taken before the loop, the loop bound is live like stock's, and the second loop covers the
+    // elements the first one visited.
     const started = ctx.var();
     const settled = ctx.var();
+    const n = ctx.var();
     ctx.write(
-      `const ${reads} = new Array(${accessor}.length), ${started} = new Array(${accessor}.length);`,
+      `const ${len0} = ${accessor}.length, ${reads} = new Array(${len0}), ${started} = new Array(${len0});`,
     );
-    ctx.write(`for (let ${i} = 0; ${i} < ${accessor}.length; ${i}++) {`);
+    ctx.write(`let ${holes} = null, ${n} = 0;`);
+    ctx.write(`for (; ${n} < ${accessor}.length; ${n}++) {`);
     ctx.indented(() => {
-      ctx.write(`const ${e} = ${accessor}[${i}];`);
-      ctx.write(`${reads}[${i}] = ${e};`);
-      ctx.write(`${started}[${i}] = ${f}(${e});`);
+      ctx.write(`const ${e} = ${accessor}[${n}];`);
+      ctx.write(`${reads}[${n}] = ${e};`);
+      ctx.write(
+        `if (${e} === undefined && !Object.hasOwn(${accessor}, ${n})) (${holes} ??= [])[${n}] = true;`,
+      );
+      ctx.write(`${started}[${n}] = ${f}(${e});`);
     });
     ctx.write(`}`);
     ctx.write(`const ${settled} = await Promise.all(${started});`);
-    ctx.write(`for (let ${i} = 0; ${i} < ${accessor}.length; ${i}++) {`);
+    ctx.write(`for (let ${i} = 0; ${i} < ${n}; ${i}++) {`);
     ctx.indented(() => {
       ctx.write(`const ${e} = ${reads}[${i}];`);
       emitElement(`${settled}[${i}]`);
@@ -99,17 +116,7 @@ export function emitCoWArray(
   }
 
   // The container's own checks (array .min/.max/.length/.refine): both paths, same as the object skeleton
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) {
-    const cName = ctx.addConst(checksFn);
-    ctx.write(`if (!${dirty}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
-      ctx.write(`return ${accessor};`);
-    });
-    ctx.write(`}`);
-    ctx.write(`if (${cName}(${out}) === INVALID) return INVALID;`);
-  }
+  emitContainerChecks(ctx, schema, accessor, out, `!${dirty}`);
 
   return out;
 }

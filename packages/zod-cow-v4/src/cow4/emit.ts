@@ -14,7 +14,14 @@ import { emitCoWTuple } from "./emit-tuple.js";
 import { emitCoWUnion } from "./emit-union.js";
 import { makeAsyncIsland, officialFn } from "./official.js";
 import { DEFAULT_OPTIONS } from "./options.js";
-import { type Fn, isAsyncFn, isAsyncProduct, type Node, throwAsync } from "./product.js";
+import {
+  type Fn,
+  isAsyncFn,
+  isAsyncProduct,
+  type Node,
+  rethrowCallerError,
+  throwAsync,
+} from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ═══════════════════ Skeleton codegen ═══════════════════ */
@@ -83,9 +90,46 @@ export function childProduct(child: Node, seen: Set<Node>, parent: CodeCtx): Chi
 }
 
 /**
+ * Settles the results of the predicates an async checks subroutine started, the way stock's
+ * `runChecks` chain does: a Promise is awaited, any other result is read as is, every started result
+ * is settled even after a `false` (stock awaits the whole chain, and a promise left unattached could
+ * reject unhandled), and a rejection throws at its position in check order.
+ */
+async function settleChecks(results: unknown[]): Promise<boolean> {
+  let ok = true;
+  for (const r of results) {
+    let v = r;
+    if (r instanceof Promise) {
+      try {
+        v = await r;
+      } catch (e) {
+        rethrowCallerError(e); // a rejection is the predicate's, never the fast path's Promise signal
+      }
+    }
+    if (!v) ok = false;
+  }
+  return ok;
+}
+
+/**
  * Validation subroutine for a container's own checks (a standalone product function, answering pass/fail only).
  * Supported: custom (a def.fn predicate, same template as the official generateCustomRefineCheck) /
- * min_length / max_length / length_equals (array .length).
+ * min_length / max_length / length_equals (array .length) / min_size / max_size / size_equals (map / set .size).
+ * With an async predicate among the checks (#13) the subroutine is an async function on stock's schedule:
+ * `runChecks` calls every check synchronously in declaration order and only chains the awaits, so every
+ * predicate (sync or async) is called before the first `await`, a length / size check keeps its place,
+ * and the results are settled at the end by `settleChecks`. A length / size check that fails after a
+ * predicate was started settles the started ones first, so nothing returns while a promise is unattached.
+ * One exception to "every predicate is called": `runChecks` tracks its abort state synchronously until
+ * a check returns a Promise, so an `abort: true` predicate that fails synchronously while no promise has
+ * started skips every later check without a `when` (the length / size checks carry one and still run,
+ * side-effect free). The subroutine returns INVALID at that point instead of starting the later
+ * predicates (third review of #76); after the first promise the state is updated inside stock's chain,
+ * too late for the loop, so nothing is skipped and the predicates are all started as before. Whether a
+ * promise has started is decided at runtime for the predicates that are not async functions, since a
+ * plain function may return a Promise too. Every predicate call is wrapped so that a `$ZodAsyncError` the
+ * predicate throws is recorded as the caller's (`rethrowCallerError`): the async entries rethrow it, where an
+ * unrecorded one (this subroutine's own `throwAsync` at a Promise) hands the parse to stock's async runtime.
  * Returning null means a check the skeleton cannot handle is present (the caller should already have blocked it via checksAreCowSafe).
  */
 export function containerChecksFn(schema: Node): Fn | null {
@@ -93,53 +137,114 @@ export function containerChecksFn(schema: Node): Fn | null {
   if (checks.length === 0) return null;
   // A check subroutine emits no container skeleton, so the compile options never matter here
   const ctx = new CodeCtx(DEFAULT_OPTIONS);
+  const defOf = (check: Node) => check._zod?.def ?? check;
+  const anyAsync = checks.some((c) => {
+    const d = defOf(c);
+    return d.check === "custom" && !!d.fn && isAsyncFn(d.fn);
+  });
+  ctx.async = anyAsync;
+  const settleC = anyAsync ? ctx.addConst(settleChecks) : null;
+  const rethrowC = ctx.addConst(rethrowCallerError);
+  const started: string[] = []; // async variant: the results of the predicates called so far
+  let promiseStarted = false; // async variant: an async-function predicate was called, so a promise has certainly started
+  const fail = (): string =>
+    started.length === 0
+      ? "return INVALID;"
+      : `{ await ${settleC}([${started.join(", ")}]); return INVALID; }`;
   for (const check of checks) {
-    const d = check._zod?.def ?? check;
+    const d = defOf(check);
     if (d.check === "custom" && d.fn) {
-      // Same as the def.fn branch of the official generateCustomRefineCheck;
-      // an async predicate emits await inside an async skeleton (ctx.async) and throws inside a sync skeleton (official semantics)
-      const asyncFn = isAsyncFn(d.fn);
       const fnC = ctx.addConst(d.fn);
       const res = ctx.var();
-      if (asyncFn) {
-        ctx.async = true;
-        ctx.write(`const ${res} = await ${fnC}(input);`);
-      } else {
-        const throwAsyncC = ctx.addConst(throwAsync);
-        ctx.write(`const ${res} = ${fnC}(input);`);
-        ctx.write(`if (${res} instanceof Promise) ${throwAsyncC}();`);
+      ctx.write(`let ${res}; try { ${res} = ${fnC}(input); } catch (e) { ${rethrowC}(e); }`);
+      if (anyAsync) {
+        const asyncFn = isAsyncFn(d.fn);
+        if (d.abort && !asyncFn && !promiseStarted) {
+          // stock skips the later checks after a sync aborting failure with no promise started yet;
+          // `!res` already excludes a Promise returned by this plain function, the earlier results
+          // (all from plain functions at this point) are tested at runtime
+          const noPromise = started.map((s) => `!(${s} instanceof Promise)`);
+          ctx.write(`if (${[`!${res}`, ...noPromise].join(" && ")}) return INVALID;`);
+        }
+        if (asyncFn) promiseStarted = true;
+        started.push(res);
+        continue;
       }
+      // Same as the def.fn branch of the official generateCustomRefineCheck: a Promise on the sync path throws (official semantics)
+      const throwAsyncC = ctx.addConst(throwAsync);
+      ctx.write(`if (${res} instanceof Promise) ${throwAsyncC}();`);
       ctx.write(`if (!${res}) return INVALID;`);
       continue;
     }
     if (d.check === "min_length") {
-      ctx.write(`if (input.length < ${Number(d.minimum)}) return INVALID;`);
+      ctx.write(`if (input.length < ${Number(d.minimum)}) ${fail()}`);
       continue;
     }
     if (d.check === "max_length") {
-      ctx.write(`if (input.length > ${Number(d.maximum)}) return INVALID;`);
+      ctx.write(`if (input.length > ${Number(d.maximum)}) ${fail()}`);
       continue;
     }
     if (d.check === "length_equals") {
-      ctx.write(`if (input.length !== ${Number(d.length)}) return INVALID;`);
+      ctx.write(`if (input.length !== ${Number(d.length)}) ${fail()}`);
       continue;
     }
     if (d.check === "min_size") {
-      ctx.write(`if (input.size < ${Number(d.minimum)}) return INVALID;`);
+      ctx.write(`if (input.size < ${Number(d.minimum)}) ${fail()}`);
       continue;
     }
     if (d.check === "max_size") {
-      ctx.write(`if (input.size > ${Number(d.maximum)}) return INVALID;`);
+      ctx.write(`if (input.size > ${Number(d.maximum)}) ${fail()}`);
       continue;
     }
     if (d.check === "size_equals") {
-      ctx.write(`if (input.size !== ${Number(d.size)}) return INVALID;`);
+      ctx.write(`if (input.size !== ${Number(d.size)}) ${fail()}`);
       continue;
     }
     return null; // inexpressible check -- the caller is responsible for having blocked it with checksAreCowSafe
   }
+  if (started.length > 0) {
+    ctx.write(`if (!(await ${settleC}([${started.join(", ")}]))) return INVALID;`);
+  }
   ctx.write("return true;");
   return buildFn(ctx);
+}
+
+/** A checks subroutine hoisted into `ctx` for its call sites: the constant name and the `await` keyword an async subroutine needs (`ctx.async` is set for it, #13); null when the schema has no checks */
+export function containerChecksCall(
+  ctx: CodeCtx,
+  schema: Node,
+): { name: string; awaitKw: string } | null {
+  const checksFn = containerChecksFn(schema);
+  if (!checksFn) return null;
+  const isAsync = isAsyncProduct(checksFn);
+  if (isAsync) ctx.async = true;
+  return { name: ctx.addConst(checksFn), awaitKw: isAsync ? "await " : "" };
+}
+
+/**
+ * The container's own checks on both paths, as stock runs them on the final output: on the input
+ * when `clean` holds (the input is then returned) and on `out` otherwise. Returns false when the
+ * schema has no checks, so the caller emits its own clean return.
+ */
+export function emitContainerChecks(
+  ctx: CodeCtx,
+  schema: Node,
+  accessor: string,
+  out: string,
+  clean: string,
+): boolean {
+  const call = containerChecksCall(ctx, schema);
+  if (!call) return false;
+  const check = (value: string): string =>
+    `if ((${call.awaitKw}${call.name}(${value})) === INVALID) return INVALID;`;
+  ctx.write(`if (${clean}) {`);
+  ctx.indented(() => {
+    ctx.write(check(accessor));
+    ctx.write(`return ${accessor};`);
+  });
+  ctx.write(`}`);
+  ctx.write(check(out));
+  return true;
 }
 
 /**
@@ -193,10 +298,11 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
   for (;;) {
     const def = cur._zod.def;
     if (def.type !== "nullable" && def.type !== "optional") break;
-    const checksFn = containerChecksFn(cur); // custom predicates only, see wrapperChecksAreCowSafe
+    // custom predicates only, sync or async, see wrapperChecksAreCowSafe
+    const call = containerChecksCall(ctx, cur);
     layers.push({
       shortcut: def.type === "nullable" ? "null" : "undefined",
-      checks: checksFn ? ctx.addConst(checksFn) : null,
+      checks: call ? `${call.awaitKw}${call.name}` : null,
     });
     cur = def.innerType;
     if (def.type === "optional" && cur._zod.optin === "defaulted") {
@@ -208,7 +314,7 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
   const emitChecksUpTo = (i: number, value: string): void => {
     for (let j = i; j >= 0; j--) {
       const c = layers[j]!.checks;
-      if (c) ctx.write(`if (${c}(${value}) === INVALID) return INVALID;`);
+      if (c) ctx.write(`if ((${c}(${value})) === INVALID) return INVALID;`);
     }
   };
   const hasChecksUpTo = (i: number): boolean => layers.slice(0, i + 1).some((l) => l.checks);

@@ -78,7 +78,7 @@ The deeper and heavier the containers, the more of stock's time goes into output
 | `compileFn(schema, { assertOnly, debug })` | leaf/subtree artifacts | low (signature), behavior guarded by differential tests |
 | `INVALID` sentinel | failure protocol | very low (`Symbol.for`) |
 | `ZodCompileUnsupportedError` / `ZodCompileAsyncError` (already public top-level exports) | degradation decisions; the latter doubles as our async-subtree detector | low |
-| `$ZodAsyncError` | official semantics for "Promise reached a synchronous fast path"; our sync API throws it for async skeletons | low |
+| `$ZodAsyncError` | official semantics for "Promise reached a synchronous fast path"; our sync API throws it for async skeletons, and our async API catches it as the fast path's Promise signal to hand the parse to the runtime. A user callback can throw the same public class (a nested sync parse of an async schema does), and the error `throwAsync` in `compile.js` throws carries nothing that tells the two apart | low |
 | `regexes.number`, `util.isPlainObject` | record skeleton (100% official semantics for numeric-key retry / plain-object guard) | low |
 | semantic predicates copied from source: `fastPathAcceptsAbsence`, `dropsWhenAbsent`, `getTupleOptStart`, `WHEN_DEFAULTED_CHECKS` | purity analysis & tuple tail semantics | medium: must be re-synced if zod changes `when`/optin-optout semantics |
 
@@ -102,6 +102,7 @@ export class ZodCompileAsyncError extends Error { /* ... */ }
 2. Document the artifact contract (`out | INVALID | true`) and the two option flags.
 3. Semver: keep the signature stable within minors and change behavior only in majors.
 4. Optional, if cheap: export the handful of semantic predicates third parties currently copy (`fastPathAcceptsAbsence`, `dropsWhenAbsent`, `WHEN_DEFAULTED_CHECKS`) so downstream layers can track semantics by import instead of by forked source.
+5. Optional, one line: let the `$ZodAsyncError` that `throwAsync` in `compile.js` throws carry a marker (a subclass, or a property on the instance), so a consumer that runs the compiled fast path first and hands an async parse to the runtime can tell that signal from a `$ZodAsyncError` a user callback threw (a nested sync parse of an async schema throws the same class). Today the two are indistinguishable from outside the generated closure.
 
 The proposal is small on purpose. The compiler keeps evolving behind the same facade, `zod/compile` keeps working as it does today, and the only change is that the existing surface stops being internal.
 

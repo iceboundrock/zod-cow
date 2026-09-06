@@ -2,18 +2,51 @@
  * Official-product wrappers: assertOnly validator, parser, runtime island and async island
  * (the per-subtree degradation chain).
  */
-import { $ZodAsyncError, INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
-import { type Fn, isAsyncFn, markAsync, type Node } from "./product.js";
+import { INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
+import {
+  type Fn,
+  isAsyncFn,
+  markAsync,
+  type Node,
+  rethrowCallerError,
+  throwAsync,
+} from "./product.js";
 
 /* ═══════════════════ Obtaining the official product (degradation chain) ═══════════════════ */
+
+/**
+ * The interpreter's `_zod.run` never throws `$ZodAsyncError` on its own under the contexts the two islands hand
+ * it: the three throw sites of its check and parse chains fire only under `async: false` (the sync island runs
+ * under an empty context, where a Promise a plain function returned is chained instead and comes back as a
+ * thenable), and the core transform node's fourth site only under a falsy `async` (the async island runs under
+ * `async: true`, the context stock's own async runtime hands the subtree; the classic transform node never throws
+ * it). A throw that leaves `_zod.run` synchronously is therefore a callback's, thrown before the run came back
+ * (a nested sync parse of an async schema, or the class thrown by hand), and is recorded for the async entries
+ * of `compile()` like a throw from this layer's own call sites (sixth review of #76).
+ */
+function runIsland(schema: Node, value: unknown, ctx: object): unknown {
+  try {
+    return schema._zod.run({ value, issues: [] }, ctx);
+  } catch (e) {
+    rethrowCallerError(e);
+  }
+}
+
+const SYNC_CTX = {};
+const ASYNC_CTX = { async: true };
 
 function makeIsland(schema: Node): Fn {
   // Equivalent of the official runtimeRun: black-box execution of the subtree, failure → INVALID.
   // async reaching the synchronous fast path through this island → throw $ZodAsyncError (same semantics as the official compile.js throwAsync:
-  // returning INVALID would be read by a union as a rejected branch, so the throw must survive).
+  // returning INVALID would be read by a union as a rejected branch, so the throw must survive). The thenable is
+  // the fast path's Promise signal, which the async entries of `compile()` hand to stock's async runtime.
   return (value: unknown): unknown => {
-    const r = schema._zod.run({ value, issues: [] }, {});
-    if (r && typeof r.then === "function") throw new $ZodAsyncError();
+    const r = runIsland(schema, value, SYNC_CTX) as {
+      then?: unknown;
+      issues: unknown[];
+      value: unknown;
+    };
+    if (r && typeof r.then === "function") throwAsync();
     return r.issues.length === 0 ? r.value : INVALID;
   };
 }
@@ -24,14 +57,17 @@ function makeIsland(schema: Node): Fn {
  * a run that came back synchronously is answered synchronously, so a sync entry of a set, map or
  * record keeps its place in stock's write order (stock's runtime writes a sync entry inside its
  * loop and an async one when its promise settles), and an async run adds exactly one `.then`
- * before the skeleton's own, the same number of microtask hops for every entry (review of #70).
+ * before the skeleton's own, the same number of microtask hops for every entry (review of #70). A rejection
+ * of that run is the caller's (a callback threw inside stock's async chain), never the fast path's Promise
+ * signal, so a `$ZodAsyncError` among them is recorded for the async entries (fifth review of #76), and so
+ * is a throw that leaves the run synchronously (`runIsland`, sixth review of #76).
  */
 export function makeAsyncIsland(schema: Node): Fn {
   const settle = (r: { issues: unknown[]; value: unknown }): unknown =>
     r.issues.length === 0 ? r.value : INVALID;
   return markAsync((value: unknown): unknown => {
-    const r = schema._zod.run({ value, issues: [] }, {});
-    return r instanceof Promise ? r.then(settle) : settle(r);
+    const r = runIsland(schema, value, ASYNC_CTX) as Promise<never> | Parameters<typeof settle>[0];
+    return r instanceof Promise ? r.then(settle, rethrowCallerError) : settle(r);
   });
 }
 
@@ -84,9 +120,13 @@ function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
  * is routed to an async island instead (returns a Promise, awaited at the call site); lazy(async·…) is covered by the static detection.
  */
 export function officialFn(schema: Node, pure: boolean): Fn {
-  // The official product for lazy is a runtime island and inner async raises no compile-time error → covered statically
-  if (schema._zod.def.type === "lazy" && subtreeHasAsync(schema)) {
-    return makeAsyncIsland(schema);
+  // The official product for lazy is a runtime island of stock's own (`generateLazyCheck` runs the getter's
+  // `_zod.run` under an empty context and reads `.issues` off whatever came back), so no compiled fast path is lost
+  // by running the node through this layer's islands instead: inner async raises no compile-time error and is
+  // covered statically (async island), and a callback's synchronous `$ZodAsyncError` or a thenable a plain function
+  // returned is then met by `runIsland` and `throwAsync` rather than by stock's code (sixth review of #76).
+  if (schema._zod.def.type === "lazy") {
+    return subtreeHasAsync(schema) ? makeAsyncIsland(schema) : makeIsland(schema);
   }
   if (pure) {
     try {

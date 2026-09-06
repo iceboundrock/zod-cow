@@ -6,7 +6,8 @@
  *     .parse(data)      CoW semantics: returns the output on success (clean input === the input reference)
  *     .safeParse(data)  non-throwing variant; the failure path is stock safeParse (official issues/ZodError)
  *     .parseAsync(data)       async variant (the only usable entry when the skeleton holds an async subtree)
- *     .safeParseAsync(data)   async variant
+ *     .safeParseAsync(data)   async variant; a Promise the fast path meets at runtime (a plain function returning one,
+ *                             which no static detector sees) hands that parse to stock's async runtime
  *     .validate(data)   pure validation: official whole-tree assertOnly product; returns the input
  *                       reference when it passes, null when it fails
  *     .code             generated CoW skeleton source (for debugging)
@@ -21,6 +22,7 @@ import {
   compileCowDebug,
   officialValidator,
   isAsyncProduct,
+  isPromiseSignal,
   resolveOptions,
   type Fn,
 } from "./cow4/index.js";
@@ -79,6 +81,16 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
     // Same semantics as the official sync API on an async schema ($ZodAsyncError)
     throw new $ZodAsyncError();
   };
+  // The fast path meets a Promise a plain function returned (a refine predicate, a custom check, an island's
+  // `_zod.run`): no static detector sees it, and the official code throws `$ZodAsyncError` there. Stock's own
+  // `z.compile()` never runs its fast path on an async parse; the async entries here hand that parse to stock's
+  // async runtime instead, whose output and issues are stock's (a plain-Promise transform answers INVALID in the
+  // official product and reaches the same fallback). Any other throw is the caller's, a `$ZodAsyncError` a
+  // callback threw through this layer's own call sites included (`isPromiseSignal`, fifth review of #76).
+  const asyncFallbackOr = (e: unknown): typeof INVALID => {
+    if (isPromiseSignal(e)) return INVALID;
+    throw e;
+  };
 
   const unwrap = (r: SyncResult): z.output<T> => {
     if (r.success) return r.data as z.output<T>;
@@ -111,12 +123,12 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
       safeParse: throwSyncOnAsync,
       validate: throwSyncOnAsync,
       async parseAsync(data) {
-        const out = await fast(data);
+        const out = await (fast(data) as Promise<unknown>).catch(asyncFallbackOr);
         if (out !== INVALID) return out as z.output<T>;
         return unwrap(await stockParseAsync(data));
       },
       async safeParseAsync(data) {
-        const out = await fast(data);
+        const out = await (fast(data) as Promise<unknown>).catch(asyncFallbackOr);
         if (out !== INVALID) return ok(out);
         return (await stockParseAsync(data)) as Err;
       },
@@ -140,15 +152,27 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
       if (out !== INVALID) return ok(out);
       return stockParse(data) as Err;
     },
+    // The async entries of a sync skeleton fall back to stock's *async* runtime: the fallback then also serves
+    // a plain function that returned a Promise, which the fast path reports as a throw or as INVALID
     async parseAsync(data) {
-      const out = fast(data);
+      let out: unknown;
+      try {
+        out = fast(data);
+      } catch (e) {
+        out = asyncFallbackOr(e);
+      }
       if (out !== INVALID) return out as z.output<T>;
-      return unwrap(stockParse(data));
+      return unwrap(await stockParseAsync(data));
     },
     async safeParseAsync(data) {
-      const out = fast(data);
+      let out: unknown;
+      try {
+        out = fast(data);
+      } catch (e) {
+        out = asyncFallbackOr(e);
+      }
       if (out !== INVALID) return ok(out);
-      return stockParse(data) as Err;
+      return (await stockParseAsync(data)) as Err;
     },
     validate(data) {
       return validateFast(data) !== INVALID ? data : null;

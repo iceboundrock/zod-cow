@@ -267,4 +267,87 @@ import { compile } from "../src/index.js";
   assert.equal(out.lookup, input.lookup);
 }
 
+/* ── ordered copies, __proto__ and holes: stock rebuilds every container in iteration order (#67) ── */
+{
+  console.log("\n── ordered copies, __proto__ and holes (#67) ──");
+  const same = (schema: z.ZodType, input: unknown) => {
+    const stock = schema.parse(input);
+    const ours = compile(schema).parse(input);
+    const view = (v: unknown) =>
+      v instanceof Map || v instanceof Set ? [...(v as Iterable<unknown>)] : v;
+    assert.deepEqual(view(ours), view(stock));
+    return ours;
+  };
+
+  // Set: a member transform that lands on a later member, or changes the order
+  same(z.set(z.number().transform((n) => (n === 1 ? 2 : n))), new Set([1, 3])); // [2, 3]
+  same(z.set(z.number().transform((n) => (n === 1 ? 2 : 1))), new Set([1, 2])); // [2, 1]
+  console.log("  set: transformed members keep stock's order and lose to a later member ✓");
+
+  // Map: a key transform that renames, or collides with a later key
+  same(
+    z.map(z.string().transform((k) => (k === "a" ? "c" : k)), z.number()),
+    new Map([
+      ["a", 1],
+      ["b", 2],
+    ]),
+  ); // [["c", 1], ["b", 2]]
+  same(
+    z.map(z.string().transform((k) => (k === "a" ? "b" : k)), z.number()),
+    new Map([
+      ["a", 1],
+      ["b", 2],
+    ]),
+  ); // [["b", 2]]
+  // a value transform alone keeps the order too
+  same(
+    z.map(z.string(), z.number().transform((n) => n + 1)),
+    new Map([
+      ["a", 1],
+      ["b", 2],
+    ]),
+  ); // [["a", 2], ["b", 3]]
+  console.log("  map: transformed keys keep stock's order and lose to a later entry ✓");
+
+  // Record: a key transform that collides with a later key (the value is pure, so the key
+  // comparison must run on its own), one that produces "__proto__", and an own "__proto__"
+  const collide = z.string().transform((k) => (k === "a" ? "b" : k));
+  same(z.record(collide, z.number()), { a: 1, b: 2 }); // { b: 2 }
+  same(z.record(collide, z.number().transform((n) => n)), { a: 1, b: 2 }); // { b: 2 }
+  same(z.record(collide, z.number()), { b: 2, a: 1 }); // { b: 1 }
+  same(z.record(z.string().transform((k) => (k === "a" ? "__proto__" : k)), z.number()), {
+    a: 1,
+    b: 2,
+  }); // { b: 2 }
+  const withProto = () => JSON.parse('{"a":1,"__proto__":1}') as object;
+  const rp = same(z.record(z.string(), z.number()), withProto()) as object;
+  assert.equal(Object.hasOwn(rp, "__proto__"), false);
+  const rl = same(z.looseRecord(z.enum(["a"]), z.number()), withProto()) as object;
+  assert.equal(Object.hasOwn(rl, "__proto__"), false);
+  // strict enum records reject it on both sides
+  assert.equal(z.record(z.enum(["a"]), z.number()).safeParse(withProto()).success, false);
+  assert.equal(compile(z.record(z.enum(["a"]), z.number())).safeParse(withProto()).success, false);
+  // a loose iterating record keeps a rejected key in its position on the copy path
+  same(z.looseRecord(z.string().min(2), z.number().transform((n) => n + 1)), {
+    ab: 1,
+    x: 2,
+    cd: 3,
+  }); // { ab: 2, x: 2, cd: 4 }
+  console.log("  record: colliding and __proto__ keys follow stock's assembly ✓");
+
+  // Array / tuple: a hole is an own undefined slot in stock's output
+  const a = same(z.array(z.unknown()), new Array(1)) as unknown[];
+  assert.equal(Object.hasOwn(a, 0), true);
+  const a2 = same(z.array(z.number().optional()), [1, , 3]) as unknown[];
+  assert.equal(Object.hasOwn(a2, 1), true);
+  const t = same(z.tuple([z.string().optional(), z.number()]), [, 2]) as unknown[];
+  assert.equal(Object.hasOwn(t, 0), true);
+  const t2 = same(z.tuple([z.number()], z.string().optional()), [1, , "x"]) as unknown[];
+  assert.equal(Object.hasOwn(t2, 1), true);
+  // a dense clean input still comes back by reference
+  const dense = [1, 2];
+  assert.equal(compile(z.array(z.number().optional())).parse(dense), dense);
+  console.log("  array / tuple: holes are materialized, dense inputs stay by reference ✓");
+}
+
 console.log("\nAll record/map/set smoke assertions passed ✓");

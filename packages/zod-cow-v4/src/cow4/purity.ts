@@ -38,6 +38,9 @@ export function isPure(schema: Node): boolean {
     // (second review of #68).
     case "optional":
     case "nullable": {
+      // A wrapper stock's compiler answers differently from its runtime on the shortcut takes the runtime
+      // island (#69): its output is still the input, but the validator product is the compiler's answer
+      if (wrapperFollowsRuntime(schema)) return false;
       if (!unwrapsToContainer(def.innerType))
         return leafChecksArePure(schema) && isPure(def.innerType);
       // Above a container the verdict holds only where the chain gets a skeleton, so an exact-optional
@@ -214,6 +217,31 @@ function wrapperChecksAreCowSafe(schema: Node): boolean {
   return checks.every((c: Node) => {
     const d = c._zod?.def ?? c;
     return d.check === "custom" && !!d.fn && !hasCustomWhen(d);
+  });
+}
+
+/**
+ * Whether an optional / nullable layer carries a check that stock's compiler and stock's runtime answer
+ * differently on the shortcut value, so the subtree must run in the runtime (`makeIsland`, #69). The two
+ * callback checks (`custom`: `.refine` / `.superRefine`; `overwrite`) are called by the compiler with the
+ * layer's value, `undefined` / `null` included, as the runtime calls them. Every other check kind is emitted
+ * as an inline test of the value's own properties without the runtime's `when` guard: a length / size check
+ * (`.check(z.minLength(n))`, `z.minSize(n)`) reads `.length` / `.size` off the shortcut and throws where the
+ * runtime's default `when` skips a nullish value, a range check (`z.gt(n)`, `z.lt(n)`) is skipped on the
+ * shortcut where the runtime evaluates `undefined > n` and fails, and a `multiple_of` answers INVALID where the
+ * runtime throws its own error; `number_format` and `string_format` happen to agree. The whole non-callback
+ * family takes the runtime rather than a list of the kinds known to disagree, so a new check kind cannot
+ * inherit the compiler's answer. Reached only through `.check()`: the ergonomic `z.string().min(n).optional()`
+ * attaches the check to the leaf and is unaffected. The canary pins the two divergences the route exists for.
+ */
+export function wrapperFollowsRuntime(schema: Node): boolean {
+  const def = schema._zod.def;
+  if (def.type !== "optional" && def.type !== "nullable") return false;
+  const checks = def.checks;
+  if (!checks || checks.length === 0) return false;
+  return checks.some((c: Node) => {
+    const check = (c._zod?.def ?? c).check;
+    return check !== "custom" && check !== "overwrite";
   });
 }
 

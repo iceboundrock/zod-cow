@@ -568,8 +568,8 @@ return out;
 4. 公开 API：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
    async 骨架下 sync API 抛 `$ZodAsyncError`（官方同款语义，实测 sync parse 对 async 树就是抛）。
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
-   Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
-   pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+   Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、`z.property` / `z.properties` check 携带的
+   schema（#84 review）、pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
    同一次遍历也决定 stock 编译因非 async 原因失败的子树走哪种岛（#75）：symbol 字面量、coerce、`z.xor` 或带回调的 `catch`
    在 stock codegen 走到 checks 之前就抛 `ZodCompileUnsupportedError`，这个错误说明不了 async 与否，而 `officialFn` 的兜底以前
    一律取同步岛。这个岛在 parse 时才遇到 Promise：`.async` 报 false，且自 #76 起 async 入口接住那次抛出后把整次 parse 交给
@@ -623,7 +623,9 @@ compile(schema)
   │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError），
   │     │     │     │     │     子树含 async check（subtreeHasAsync 判定）时改取 makeAsyncIsland（#75；
   │     │     │     │     │     遍历中 shape getter 抛错则保留同步岛，#82 review）
-  │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland（await 通道）★v0.5
+  │     │     │     │     ├─ ZodCompileAsyncError → makeAsyncIsland（await 通道）★v0.5
+  │     │     │     │     └─ 子树任意位置有带非回调 check 的 optional / nullable 层（subtreeFollowsRuntime，#69）
+  │     │     │     │           → 先于 compileFn 直接取 makeIsland / makeAsyncIsland：stock 编译器在短路值上的答案与其 runtime 不同
   │     │     │     ├─ 容器子树 → subFn 递归（seen 防循环引用）
   │     │     │     │     └─ 子骨架自身 async → kind:"async"，父位发射 await ★v0.5
   │     │     │     └─ async 子树 → makeAsyncIsland + ctx.async（骨架变 async 函数）★v0.5
@@ -643,6 +645,16 @@ async 骨架（ctx.async = true）的顶层契约：
   遇到普通函数返回 Promise 时快路径抛出的 $ZodAsyncError 也走同一回退（§5.5 第 6 条）；回调经由本层自己的
   调用位抛出的 $ZodAsyncError 会被记录并原样重抛（isPromiseSignal）。
 ```
+
+经 `.check()` 附加在 optional / nullable 层上的 check（`z.string().optional().check(z.minLength(3))`）是岛的第四个成因（#69）。
+stock 的编译器把每个非回调 check 发射为对值自身属性的内联测试，没有 runtime 的 `when` 守卫：在短路值上，长度 / 大小 check
+直接读取 `undefined` / `null` 的 `.length` / `.size` 而抛错（runtime 的默认 `when` 会放行），范围 check 则被跳过（runtime
+计算 `undefined > n` 而判失败）。两个回调 check（`custom`、`overwrite`）被编译器像 runtime 一样带着该层的值调用，保持原路线。
+`wrapperFollowsRuntime`（`purity.ts`）识别这种层，`isPure` 判其非纯，因此纯子树中不会出现它（`emitNode` 直接调用的
+`assertOnly` 编译不会遇到它）；`subtreeFollowsRuntime`（`official.ts`）在官方子树中查找它（不深入 `lazy`：stock 的产物本来就在
+runtime 中运行 lazy；但会深入 `z.property` / `z.properties` check 携带的 schema，因为 stock 的 `generatePropertyCheck` 把它内联编译，
+其中的包装层遇到同一处分歧，#84 review；`childrenOf` 是两次遍历共用的子节点枚举），`officialFn` 为整个子树取岛，由 `subtreeHasAsync` 决定同步岛还是 async 岛；`officialValidator` 对含有
+它的整树返回 null，`validate` 于是走骨架。canary 钉住这两处分歧。
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
 顶层骨架照常编译，lazy 子树在元素位走官方 parser 产物，官方 `generateLazyCheck`

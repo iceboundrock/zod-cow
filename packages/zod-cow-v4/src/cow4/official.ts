@@ -11,6 +11,7 @@ import {
   rethrowCallerError,
   throwAsync,
 } from "./product.js";
+import { wrapperFollowsRuntime } from "./purity.js";
 
 /* ═══════════════════ Obtaining the official product (degradation chain) ═══════════════════ */
 
@@ -110,7 +111,47 @@ function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
     const d = c._zod?.def ?? c;
     if (isAsyncFn(d.fn) || isAsyncFn(c._zod?.check)) return true;
   }
+  return childrenOf(schema).some((k) => walkHasAsync(k, seen));
+}
+
+/**
+ * Whether the subtree holds an optional / nullable layer whose checks stock's compiler answers differently from
+ * its runtime on the shortcut (`wrapperFollowsRuntime`, #69), in which case the whole official product for the
+ * subtree is one of this layer's islands, whose `_zod.run` is the runtime. A `lazy` is not descended: stock's
+ * compiled product runs a `lazy` in the runtime already (`generateLazyCheck`), whatever its getter returns. The
+ * walk reads every object shape below the subtree; a getter that throws is contained like in `subtreeHasAsync`
+ * (the subtree goes on to `compileFn`, which meets the same getter).
+ */
+function subtreeFollowsRuntime(schema: Node): boolean {
+  try {
+    return walkFollowsRuntime(schema, new Set());
+  } catch {
+    return false;
+  }
+}
+
+function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  if (wrapperFollowsRuntime(schema)) return true;
+  if (schema._zod.def.type === "lazy") return false;
+  return childrenOf(schema).some((k) => walkFollowsRuntime(k, seen));
+}
+
+/**
+ * The schema nodes directly below `schema` (every def slot that holds one), object shape included, and the schema a
+ * check carries (`z.property` / `z.properties`, whose `$ZodCheckProperty` holds a schema stock's compiler compiles
+ * inline through `generatePropertyCheck` while the runtime runs it through `_zod.run`, review of #84): a wrapper
+ * `wrapperFollowsRuntime` names, or an async check, inside such a schema counts like one under a shape key.
+ */
+function childrenOf(schema: Node): Node[] {
+  const def = schema._zod.def;
   const kids: Node[] = [];
+  const checks: Node[] = def.checks ?? [];
+  for (const c of checks) {
+    const carried = (c._zod?.def ?? c).schema;
+    if (carried?._zod) kids.push(carried);
+  }
   if (def.innerType) kids.push(def.innerType);
   if (def.element) kids.push(def.element);
   if (def.keyType) kids.push(def.keyType);
@@ -127,7 +168,7 @@ function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
     for (const k of Object.keys(def.shape)) kids.push(def.shape[k]);
     for (const s of Object.getOwnPropertySymbols(def.shape)) kids.push(def.shape[s]);
   }
-  return kids.some((k) => walkHasAsync(k, seen));
+  return kids;
 }
 
 /**
@@ -142,7 +183,10 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // by running the node through this layer's islands instead: inner async raises no compile-time error and is
   // covered statically (async island), and a callback's synchronous `$ZodAsyncError` or a thenable a plain function
   // returned is then met by `runIsland` and `throwAsync` rather than by stock's code (sixth review of #76).
-  if (schema._zod.def.type === "lazy") {
+  // A wrapper carrying a check stock's compiler answers differently from its runtime on the shortcut (#69)
+  // is run by the runtime too, wherever it sits inside the subtree: stock's product for the subtree would
+  // compile that wrapper, so the whole subtree takes an island.
+  if (schema._zod.def.type === "lazy" || subtreeFollowsRuntime(schema)) {
     return subtreeHasAsync(schema) ? makeAsyncIsland(schema) : makeIsland(schema);
   }
   if (pure) {
@@ -165,8 +209,12 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   }
 }
 
-/** The whole-tree official assertOnly product (the validate fast path); failure → null */
+/**
+ * The whole-tree official assertOnly product (the validate fast path); failure → null, and so is a tree holding a
+ * wrapper the runtime must answer (#69): the skeleton, whose islands run it, serves `validate` then.
+ */
 export function officialValidator(schema: Node): Fn | null {
+  if (subtreeFollowsRuntime(schema)) return null;
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } catch {

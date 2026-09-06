@@ -358,22 +358,68 @@ function bCheck(inner: Built, kind: "refine" | "asyncRefine" | "overwrite"): Bui
   };
 }
 
+/**
+ * A non-callback check attached to an optional / nullable layer through `.check()` (#69): a length / size /
+ * range rule picked by the kind of the inner schema (unwrapped of its own optional / nullable layers), so the
+ * rule reads a property the value has. Stock's compiler answers such a wrapper differently from its runtime on
+ * the shortcut value (`undefined` / `null`: a length / size check throws, a range check passes where the
+ * runtime fails), which the wrapper generators below hit on every shortcut draw. zod's typings reject the
+ * shape (`HasLength` admits no undefined / null), so the schema is cast; the runtime accepts it. The one
+ * generator per kind keeps the check attached to the wrapper, never to the inner leaf.
+ */
+function bWrapperCheck(rng: RNG, wrapped: z.ZodType, desc: string): [z.ZodType, string] | null {
+  let cur: any = wrapped;
+  while (cur._zod.def.type === "optional" || cur._zod.def.type === "nullable") {
+    cur = cur._zod.def.innerType;
+  }
+  const t: string = cur._zod.def.type;
+  const n = rng.int(3);
+  const attach = (check: unknown, label: string): [z.ZodType, string] => [
+    (wrapped as any).check(check) as z.ZodType,
+    `${desc}.check(${label})`,
+  ];
+  if (t === "string" || t === "array" || t === "tuple" || t === "object" || t === "record") {
+    return rng.chance(0.5)
+      ? attach(z.minLength(n), `minLength(${n})`)
+      : attach(z.maxLength(n + 1), `maxLength(${n + 1})`);
+  }
+  if (t === "set" || t === "map") {
+    return rng.chance(0.5)
+      ? attach(z.minSize(n), `minSize(${n})`)
+      : attach(z.maxSize(n + 1), `maxSize(${n + 1})`);
+  }
+  if (t === "number") {
+    return rng.chance(0.5) ? attach(z.gt(n), `gt(${n})`) : attach(z.lt(n + 1), `lt(${n + 1})`);
+  }
+  return null;
+}
+
 function bWrap(rng: RNG, inner: Built): Built {
   const which = rng.int(8);
   if (which === 7) return bCheck(inner, "overwrite");
   if (which === 3) return bCheck(inner, "refine");
   if (which === 5) return bCheck(inner, "asyncRefine");
   if (which === 0) {
+    // One optional layer in four carries a length / size / range check (#69); the draw is made before
+    // the check so the RNG stream stays the same whether or not the inner kind admits one
+    const withCheck = rng.chance(0.25);
+    const checked = withCheck
+      ? bWrapperCheck(rng, inner.schema.optional(), `${inner.desc}.optional()`)
+      : null;
     return {
-      schema: inner.schema.optional(),
-      desc: `${inner.desc}.optional()`,
+      schema: checked ? checked[0] : inner.schema.optional(),
+      desc: checked ? checked[1] : `${inner.desc}.optional()`,
       gen: (r) => (r.chance(0.3) ? ABSENT : r.chance(0.25) ? undefined : inner.gen(r)),
     };
   }
   if (which === 1) {
+    const withCheck = rng.chance(0.25);
+    const checked = withCheck
+      ? bWrapperCheck(rng, inner.schema.nullable(), `${inner.desc}.nullable()`)
+      : null;
     return {
-      schema: inner.schema.nullable(),
-      desc: `${inner.desc}.nullable()`,
+      schema: checked ? checked[0] : inner.schema.nullable(),
+      desc: checked ? checked[1] : `${inner.desc}.nullable()`,
       gen: (r) => (r.chance(0.2) ? null : r.chance(0.15) ? ABSENT : inner.gen(r)),
     };
   }
@@ -474,7 +520,20 @@ function bObject(rng: RNG, depth: number): Built {
   const keyDesc = (f: { key: string | symbol; built: Built }) =>
     `${typeof f.key === "symbol" ? "[sym]" : f.key}: ${f.built.desc}`;
   const shown = large ? [...fields.slice(0, nFields), ...fields.slice(nFields + 1)] : fields;
-  const desc = `object({${shown.map(keyDesc).join(", ")}${large ? `, …${fields.length - shown.length} more string keys` : ""}})${modeDesc}`;
+  let desc = `object({${shown.map(keyDesc).join(", ")}${large ? `, …${fields.length - shown.length} more string keys` : ""}})${modeDesc}`;
+  // One object in forty carries a `z.property` check on its first field whose schema is an optional string
+  // wrapper with a length check (#69 inside a schema-bearing check, review of #84): stock's compiler compiles
+  // the carried schema inline, so the subtree walks must descend into it. The object takes the official
+  // parser (a property check is not CoW-safe), which is where the walk decides between `compileFn` and the
+  // islands; a first field that is not a string fails `invalid_type` on both sides. The draw comes after every
+  // other draw of the shape; like any added draw it shifts the RNG stream from here on.
+  if (!symbolOnly && rng.chance(0.025)) {
+    const carried = bWrapperCheck(rng, z.string().optional(), "string.optional()");
+    if (carried) {
+      schema = (schema as any).check(z.property("f0", carried[0] as any)) as z.ZodType;
+      desc = `${desc}.check(property(f0, ${carried[1]}))`;
+    }
+  }
   let extraSeq = 0;
   return {
     schema,
@@ -867,11 +926,42 @@ function bUnion(rng: RNG, depth: number): Built {
   const n = 2 + rng.int(2);
   const options: Built[] = [];
   for (let i = 0; i < n; i++) options.push(bChild(rng, depth));
+  // A plain union whose options mix an object with a set, map or date is a documented divergence
+  // (README, known limitations, review of #70): a Set, Map or Date the object option accepts comes
+  // back by reference where stock rebuilds a plain object. Such an option is replaced by a string
+  // leaf; the draw happens only for the mix, so the RNG stream is untouched elsewhere.
+  if (options.some((o) => acceptsInstances(o.schema))) {
+    for (let i = 0; i < options.length; i++) {
+      if (feedsInstances(options[i]!.schema)) options[i] = bString(rng);
+    }
+  }
   return {
     schema: z.union(options.map((o) => o.schema) as never),
     desc: `union([${options.map((o) => o.desc).join(", ")}])`,
     gen: (r) => r.pick(options).gen(r),
   };
+}
+
+/** The schemas a wrapper, pipe or union layer holds directly (the layers `bWrap` and `bUnion` stack) */
+function layerInner(s: z.ZodType): z.ZodType[] {
+  const def: any = (s as any)._zod.def;
+  if (def.innerType) return [def.innerType];
+  if (def.type === "pipe") return [def.in];
+  if (def.type === "union") return def.options;
+  return [];
+}
+
+/** Whether the generator feeds the schema Set, Map or Date instances: a set, map or date under the layers above */
+function feedsInstances(s: z.ZodType): boolean {
+  const t: string = (s as any)._zod.def.type;
+  if (t === "set" || t === "map" || t === "date") return true;
+  return layerInner(s).some(feedsInstances);
+}
+
+/** Whether the schema accepts a class instance as a plain object: an object under the layers above (a record rejects it) */
+function acceptsInstances(s: z.ZodType): boolean {
+  if ((s as any)._zod.def.type === "object") return true;
+  return layerInner(s).some(acceptsInstances);
 }
 
 function bChild(rng: RNG, depth: number): Built {

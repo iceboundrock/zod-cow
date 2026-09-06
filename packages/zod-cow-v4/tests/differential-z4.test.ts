@@ -382,10 +382,13 @@ function bWrap(rng: RNG, inner: Built): Built {
     };
   }
   if (which === 6) {
-    // Task 6: async transform (string → string, isomorphic to the sync transform)
+    // Task 6 / #70: async transform (string → string, isomorphic to the sync transform) whose
+    // promise settles after 0 to 2 extra microtask hops decided by the value (`asyncBang`), so
+    // sibling entries of a set, map or record settle out of iteration order and stock's
+    // settlement-order writes are exercised
     return {
-      schema: inner.schema.transform(async (v: any) => (typeof v === "string" ? `${v}!` : v)),
-      desc: `${inner.desc}.transform(async +!)`,
+      schema: inner.schema.transform(asyncBang),
+      desc: `${inner.desc}.transform(async +!, hops by value)`,
       gen: inner.gen,
     };
   }
@@ -561,7 +564,7 @@ function maybeOwnProto(out: object, r: RNG): void {
 function bRecord(rng: RNG, depth: number): Built {
   // Colliding key transform (#67): keys drawn from a pool where "a" lands on a later "b"
   const colliding = rng.chance(0.15);
-  const inner = colliding ? bSyncLeaf(rng) : bChild(rng, depth);
+  const inner = colliding ? bCollidingValue(rng) : bChild(rng, depth);
   if (!colliding && rng.chance(0.3)) return bEnumRecord(rng, inner);
   const numericKeys = !colliding && rng.chance(0.15);
   const keySchema: z.ZodType = colliding
@@ -589,14 +592,34 @@ function bRecord(rng: RNG, depth: number): Built {
 }
 
 /**
- * A sync leaf value for the colliding variants: stock's runtime writes an async value when its
- * promise settles, after the loop, so with a key collision an earlier async pair overwrites the
- * later sync one (settlement order, which the skeleton does not reproduce); the colliding key
- * variants keep every value sync so a collision has stock's iteration-order outcome
+ * The async string transform: settles after 0 to 2 extra microtask hops decided by the value (the
+ * character codes of a string, the magnitude of a number), so two sibling entries usually settle in
+ * a different order than they were started (#70)
  */
-function bSyncLeaf(rng: RNG): Built {
+async function asyncBang(v: unknown): Promise<unknown> {
+  let hops = 0;
+  if (typeof v === "string") for (let c = 0; c < v.length; c++) hops += v.charCodeAt(c);
+  else if (typeof v === "number" && Number.isFinite(v)) hops = Math.abs(Math.trunc(v));
+  for (let h = 0; h < hops % 3; h++) await null;
+  return typeof v === "string" ? `${v}!` : v;
+}
+
+/**
+ * A leaf value for the colliding variants: sync, nullable, a sync transform or an async transform.
+ * Stock's runtime writes a sync value inside its loop and an async one when its promise settles, so
+ * with a key collision an earlier async pair overwrites a later sync one; the skeletons follow the
+ * same schedule since #70, so the colliding key variants exercise async values too
+ */
+function bCollidingValue(rng: RNG): Built {
   const leaf = bLeaf(rng);
-  const which = rng.int(3);
+  const which = rng.int(4);
+  if (which === 3) {
+    return {
+      schema: leaf.schema.transform(asyncBang),
+      desc: `${leaf.desc}.transform(async +!, hops by value)`,
+      gen: leaf.gen,
+    };
+  }
   if (which === 0) {
     return {
       schema: leaf.schema.nullable(),
@@ -638,7 +661,7 @@ function bCollidingMap(rng: RNG, inner: Built): Built {
 }
 
 function bMap(rng: RNG, depth: number): Built {
-  if (rng.chance(0.15)) return bCollidingMap(rng, bSyncLeaf(rng));
+  if (rng.chance(0.15)) return bCollidingMap(rng, bCollidingValue(rng));
   const inner = bChild(rng, depth);
   const key = rng.chance(0.8) ? z.string() : z.number();
   let schema = z.map(key as any, inner.schema);
@@ -970,12 +993,11 @@ async function runPass(
 
       if (stock!.success) {
         bothOk++;
-        // Sync parses compare Map and Set contents in iteration order. Stock's runtime writes a sync
-        // entry when it is parsed and an async one when its promise settles, after the loop, so an
-        // async parse can hand back a Set or Map in settlement order (`Set {"a", 1}` under
-        // `set(union([string.refine(async …), number]))` comes back as `Set {1, "a"}`); the skeleton
-        // keeps iteration order, as stock's own compiler does, and async cases stay unordered here
-        const view = useAsync ? (v: unknown) => v : orderedView;
+        // Map and Set contents are compared in iteration order on every parse. On an async parse
+        // stock's runtime writes a sync entry when it is parsed and an async one when its promise
+        // settles (`Set {"a", 1}` under `set(union([string.refine(async …), number]))` comes back as
+        // `Set {1, "a"}`), and the set, map and iterating-record skeletons follow that schedule (#70)
+        const view = orderedView;
         if (!assertDeepEqual(view(ours!.data), view(stock!.data))) {
           failures.push(
             `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(

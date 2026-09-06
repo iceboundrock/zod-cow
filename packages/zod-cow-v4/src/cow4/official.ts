@@ -138,10 +138,20 @@ function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
   return childrenOf(schema).some((k) => walkFollowsRuntime(k, seen));
 }
 
-/** The schema nodes directly below `schema` (every def slot that holds one), object shape included */
+/**
+ * The schema nodes directly below `schema` (every def slot that holds one), object shape included, and the schema a
+ * check carries (`z.property` / `z.properties`, whose `$ZodCheckProperty` holds a schema stock's compiler compiles
+ * inline through `generatePropertyCheck` while the runtime runs it through `_zod.run`, review of #84): a wrapper
+ * `wrapperFollowsRuntime` names, or an async check, inside such a schema counts like one under a shape key.
+ */
 function childrenOf(schema: Node): Node[] {
   const def = schema._zod.def;
   const kids: Node[] = [];
+  const checks: Node[] = def.checks ?? [];
+  for (const c of checks) {
+    const carried = (c._zod?.def ?? c).schema;
+    if (carried?._zod) kids.push(carried);
+  }
   if (def.innerType) kids.push(def.innerType);
   if (def.element) kids.push(def.element);
   if (def.keyType) kids.push(def.keyType);

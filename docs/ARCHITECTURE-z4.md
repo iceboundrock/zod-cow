@@ -660,7 +660,7 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    under an async skeleton the sync API throws `$ZodAsyncError` (the same semantics as the official code; measured, a sync parse on an async tree does throw).
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
-   the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
+   the schema a `z.property` / `z.properties` check carries (review of #84), the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
    The same walk decides the island of a subtree whose stock compile failed for a non-async reason (#75): a symbol literal,
    coercion, `z.xor` or a `catch` callback throws `ZodCompileUnsupportedError` before stock's codegen reaches the checks, so that
    error says nothing about async, and the fallback of `officialFn` used to take the sync island. The island then met the
@@ -754,7 +754,8 @@ runtime evaluates `undefined > n` and fails. The two callback checks (`custom`, 
 value as the runtime calls them and keep their routes. `wrapperFollowsRuntime` (`purity.ts`) names such a layer, `isPure`
 judges it impure so no pure subtree holds one (the direct `assertOnly` compile of `emitNode` therefore never meets it),
 `subtreeFollowsRuntime` (`official.ts`) walks the official subtree for one (a `lazy` is not descended: stock's product
-runs it in the runtime already) and `officialFn` takes the island for the whole subtree, `subtreeHasAsync` choosing which;
+runs it in the runtime already; the schema a `z.property` / `z.properties` check carries is, since stock's `generatePropertyCheck`
+compiles it inline and a wrapper inside it meets the same disagreement, review of #84; `childrenOf` is the enumeration both walks share) and `officialFn` takes the island for the whole subtree, `subtreeHasAsync` choosing which;
 `officialValidator` declines a tree holding one, so `validate` runs the skeleton. The canary pins both divergences.
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`

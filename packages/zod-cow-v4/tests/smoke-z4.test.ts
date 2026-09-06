@@ -1947,4 +1947,123 @@ import { compile } from "../src/index.js";
   console.log("  an async check beside the wrapper check takes the async island ✓");
 }
 
+/* ── 24. the schema a z.property / z.properties check carries is walked like a shape key (#69, review of #84) ── */
+{
+  console.log("\n── z.property / z.properties carry a schema the walks descend (review of #84) ──");
+  // stock's `generatePropertyCheck` compiles the carried schema inline, so a wrapper `wrapperFollowsRuntime` names
+  // inside it meets the same compiler / runtime disagreement as one under a shape key; `childrenOf` in `official.ts`
+  // hands it to `subtreeFollowsRuntime` and `subtreeHasAsync`
+  const wrap = (s: z.ZodType, c: unknown) => (s as any).check(c) as z.ZodType;
+  const inner = wrap(z.string().optional(), z.minLength(3));
+  const range = wrap(z.number().optional(), z.gt(1));
+  const prop = (s: z.ZodType, ...checks: unknown[]) => (s as any).check(...checks) as z.ZodType;
+  const base = z.object({
+    k: z.string().optional(),
+    n: z.number().optional(),
+    keep: z.object({ m: z.number() }),
+  });
+  // [name, schema, inputs]; every input is compared against stock's answer
+  const shortcut = { keep: { m: 1 } };
+  const valid = { k: "abc", n: 5, keep: { m: 1 } };
+  const invalidLength = { k: "ab", n: 5, keep: { m: 1 } };
+  const invalidRange = { k: "abc", n: 0, keep: { m: 1 } };
+  const inputs = [shortcut, valid, invalidLength, invalidRange, { k: undefined, keep: { m: 1 } }];
+  const rows: Array<[string, z.ZodType, unknown[]]> = [
+    [
+      "reviewer's fixture",
+      prop(z.object({}), z.property("k", inner as any)),
+      [{ k: undefined }, {}],
+    ],
+    ["property(k) top", prop(base, z.property("k", inner as any)), inputs],
+    [
+      "properties({k, n}) top",
+      prop(base, ...z.properties({ k: inner as any, n: range as any })),
+      inputs,
+    ],
+    [
+      "nullable inner",
+      prop(base, z.property("k", wrap(z.string().nullable(), z.minLength(3)) as any)),
+      inputs,
+    ],
+    [
+      "property(k) under a key",
+      z.object({ o: prop(base, z.property("k", inner as any)) }),
+      inputs.map((i) => ({ o: i })),
+    ],
+    [
+      "property(k) in an array",
+      z.array(prop(base, z.property("k", inner as any))),
+      inputs.map((i) => [i]),
+    ],
+    [
+      "property(k) under optional",
+      prop(base, z.property("k", inner as any)).optional(),
+      [...inputs, undefined],
+    ],
+  ];
+  for (const [name, S, ins] of rows) {
+    const C = compile(S);
+    assert.equal(C.stock, false, `${name}: no whole-tree degradation`);
+    for (const input of ins) {
+      const stock = S.safeParse(input);
+      const ours = C.safeParse(input);
+      assert.equal(ours.success, stock.success, `${name}: success on ${JSON.stringify(input)}`);
+      if (stock.success && ours.success)
+        assert.deepEqual(ours.data, stock.data, `${name}: data on ${JSON.stringify(input)}`);
+      assert.equal(
+        C.validate(input) !== null,
+        stock.success,
+        `${name}: validate on ${JSON.stringify(input)}`,
+      );
+    }
+  }
+  console.log(
+    "  every row answers what the runtime answers, at the top level, under a key, in an array, under optional ✓",
+  );
+  // An async check inside the carried schema, in a subtree stock's compile refuses before its async pre-scan (a
+  // `catch` callback): the static walk sees it through the check and the subtree takes the async island, so
+  // `.async` reports true and the predicate runs once per parse instead of a sync island meeting the Promise and
+  // the async entries rerunning the parse in stock's async runtime (#75)
+  let calls = 0;
+  const A = prop(
+    z.object({ s: z.string().catch(() => "x"), k: z.string() }),
+    z.property(
+      "k",
+      z.string().refine(async (v) => {
+        calls++;
+        return v !== "abd";
+      }) as any,
+    ),
+  );
+  const CA = compile(A);
+  assert.equal(CA.async, true, "async refine inside a property check: async product");
+  assert.equal(CA.stock, false);
+  const asyncInputs = [
+    { s: "s", k: "abc" },
+    { s: "s", k: "abd" },
+    { s: 1, k: "abc" },
+  ];
+  for (const v of asyncInputs) {
+    const stock = await A.safeParseAsync(v);
+    calls = 0;
+    const ours = await CA.safeParseAsync(v);
+    assert.equal(ours.success, stock.success, `async property: ${JSON.stringify(v)}`);
+    if (stock.success && ours.success) {
+      assert.deepEqual(ours.data, stock.data);
+      // a failing parse is rerun by stock for its ZodError, so the count is pinned on the successful ones
+      assert.equal(
+        calls,
+        1,
+        `async property: the predicate runs once per parse on ${JSON.stringify(v)}`,
+      );
+    }
+  }
+  assert.throws(
+    () => CA.safeParse({ s: "s", k: "abc" }),
+    /async/i,
+    "sync entry on the async product throws",
+  );
+  console.log("  an async check inside a property check takes the async island ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

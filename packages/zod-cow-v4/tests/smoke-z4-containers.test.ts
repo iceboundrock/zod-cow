@@ -384,4 +384,218 @@ import { compile } from "../src/index.js";
   console.log("  array / tuple: holes are materialized, dense inputs stay by reference ✓");
 }
 
+/* ── review of #70: single-read copies from the first change on, inherited holes, stock's async schedule ── */
+{
+  console.log("\n── review of #70: single reads, inherited holes, async schedule ──");
+  // `assert.deepEqual` ignores object key order, so a record is compared as its entries list
+  const view = (v: unknown) =>
+    v instanceof Map || v instanceof Set
+      ? [...(v as Iterable<unknown>)]
+      : v !== null && typeof v === "object" && !Array.isArray(v)
+        ? Object.entries(v)
+        : v;
+  const same = (schema: z.ZodType, input: unknown) => {
+    const stock = schema.parse(input);
+    const ours = compile(schema).parse(input);
+    assert.deepEqual(view(ours), view(stock));
+    return ours;
+  };
+  const sameAsync = async (schema: z.ZodType, mk: () => unknown, expected: unknown) => {
+    const stock = await schema.parseAsync(mk());
+    const ours = await compile(schema).parseAsync(mk());
+    assert.deepEqual(view(ours), view(stock));
+    assert.deepEqual(view(ours), expected);
+    return ours;
+  };
+
+  // Finding 5: a hole over an inherited undefined is an own slot in stock's output
+  const inheritedHole = () => {
+    const a = new Array(1);
+    Object.setPrototypeOf(a, { 0: undefined });
+    return a;
+  };
+  const ih = same(z.array(z.number().optional()), inheritedHole()) as unknown[];
+  assert.equal(Object.hasOwn(ih, 0), true);
+  const iht = same(z.tuple([z.number().optional()]), inheritedHole()) as unknown[];
+  assert.equal(Object.hasOwn(iht, 0), true);
+  console.log("  array / tuple: a hole over an inherited undefined is materialized ✓");
+
+  // Finding 4: from the first change on, every element is read once; the clean prefix is read twice (#36)
+  const counting = (len: number, reads: number[]) => {
+    const a: unknown[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      Object.defineProperty(a, i, {
+        enumerable: true,
+        configurable: true,
+        get() {
+          reads[i]++;
+          return i + 1;
+        },
+      });
+    }
+    return a;
+  };
+  {
+    const reads = [0, 0, 0, 0];
+    const input = counting(4, reads);
+    // the transform changes element 1 only: elements 2 and 3 follow the first change
+    const out = compile(z.array(z.number().transform((n) => (n === 2 ? 20 : n)))).parse(
+      input,
+    ) as number[];
+    assert.deepEqual(out, [1, 20, 3, 4]);
+    assert.deepEqual(reads, [2, 1, 1, 1]); // prefix element 0 twice, everything else once
+  }
+  {
+    const reads = [0, 0, 0];
+    const input = counting(3, reads);
+    const out = compile(
+      z.tuple([z.number(), z.number().transform((n) => n * 10), z.number()]),
+    ).parse(input) as number[];
+    assert.deepEqual(out, [1, 20, 3]);
+    assert.deepEqual(reads, [2, 1, 1]);
+  }
+  {
+    // the reviewer's case: a hole first, so the prefix is empty and the getter is read once
+    let reads = 0;
+    const a: unknown[] = new Array(2);
+    Object.defineProperty(a, 1, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        return ++reads;
+      },
+    });
+    const out = compile(z.array(z.number().optional().transform((x) => x ?? 0))).parse(a);
+    assert.deepEqual(out, [0, 1]);
+    assert.equal(reads, 1);
+  }
+  console.log("  array / tuple: elements from the first change on are read once ✓");
+
+  // Finding 1: the record copy reads every pair from the first change on once, the clean prefix twice
+  {
+    const reads = { a: 0, b: 0, c: 0 };
+    const input: Record<string, unknown> = {};
+    for (const k of ["a", "b", "c"] as const) {
+      Object.defineProperty(input, k, {
+        enumerable: true,
+        get() {
+          reads[k]++;
+          return k === "b" ? " x " : k;
+        },
+      });
+    }
+    const out = compile(z.record(z.string(), z.string().transform((s) => s.trim()))).parse(input);
+    assert.deepEqual(out, { a: "a", b: "x", c: "c" });
+    assert.deepEqual(reads, { a: 2, b: 1, c: 1 });
+  }
+  console.log("  record: pairs from the first change on are read once ✓");
+
+  // Finding 2: the sync copy path restarts the iterator once for the prefix; the clean path iterates once
+  {
+    class CountingMap extends Map<string, number> {
+      iterations = 0;
+      *[Symbol.iterator](): MapIterator<[string, number]> {
+        this.iterations++;
+        yield* super[Symbol.iterator]();
+      }
+    }
+    const C = compile(z.map(z.string(), z.number().transform((n) => (n === 2 ? 3 : n))));
+    const clean = new CountingMap([["a", 1]]);
+    assert.equal(C.parse(clean), clean);
+    assert.equal(clean.iterations, 1);
+    const dirty = new CountingMap([
+      ["a", 1],
+      ["b", 2],
+    ]);
+    assert.deepEqual(
+      [...(C.parse(dirty) as Map<string, number>)],
+      [
+        ["a", 1],
+        ["b", 3],
+      ],
+    );
+    assert.equal(dirty.iterations, 2);
+    class CountingSet extends Set<number> {
+      iterations = 0;
+      *[Symbol.iterator](): SetIterator<number> {
+        this.iterations++;
+        yield* super[Symbol.iterator]();
+      }
+    }
+    const CS = compile(z.set(z.number().transform((n) => (n === 2 ? 3 : n))));
+    const ds = new CountingSet([1, 2]);
+    assert.deepEqual([...(CS.parse(ds) as Set<number>)], [1, 3]);
+    assert.equal(ds.iterations, 2);
+  }
+  console.log("  map / set: the copy path restarts the iterator once for the clean prefix ✓");
+
+  // Finding 3: async Set / Map / record outputs follow stock's runtime schedule: a sync entry is
+  // written when it is parsed, an async one when its promise settles
+  const tick = (n: number) => new Promise<void>((r) => setTimeout(r, n));
+  const slowOne = z.number().transform(async (x) => {
+    if (x === 1) await tick(2);
+    return x;
+  });
+  await sameAsync(
+    z.map(z.string(), slowOne),
+    () =>
+      new Map([
+        ["c", 1],
+        ["b", 2],
+      ]),
+    [
+      ["b", 2],
+      ["c", 1],
+    ],
+  );
+  await sameAsync(
+    z.set(
+      z.string().transform(async (s) => {
+        if (s === "c") await tick(2);
+        return s;
+      }),
+    ),
+    () => new Set(["c", "b"]),
+    ["b", "c"],
+  );
+  await sameAsync(z.record(z.string(), slowOne), () => ({ a: 1, b: 2 }), [
+    ["b", 2],
+    ["a", 1],
+  ]);
+  // a sync member is written inside the loop, an async one after it
+  await sameAsync(
+    z.set(z.union([z.string().refine(async () => true), z.number()])),
+    () => new Set(["a", 1]),
+    [1, "a"],
+  );
+  // an earlier async pair that collides with a later sync one wins, as in stock
+  await sameAsync(
+    z.map(
+      z.string(),
+      z.union([z.string().transform(async (s) => s.toUpperCase()), z.number()]),
+    ),
+    () =>
+      new Map<string, unknown>([
+        ["k", "a"],
+        ["k", 1],
+      ]),
+    [["k", 1]],
+  );
+  await sameAsync(
+    z.record(
+      z.string().transform((k) => (k === "x" ? "k" : k)),
+      z.union([z.string().transform(async (s) => s.toUpperCase()), z.number()]),
+    ),
+    () => ({ x: "a", k: 1 }),
+    [["k", "A"]],
+  );
+  // an async parse whose values settle in iteration order and unchanged still shares the input
+  {
+    const C = compile(z.set(z.number().refine(async () => true)));
+    const input = new Set([1, 2]);
+    assert.equal(await C.parseAsync(input), input);
+  }
+  console.log("  async map / set / record: stock's settlement order, sync entries first ✓");
+}
+
 console.log("\nAll record/map/set smoke assertions passed ✓");

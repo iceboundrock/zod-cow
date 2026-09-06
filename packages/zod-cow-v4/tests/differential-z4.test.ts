@@ -108,6 +108,12 @@ function carriesExtraSymbol(v: unknown): boolean {
   );
 }
 
+/**
+ * Case description of a value. `JSON.stringify` drops symbol-keyed entries, which the object and
+ * enum-record generators emit as declared keys (#61) and every generator as the extra symbol, so a
+ * plain object's own symbol keys are shown as `[Symbol(name)]` string keys (a non-enumerable one
+ * included, the record generator's hidden extra symbol of #51)
+ */
 function repr(v: unknown): string {
   try {
     return (
@@ -115,6 +121,13 @@ function repr(v: unknown): string {
         if (typeof x === "bigint") return `${x}n`;
         if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
         if (typeof x === "symbol") return String(x);
+        if (typeof x === "object" && x !== null && Object.getPrototypeOf(x) === Object.prototype) {
+          const syms = Object.getOwnPropertySymbols(x);
+          if (syms.length === 0) return x;
+          const shown: Record<string, unknown> = { ...x };
+          for (const sym of syms) shown[`[${String(sym)}]`] = (x as Record<symbol, unknown>)[sym];
+          return shown;
+        }
         return x;
       }) ?? String(v)
     );
@@ -516,28 +529,47 @@ function bArray(rng: RNG, depth: number): Built {
  * Declaration-driven records (#37): string or numeric enum keys, strict or loose, 2 to 3 declared
  * keys or 18 (above the inline key-comparison cap, so the probe is the hoisted Set). Inputs drop a
  * declared key now and then (stock materializes it, or rejects it when the value is required) and
- * sometimes carry an undeclared key, which strict rejects and loose keeps.
+ * sometimes carry an undeclared key, which strict rejects and loose keeps. One in five declares the
+ * shared symbol next to the string or numeric keys, as a symbol value of the enum's entries form
+ * (`z.enum({ K0: "k0", S: sym })`), and one in forty declares nothing but that symbol through
+ * `z.literal(sym)` (#61): a declared symbol turns the own-symbol probe into its hoisted-`Set` form
+ * (`emitOwnSymbolProbe`), which the string-only generator never reached. The input carries the
+ * declared symbol as an enumerable data property, like every other declared key: a declared key the
+ * input defines as non-enumerable comes back as it is on the clean path (#48, pinned by smoke group
+ * 16), so the generator never defines one that way.
  */
 function bEnumRecord(rng: RNG, inner: Built): Built {
   const numeric = rng.chance(0.5);
-  const n = rng.chance(0.15) ? 18 : 2 + rng.int(2);
-  const values = Array.from({ length: n }, (_, i) => (numeric ? i + 1 : `k${i}`));
-  const keySchema = numeric
-    ? z.enum(Object.fromEntries(values.map((v) => [`K${v}`, v])))
-    : z.enum(values as string[] as [string, ...string[]]);
+  const symbolOnly = rng.chance(0.025);
+  const withSymbol = symbolOnly || rng.chance(0.2);
+  const n = symbolOnly ? 0 : rng.chance(0.15) ? 18 : 2 + rng.int(2);
+  const values: (string | number | symbol)[] = Array.from({ length: n }, (_, i) =>
+    numeric ? i + 1 : `k${i}`,
+  );
+  if (withSymbol) values.push(DECLARED_SYMBOL);
+  const keySchema = symbolOnly
+    ? z.literal(DECLARED_SYMBOL as never)
+    : z.enum(
+        Object.fromEntries(
+          values.map((v) => [typeof v === "symbol" ? "S" : `K${String(v)}`, v]),
+        ) as Record<string, string>,
+      );
   const loose = rng.chance(0.3);
   const schema = loose
     ? z.looseRecord(keySchema as any, inner.schema)
     : z.record(keySchema as any, inner.schema);
+  const keyDesc = symbolOnly
+    ? "literal[sym]"
+    : `enum[${numeric ? "number" : "string"} x${n}${withSymbol ? " + sym" : ""}]`;
   return {
     schema,
-    desc: `${loose ? "looseRecord" : "record"}(enum[${numeric ? "number" : "string"} x${n}], ${inner.desc})`,
+    desc: `${loose ? "looseRecord" : "record"}(${keyDesc}, ${inner.desc})`,
     gen: (r) => {
-      const out: Record<string, unknown> = {};
+      const out: Record<string | symbol, unknown> = {};
       for (const v of values) {
         if (r.chance(0.1)) continue;
         const x = inner.gen(r);
-        if (x !== ABSENT) out[String(v)] = x;
+        if (x !== ABSENT) out[typeof v === "symbol" ? v : String(v)] = x;
       }
       if (r.chance(0.2)) out[numeric && r.chance(0.5) ? "99" : "extra"] = r.chance(0.5) ? 1 : "e";
       maybeExtraSymbol(out, r);

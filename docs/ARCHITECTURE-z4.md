@@ -213,7 +213,7 @@ Point-by-point correspondence with the official dump:
 | Official parser | zc-z4 skeleton | Note |
 |---|---|---|
 | `const v8 = {...}` unconditionally | `if (!dirty) { probes; return input; }` | The CoW core: no copy on clean input; the strip probe's one empty own-symbol array per object is the clean path's only allocation |
-| `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
+| `const v5 = new Array(len)` | (inside the element loop) `out = new Array(len)` plus the clean prefix | Same for arrays: the prefix rebuild only on the first dirt, every later element written once (#70) |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
 | `const v8 = { "id": v0, … }` in shape order, with the `mayOutputUndefined` / `dropsWhenAbsent` rules for conditional keys and a `for...in` append in passthrough mode | the same literal, from the captured locals, on the copy path | The copy is stock's output: shape order, the same key-presence rules, getters read once. Undeclared keys are dropped by construction, so the copy path needs no probe and no `delete` (the earlier `{ ...input }` plus `delete` copy kept the input's order, re-read every getter (#36) and turned the copy into a dictionary-mode object, which made strip parity (S8) slower than stock) |
 | `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found (strict and loose objects run the own-symbol probe alone, #42) | Same inherited-enumerable semantics with faster monomorphic small-object membership; both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap bounds the generated code size (see the constant's comment for the measurement). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
@@ -406,14 +406,21 @@ and a loose record writes a rejected key in its position once dirty. In the sub-
 
 The copy of paths B and C is stock's assembly order, not `{ ...input }`: stock writes `out[outKey] = value` for every pair
 in `Reflect.ownKeys` order, so a transformed key that collides with a later key is overwritten by it and the output keeps
-the input's order. The skeleton replays exactly that sequence: at the first dirty pair it starts from `{}`, copies the
-clean prefix (every enumerable own key before the current one, `__proto__` skipped, read from the input again) and writes
-this and every later pair unconditionally (`emitRebuildPrefix`, #67). An own `__proto__` data property (`JSON.parse`) is
+the input's order. The skeleton replays that sequence: at the first dirty pair it starts from `{}`, copies the clean
+prefix (every enumerable own key before the current one, `__proto__` skipped, read from the input a second time, the one
+place the copy reads twice, #36) and writes this and every later pair from the loop's single read (`emitRebuildPrefix`, #67). An own `__proto__` data property (`JSON.parse`) is
 skipped by stock's loop and so missing from its output; the clean path would keep it by reference, so it marks the record
 dirty, and the same holds for a loose enum-keyed record, whose `for...in` append skips that key (path A tests
-`propertyIsEnumerable(input, "__proto__")` on its clean path). Stock's runtime writes an async value when its promise
-settles, after the loop, so on a collision an earlier async pair wins there; the skeleton keeps iteration order, as zod's
-own compiler does, and the README lists this under the stock quirks that are deliberately not matched.
+`propertyIsEnumerable(input, "__proto__")` on its clean path). With an async value product the loop takes stock's
+runtime schedule instead (#70): stock starts every value inside its loop, writes a sync result at once and an async one
+when its promise settles, so the output is in settlement order and an earlier async pair wins a collision with a later
+sync one. The skeleton starts every value inside the loop and logs each pair in that order (iteration position, clean
+flag, output key, output value; a loose record's rejected key is a sync entry, a dropped `__proto__` pair sets `dirty`),
+awaits `Promise.all` over the started promises, then scans the log: a failed value fails the record, a pair out of
+iteration position or not its input marks it dirty, and the copy is assembled from the log (`emitAsyncRecordTail`), each
+pair read exactly once. The async island (`makeAsyncIsland`) answers a sync run synchronously for this, so a sync entry
+keeps its place, and an async run adds one `.then` before the skeleton's own, the same number of microtask hops for every
+entry. Zod's own compiler has no async mode (`ZodCompileAsyncError`), so the runtime is the only stock reference.
 
 Path A (enum, declaration-driven): the official output unconditionally materializes every declared key in declaration order
 (a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
@@ -479,9 +486,24 @@ return out;
   that sequence, where `new Map(input)` plus `delete` / `set` kept the old value and moved the entry to the end (#67).
 - NaN: `vo !== vIn` is always true for NaN → a false dirty verdict → an over-copy, but the result is correct
   (under SameValueZero the rebuilt Set has the same members). This matches the NaN note already in the README.
+- Async entries (#70): with an async key or value product the map and set skeletons take stock's runtime schedule, like
+  the record above: every entry's product is started inside the loop (a map pair through `Promise.all([key, value])`
+  when either is a Promise, stock's own structure), a sync result is logged at once and an async one when it settles, and
+  after `Promise.all` over the started promises the log is scanned (a failed entry fails the container, an entry out of
+  iteration position or not its input marks it dirty) and the copy is assembled from it (`emitAsyncSetLoop`,
+  `emitAsyncMapLoop`), each entry read exactly once. The input is shared only when the entries settled in iteration
+  order and unchanged.
 - Map/Set comparison in the fuzzer: Node's assert compares Map/Set as entry sets (order-independent), which is what hid
-  the order and collision divergences until #67; the fuzzer now compares both as ordered lists on sync parses
-  (`orderedView`), and unordered on async ones, where stock's runtime writes in settlement order.
+  the order and collision divergences until #67; the fuzzer compares both as ordered lists on every parse
+  (`orderedView`), and its async transform settles after a value-dependent number of microtask hops so that sibling
+  entries settle out of order (#70).
+
+The array and tuple copies follow the same pattern since the review of #70: the first forced change (a changed element
+or a hole) rebuilds the clean prefix into a fresh array, reading those elements from the input a second time (#36), and
+every later element is written from the single read the loop makes, so a getter or a hole after the first change is
+observed as stock observes it; `slice()` re-read every element and kept a hole where stock writes an own `undefined`
+slot. A hole is an index the input does not own (`Object.hasOwn`, so an inherited `undefined` under a hole is one too;
+an inherited value under a hole reads as that value and stays the prototype limitation of the clean path, #48).
 
 ### 5.3 Wiring
 
@@ -626,7 +648,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine / async transform wrappers), fully consistent with stock zod4:
   - success/failure parity identical (20813 successes / 29187 failures)
-  - outputs identical under `deepStrictEqual` (Map and Set contents compared in iteration order on sync parses, #67)
+  - outputs identical under `deepStrictEqual` (Map and Set contents compared in iteration order on every parse, #67, #70)
   - zero input distortion (compared against a structuredClone snapshot)
   - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
   - since #43 the suite runs every case a second time compiled with `ownSymbolKeys: "ignore"` against the same RNG stream minus the extra own symbol (the one input the option treats differently from stock; since #42 the generator emits it in every object mode, so the default pass compares strict and loose objects carrying an undeclared symbol against stock, which the previous generator excluded), with the same three checks plus: no generated skeleton at any depth carries `getOwnPropertySymbols` (`compiled.code` covered the top-level skeleton only until #46, which appends the nested skeletons to the dump), and the pass shares at least as many top-level references as the default pass (at the 20 000-case default after #42: 88.8% default, 89.4% with the option among successful cases, 0 degradations in both). Since #51 the two record generators emit the extra own symbol too (one in ten, half of them non-enumerable through `Object.defineProperty`), the input snapshot keeps enumerability, and the runner pins the symbol's presence on the top-level output next to the `deepEqual` comparison, because the harness comparator copies enumerable keys only and would not see a non-enumerable symbol surviving by reference; on the unfixed engine that generator fails 26 of 20 000 cases in the default pass (all that check), on the fixed engine none, and the sharing rate at the default size is 85.1% (default) and 86.0% (`"ignore"`) on both engines with the new generator, from 85.6% / 86.2% with the previous one

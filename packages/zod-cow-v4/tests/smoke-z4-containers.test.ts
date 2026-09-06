@@ -465,7 +465,14 @@ import { compile } from "../src/index.js";
         return ++reads;
       },
     });
-    const out = compile(z.array(z.number().optional().transform((x) => x ?? 0))).parse(a);
+    const out = compile(
+      z.array(
+        z
+          .number()
+          .optional()
+          .transform((x) => x ?? 0),
+      ),
+    ).parse(a);
     assert.deepEqual(out, [0, 1]);
     assert.equal(reads, 1);
   }
@@ -484,7 +491,12 @@ import { compile } from "../src/index.js";
         },
       });
     }
-    const out = compile(z.record(z.string(), z.string().transform((s) => s.trim()))).parse(input);
+    const out = compile(
+      z.record(
+        z.string(),
+        z.string().transform((s) => s.trim()),
+      ),
+    ).parse(input);
     assert.deepEqual(out, { a: "a", b: "x", c: "c" });
     assert.deepEqual(reads, { a: 2, b: 1, c: 1 });
   }
@@ -499,7 +511,12 @@ import { compile } from "../src/index.js";
         yield* super[Symbol.iterator]();
       }
     }
-    const C = compile(z.map(z.string(), z.number().transform((n) => (n === 2 ? 3 : n))));
+    const C = compile(
+      z.map(
+        z.string(),
+        z.number().transform((n) => (n === 2 ? 3 : n)),
+      ),
+    );
     const clean = new CountingMap([["a", 1]]);
     assert.equal(C.parse(clean), clean);
     assert.equal(clean.iterations, 1);
@@ -570,10 +587,7 @@ import { compile } from "../src/index.js";
   );
   // an earlier async pair that collides with a later sync one wins, as in stock
   await sameAsync(
-    z.map(
-      z.string(),
-      z.union([z.string().transform(async (s) => s.toUpperCase()), z.number()]),
-    ),
+    z.map(z.string(), z.union([z.string().transform(async (s) => s.toUpperCase()), z.number()])),
     () =>
       new Map<string, unknown>([
         ["k", "a"],

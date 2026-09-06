@@ -532,6 +532,41 @@ head("async container checks follow stock's schedule (every check started before
   ok("rejections surface like stock, nothing dangles");
 }
 
+head("a failing length check between two predicates: the stock fallback re-runs the schema");
+{
+  // The schedule above is the success path's. On a failure the subroutine answers INVALID like every
+  // other failure of this line: it does not reach B after the failing .min(), and the fallback to
+  // stock safeParseAsync runs A and B from the start, so A runs twice (the README's known limitation;
+  // stock's own z.compile() fast path bails at the same check and logs the same). Before #13 the
+  // container was a runtime island whose failure fell back the same way (A, B, A, B).
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine(async () => {
+      log.push("A");
+      return true;
+    })
+    .min(3)
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const C = compile(S);
+  assert.ok(!/_zod/.test(C.code ?? ""), "the container keeps its skeleton");
+  const stock = await S.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A", "B"], "stock's runChecks reaches B after the failing .min()");
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.deepEqual(
+    log,
+    ["A", "A", "B"],
+    "A started by the subroutine, then A and B by the fallback",
+  );
+  assert.ok(!r.success && !stock.success);
+  assert.deepEqual(r.error.issues, stock.error.issues, "issues from stock");
+  ok("the subroutine bails at .min(), the fallback runs every check once more");
+}
+
 head("async failure path falls back to stock safeParseAsync (official issues structure)");
 {
   const S = z.object({

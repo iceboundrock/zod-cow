@@ -269,6 +269,12 @@ if (!(await settle([x0, x1]))) return INVALID;
 return true;
 ```
 
+这一调度描述的是成功路径。某个 check 失败时，子程序像本线的其他失败一样返回 `INVALID`（§6）：失败的长度 / 大小检查之后声明的
+check 不会被子程序调用，调用方回退到 stock 的 `safeParse` / `safeParseAsync`，后者从头再跑一遍 schema 的所有 check。所以失败之前
+已通过的谓词会跑两次（`refine(A).min(3).refine(B)` 对单元素数组记录 `A, A, B`，runtime 记录 `A, B`），即 README 已知限制里列出的
+那一条；stock 自己的 `z.compile()` 快路径在同一个 check 处退出，其回退产生同样的日志。#13 之前该容器是 runtime island，失败时
+同样回退，所以每个谓词都跑两次（`A, B, A, B`）。
+
 ## 4. 纯度分析：白名单与四大陷阱
 
 定义：`isPure(schema)` = 校验通过 ⇒ 输出必然 `===` 输入引用，且无副作用。

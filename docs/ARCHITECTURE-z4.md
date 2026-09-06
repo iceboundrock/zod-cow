@@ -280,6 +280,14 @@ if (!(await settle([x0, x1]))) return INVALID;
 return true;
 ```
 
+That schedule is the success path's. A failing check answers `INVALID` like every other failure of this line (§6): the
+subroutine does not reach the checks declared after a failing length / size check, and the caller falls back to stock
+`safeParse` / `safeParseAsync`, which runs every check of the schema again from the start. A predicate that passed before
+the failure therefore runs twice (`A, A, B` for `refine(A).min(3).refine(B)` on a one-element array, where the runtime
+logs `A, B`), the case listed under Known limitations in the README; stock's own `z.compile()` fast path bails out at the
+same check and its fallback produces the same log. Before #13 the container was a runtime island whose failure fell back
+the same way, so every predicate ran twice (`A, B, A, B`).
+
 ## 4. Purity analysis: the whitelist and the four traps
 
 Definition: `isPure(schema)` = validation passes ⇒ the output is necessarily `===` the input reference, with no side effects.

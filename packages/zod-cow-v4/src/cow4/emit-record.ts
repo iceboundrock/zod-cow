@@ -1,7 +1,7 @@
 /** Record skeleton: key-name/value double reference comparison + ordered rebuild of the clean prefix at the first change; the async value loop follows stock's settlement order. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
-import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
+import { type ChildProduct, childProduct, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
@@ -373,17 +373,7 @@ function emitRecordChecks(
   out: string,
   dirty: string,
 ): string {
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) {
-    const cName = ctx.addConst(checksFn);
-    ctx.write(`if (!${dirty}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
-      ctx.write(`return ${accessor};`);
-    });
-    ctx.write(`}`);
-    ctx.write(`if (${cName}(${out}) === INVALID) return INVALID;`);
-  }
+  emitContainerChecks(ctx, schema, accessor, out, `!${dirty}`);
   return out;
 }
 

@@ -1,6 +1,6 @@
 /** Set skeleton: member reference comparison + ordered rebuild of the clean prefix at the first change; the async member loop follows stock's settlement order. */
 import type { CodeCtx } from "./codectx.js";
-import { childProduct, containerChecksFn } from "./emit.js";
+import { childProduct, emitContainerChecks } from "./emit.js";
 import type { Node } from "./product.js";
 
 /* ── set skeleton: member reference comparison + ordered rebuild of the clean prefix at the first change ── */
@@ -52,17 +52,7 @@ export function emitCoWSet(ctx: CodeCtx, schema: Node, accessor: string, seen: S
     ctx.write(`}`);
   }
 
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) {
-    const cName = ctx.addConst(checksFn);
-    ctx.write(`if (!${dirty}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
-      ctx.write(`return ${accessor};`);
-    });
-    ctx.write(`}`);
-    ctx.write(`if (${cName}(${out}) === INVALID) return INVALID;`);
-  }
+  emitContainerChecks(ctx, schema, accessor, out, `!${dirty}`);
   return out;
 }
 

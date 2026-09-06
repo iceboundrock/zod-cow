@@ -248,10 +248,26 @@ if (cChecks(out) === INVALID) return INVALID;       // 脏：对齐 stock 的"�
 return out;
 ```
 
-支持集：`custom`（`.refine()` 的 `def.fn` 纯谓词）+ array 的
+支持集：`custom`（`.refine()` 的 `def.fn` 谓词，同步或 async）+ array 的
 `min_length/max_length/length_equals`（`.length` 直读）+ map/set 的
-`min_size/max_size/size_equals`（`.size` 直读）。其余（superRefine 改写
+`min_size/max_size/size_equals`（`.size` 直读）；record 没有长度或大小检查，所以只有谓词会到达它的骨架
+（#13 之前带任何 check 的 record 都走官方 parser）。其余（superRefine 改写
 `ctx.value`、overwrite、自定义 `when`）→ 该节点整体降级官方 parser 产物。
+
+async 谓词过去被门控拒绝，带它的容器变成 runtime island，每次解析都返回拷贝（#13）。自 #13 起只要有一个谓词是
+async，子程序本身就是 async 函数，并遵循 stock 的调度：`runChecks` 按声明顺序同步调用每个 check，只把 await 串起来，
+所以每个谓词（同步或 async）都在第一个 `await` 之前被调用，长度 / 大小检查保持原位，结果最后由 `settleChecks` 按顺序结算
+（`Promise` 被 await，其他结果原样读取，一个 `false` 不会中止后面结果的结算，rejection 在它自己的位置抛出）。在某个谓词已启动之后
+失败的长度 / 大小检查会先结算已启动的谓词再返回 `INVALID`，因此不会留下无人接住的 rejecting promise。调用位（六个容器骨架、
+union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async：
+
+```js
+const x0 = f0(input);                                   // async 谓词，已启动
+if (input.length < 2) { await settle([x0]); return INVALID; }
+const x1 = f1(input);                                   // 同步谓词，在 x0 结算之前调用
+if (!(await settle([x0, x1]))) return INVALID;
+return true;
+```
 
 ## 4. 纯度分析：白名单与四大陷阱
 
@@ -261,7 +277,7 @@ return out;
 | def.type | 判定 | 理由 |
 |---|---|---|
 | string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | 官方产物透传 accessor；但 checks 例外见下 |
-| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite、superRefine 或 async refine 像叶子上一样改写值或改变时序（#57），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
+| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite 或 superRefine 像叶子上一样改写值（#57；async refine 是骨架自 #13 起会 await 的谓词），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
 | union | union 自身 checks 通过 `leafChecksArePure`（有容器分支时：`unionSkeletonOk`，即 union 骨架用的闸门）且全分支纯 | 纯叶子 union 是一个官方产物，分支透传；带容器分支（直接、经 optional / nullable、或在嵌套 union 内）的 union 拿到 union 骨架（#58），其分支就是骨架位置，见陷阱四 |
@@ -300,7 +316,7 @@ size_equals/max_length/min_length/length_equals）。zc-z4 最初把任何 truth
 checks，容器输出则由内到外运行每一层的 checks。带这类 checks 的链把容器编译成只调用一次的嵌套骨架，因为内联骨架
 会在自己的分支里把干净输入直接返回，之后发射的任何代码在该路径上都不会运行；不带 checks 的链仍像以前一样内联。
 门控（`wrapperChecksAreCowSafe`）只放行 `.refine` 谓词，即 `containerChecksFn` 能发射的 checks；包装层上的其他
-check（overwrite、superRefine、async refine、经 `.check()` 附加的长度 / 大小检查）让整条链走官方 parser，`isPure`
+check（overwrite、superRefine、经 `.check()` 附加的长度 / 大小检查）让整条链走官方 parser（async refine 自 #13 起通过门控，由子程序 await），`isPure`
 同样拒绝它（它以前只递归 inner 而不看包装层的 checks，于是这样的链走了 validator 并保留未声明键；同一行也修复了
 #57 的叶子情形）。在容器之上 `isPure` 用的是骨架的门控而不是叶子的：包装层上的长度 / 大小检查在叶子上是纯谓词，
 而对门控刚拒绝的容器链再判纯，就把 `z.object({ a: z.number() }).optional().check(z.minLength(1))` 交给了
@@ -531,7 +547,7 @@ return out;
 
 1. async 岛：`makeAsyncIsland(schema)` = async 黑盒，返回 `Promise<输出 | INVALID>`，
    产物挂 `ZC_ASYNC` symbol 标记。
-2. await 发射：所有产物调用位检测 `isAsyncProduct(fn)` 并置 `ctx.async = true`。set、map 与迭代式 record 骨架在循环内启动每个条目并按 stock 的结算顺序写入（#70）。object、enum 键 record、array 与 tuple 骨架在任一子节点为 async 时采用 async 布局（#71）：所有产物先按 stock 的顺序在第一个 await 之前调用（同步子节点的结果直接捕获，async 子节点的 promise 启动；tuple 像 stock 的 runtime 一样以 `input[i]` 启动每个固定槽，包括缺席的槽，再启动 rest 元素），一次 `await Promise.all` 结算所有 async 结果，随后原有的检查、引用比较与拷贝逻辑在结算后的结果上运行。因此 N 个 async 子节点只花一个来回而非 N 个，副作用的交错与 stock 一致（第二个子节点的 transform 在第一个结算之前启动），带两个 async 子节点的容器与只带一个的容器在同一轮结算，这决定了它在按结算顺序写入的父 set、map 或 record 中的位置。第一次启动与 `Promise.all` 之间没有任何 return，因此被拒绝的 promise 总是有人接住。容器 checks 的 async refine 谓词在子节点之后就地 await，与 stock 在解析之后运行 checks 一致。同步布局不变。
+2. await 发射：所有产物调用位检测 `isAsyncProduct(fn)` 并置 `ctx.async = true`。set、map 与迭代式 record 骨架在循环内启动每个条目并按 stock 的结算顺序写入（#70）。object、enum 键 record、array 与 tuple 骨架在任一子节点为 async 时采用 async 布局（#71）：所有产物先按 stock 的顺序在第一个 await 之前调用（同步子节点的结果直接捕获，async 子节点的 promise 启动；tuple 像 stock 的 runtime 一样以 `input[i]` 启动每个固定槽，包括缺席的槽，再启动 rest 元素），一次 `await Promise.all` 结算所有 async 结果，随后原有的检查、引用比较与拷贝逻辑在结算后的结果上运行。因此 N 个 async 子节点只花一个来回而非 N 个，副作用的交错与 stock 一致（第二个子节点的 transform 在第一个结算之前启动），带两个 async 子节点的容器与只带一个的容器在同一轮结算，这决定了它在按结算顺序写入的父 set、map 或 record 中的位置。第一次启动与 `Promise.all` 之间没有任何 return，因此被拒绝的 promise 总是有人接住。容器自身的 checks 在子节点结算之后运行，与 stock 在解析之后运行 `runChecks` 一致；其中有 async 谓词时 checks 子程序本身按同一调度成为 async（每个谓词都在它的第一个 `await` 之前调用，§3.2，#13）。同步布局不变。
 3. 骨架 async 化：`buildFn` 依 `ctx.async` 决定 `async (input) =>` 还是 `(input) =>`，
    产物挂 `ZC_ASYNC` → 子骨架父层自动感知（`childProduct` 返回 `kind: "async"`）。
 4. 公开 API：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
@@ -621,7 +637,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser，经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 superRefine 走官方 parser（async refine 自 #13 起保留骨架并共享），经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套

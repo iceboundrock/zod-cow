@@ -4,7 +4,7 @@
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, escKey } from "./codectx.js";
-import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
+import { type ChildProduct, childProduct, containerChecksCall } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
@@ -81,8 +81,9 @@ export function emitCoWUnion(
   ctx.write(`if (${out} === INVALID) return INVALID;`);
 
   // The union's own checks run on the winning value (stock: after the option chain, on its output)
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) ctx.write(`if (${ctx.addConst(checksFn)}(${out}) === INVALID) return INVALID;`);
+  const checks = containerChecksCall(ctx, schema);
+  if (checks)
+    ctx.write(`if ((${checks.awaitKw}${checks.name}(${out})) === INVALID) return INVALID;`);
   return out;
 }
 

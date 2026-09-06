@@ -4,9 +4,9 @@
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import type { CodeCtx } from "./codectx.js";
-import { childProduct, containerChecksFn } from "./emit.js";
+import { childProduct, emitContainerChecks } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
-import { isAsyncProduct, type Node } from "./product.js";
+import type { Node } from "./product.js";
 
 /* ── tuple skeleton: mirrors the official generateTupleCheck + fillLen truncation tracking + CoW decoration ── */
 
@@ -311,19 +311,7 @@ export function emitCoWTuple(
   }
 
   // The container's own checks (tuple .refine pure predicates): both paths, same as the object/array skeletons
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) {
-    const cName = ctx.addConst(checksFn);
-    const isA = isAsyncProduct(checksFn);
-    const awaitKw = isA ? "await " : "";
-    ctx.write(`if (${out} === ${accessor}) {`);
-    ctx.indented(() => {
-      ctx.write(`if ((${awaitKw}${cName}(${accessor})) === INVALID) return INVALID;`);
-      ctx.write(`return ${accessor};`);
-    });
-    ctx.write(`}`);
-    ctx.write(`if ((${awaitKw}${cName}(${out})) === INVALID) return INVALID;`);
-  } else {
+  if (!emitContainerChecks(ctx, schema, accessor, out, `${out} === ${accessor}`)) {
     ctx.write(`if (${out} === ${accessor}) return ${accessor};`);
   }
 

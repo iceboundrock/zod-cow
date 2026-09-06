@@ -1,6 +1,6 @@
 /** Array skeleton: element-level reference comparison + prefix rebuild at the first change, holes materialized. */
 import type { CodeCtx } from "./codectx.js";
-import { containerChecksFn, containerChildFn } from "./emit.js";
+import { containerChildFn, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
 import { type Fn, isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
@@ -99,17 +99,7 @@ export function emitCoWArray(
   }
 
   // The container's own checks (array .min/.max/.length/.refine): both paths, same as the object skeleton
-  const checksFn = containerChecksFn(schema);
-  if (checksFn) {
-    const cName = ctx.addConst(checksFn);
-    ctx.write(`if (!${dirty}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${cName}(${accessor}) === INVALID) return INVALID;`);
-      ctx.write(`return ${accessor};`);
-    });
-    ctx.write(`}`);
-    ctx.write(`if (${cName}(${out}) === INVALID) return INVALID;`);
-  }
+  emitContainerChecks(ctx, schema, accessor, out, `!${dirty}`);
 
   return out;
 }

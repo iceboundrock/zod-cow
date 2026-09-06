@@ -1,5 +1,5 @@
 /** Purity analysis (conservative whitelist) and the CoW-safe container decision. */
-import { isAsyncFn, type Node } from "./product.js";
+import type { Node } from "./product.js";
 
 /* ═══════════════════ Purity analysis (conservative whitelist) ═══════════════════ */
 /**
@@ -147,16 +147,23 @@ function leafChecksArePure(schema: Node): boolean {
     const d = c._zod?.def ?? c;
     if (hasCustomWhen(d)) return false;
     if (d.check === "overwrite") return false;
-    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // an async refine is value-producer timing (impure) + unreachable from a sync product
+    // A superRefine (no fn) may rewrite ctx.value → impure. An async predicate is judged like a sync one:
+    // for a leaf the verdict picks between two products that are the same async island (`officialFn`)
+    if (d.check === "custom") return !!d.fn;
     return true;
   });
 }
 
 /**
- * Whether a container's own def.checks (object/array) can be handled safely by the CoW skeleton:
+ * Whether a container's own def.checks (object / array / tuple / record / map / set) can be handled safely by the CoW skeleton:
  *   - no checks ✓
- *   - custom with def.fn present (a .refine() pure predicate: answers only yes/no, never changes the value) ✓
+ *   - custom with def.fn present (a .refine() pure predicate: answers only yes/no, never changes the
+ *     value), sync or async: an async predicate is still a predicate, `containerChecksFn` starts it
+ *     inside an async skeleton on stock's schedule (#13) ✓
  *   - min_length / max_length / length_equals (array .min/.max/.length, reads only .length) ✓
+ *   - min_size / max_size / size_equals (map / set .min/.max/.size, reads only .size) ✓
+ *   A record has no length or size check, so only predicates reach its skeleton (a record with any check
+ *   used to take the official parser, sync predicates included; found while fixing #13).
  * Everything else (superRefine may rewrite ctx.value, overwrite transforms the value, a custom when…) → impure,
  * and the node as a whole degrades to the official parser product (stock semantics, no loss of correctness).
  */
@@ -167,14 +174,15 @@ function checksAreCowSafe(schema: Node): boolean {
   const isContainer =
     def.type === "object" ||
     def.type === "array" ||
+    def.type === "record" ||
     def.type === "map" ||
     def.type === "set" ||
     def.type === "tuple";
-  if (!isContainer) return false; // record itself has no size checks; non-containers are conservatively rejected
+  if (!isContainer) return false; // non-containers are conservatively rejected
   return checks.every((c: Node) => {
     const d = c._zod?.def ?? c;
     if (hasCustomWhen(d)) return false;
-    if (d.check === "custom") return !!d.fn && !isAsyncFn(d.fn); // superRefine (no fn) may rewrite the value → reject; an async refine is impure
+    if (d.check === "custom") return !!d.fn; // superRefine (no fn) may rewrite the value → reject
     if (
       def.type === "array" &&
       (d.check === "min_length" || d.check === "max_length" || d.check === "length_equals")
@@ -193,18 +201,19 @@ function checksAreCowSafe(schema: Node): boolean {
 
 /**
  * Whether the checks of an optional / nullable layer above a container can run in the skeleton: none, or
- * `.refine` predicates only (`custom` with a sync `fn` and no custom `when`), which `containerChecksFn`
- * emits and `emitBoxedContainer` runs on the layer's value, the shortcut `undefined` / `null` included (#56).
- * A length / size check reaches a wrapper only through `.check()` and, like an overwrite, a superRefine or
- * an async refine, sends the chain to the official parser instead; `isPure` applies this gate too on a
- * wrapper above a container, so the chain never falls through to the validator.
+ * `.refine` predicates only (`custom` with a `fn`, sync or async, and no custom `when`), which
+ * `containerChecksFn` emits and `emitBoxedContainer` runs on the layer's value, the shortcut
+ * `undefined` / `null` included (#56; async since #13). A length / size check reaches a wrapper only
+ * through `.check()` and, like an overwrite or a superRefine, sends the chain to the official parser
+ * instead; `isPure` applies this gate too on a wrapper above a container, so the chain never falls
+ * through to the validator. The union skeleton applies the same gate to the union's own checks.
  */
 function wrapperChecksAreCowSafe(schema: Node): boolean {
   const checks = schema._zod.def.checks;
   if (!checks || checks.length === 0) return true;
   return checks.every((c: Node) => {
     const d = c._zod?.def ?? c;
-    return d.check === "custom" && !!d.fn && !isAsyncFn(d.fn) && !hasCustomWhen(d);
+    return d.check === "custom" && !!d.fn && !hasCustomWhen(d);
   });
 }
 

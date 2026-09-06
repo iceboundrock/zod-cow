@@ -1343,15 +1343,20 @@ import { compile } from "../src/index.js";
   );
   console.log("  code dump: nested skeleton only when the wrapper carries a refine ✓");
 
-  // Checks the skeleton cannot run on a wrapper go to the official parser: async refine, superRefine
+  // An async refine on the wrapper is a predicate the skeleton awaits (#13): the chain keeps its
+  // nested container skeleton and shares the clean input; a superRefine still goes to the official parser
   const AR = z
     .object({ a: z.string() })
     .optional()
     .refine(async (v) => v === undefined || v.a === "y");
   const CAR = compile(AR);
   assert.equal(CAR.async, true);
+  assert.ok(CAR.code!.includes("nested skeleton #1"), "async-refined wrapper: nested skeleton");
+  assert.ok(!CAR.code!.includes("_zod"), "async-refined wrapper: no runtime island");
   assert.equal((await CAR.safeParseAsync({ a: "x" })).success, false);
-  assert.deepEqual(await CAR.parseAsync(ok), ok);
+  assert.equal(await CAR.parseAsync(ok), ok, "async refine on the wrapper: clean input shared");
+  assert.deepEqual(await CAR.parseAsync(kIn), { a: "y" }, "copy path strips like stock");
+  assert.equal(await CAR.parseAsync(undefined), undefined, "the shortcut runs the async refine");
   const SR = z
     .object({ a: z.string() })
     .optional()
@@ -1364,7 +1369,9 @@ import { compile } from "../src/index.js";
     { a: "Y" },
     "superRefine on the wrapper rewrites like stock",
   );
-  console.log("  async refine and superRefine on the wrapper take the official parser ✓");
+  console.log(
+    "  async refine on the wrapper keeps the skeleton, superRefine takes the official parser ✓",
+  );
 
   // A length / size check attached to the wrapper through `.check()` is not a predicate the skeleton
   // runs, so the chain must take the official parser, which strips like stock. `isPure` used to admit

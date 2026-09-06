@@ -652,8 +652,13 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    is, a rest hole is decided on the slice), starts every rest element from that slice, and keeps its presence guards
    on the live `input.length`, as stock's `handleTupleResults` decides presence after the await. A child that mutates the input before its promise
    settles is therefore not observed by the copy path, as stock, which reads every element once before any promise
-   settles, does not observe it either; the clean path still returns the input as it then is. The sync layout is
-   unchanged, with its documented second read of the prefix (#36).
+   settles, does not observe it either; the clean path still returns the input as it then is. The sync layout keeps
+   its documented second read of the fixed prefix (#36) and, since #78, takes the same rest slice after its fixed
+   slots ran and before any rest element runs: its rest loop walks the slice, decides a rest hole on it and rebuilds
+   the rest part of the prefix from it, so a sync rest callback that overwrites a later rest slot is not observed by
+   either layout, as stock does not observe it. The slice is the one allocation on the clean path of a tuple with a
+   rest element (a tuple without one still allocates nothing); measured on the issue, it costs about 25 to 35 ns per
+   parse against a stock parse of 160 to 250 ns for the same input.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;

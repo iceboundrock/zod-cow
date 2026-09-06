@@ -657,8 +657,14 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    slots ran and before any rest element runs: its rest loop walks the slice, decides a rest hole on it and rebuilds
    the rest part of the prefix from it, so a sync rest callback that overwrites a later rest slot is not observed by
    either layout, as stock does not observe it. The slice is the one allocation on the clean path of a tuple with a
-   rest element (a tuple without one still allocates nothing); measured on the issue, it costs about 25 to 35 ns per
-   parse against a stock parse of 160 to 250 ns for the same input.
+   rest element (a tuple without one still allocates nothing). The sync layout builds it by hand (#87): `new Array(n)`
+   with the length read once, an empty copy when the input is shorter than the fixed slots, and a slot written only
+   when its value is defined or the index is own, so a hole stays a hole and the hole test stays `Object.hasOwn` on
+   the copy. `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
+   the copy), the inlined loop about a third of that at a short rest; measured on #87, a clean parse of `[string,
+   ...string[]]` with one rest element went from 75 ns under `slice` to 58 ns, with sixteen it is unchanged, against
+   a stock parse of 160 to 250 ns. A rest hole over an inherited `undefined` comes out as an own slot like stock's,
+   where `slice` read the inherited value through `HasProperty` and made it own.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;

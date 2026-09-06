@@ -658,6 +658,96 @@ test("effects: an ordinary thenable is a sync result (stock's detector is `insta
   );
 });
 
+test("effects: a callback that re-enters its own compiled parser keeps the outer invocation's context (issues, fatal flag, path)", () => {
+  // Stock hands every callback a fresh ctx object; the compiled effect node reuses one holder per
+  // node, so a nested parse through the same schema (direct or through a compiled parser) must
+  // restore the outer invocation's ctx, data and fatal flag before it returns, or the outer
+  // `addIssue` lands in the finished nested context and the parse succeeds where stock rejects
+  type Parser = { safeParse(v: unknown): { success: boolean; data?: unknown; error?: any } };
+  const pair = <T extends z.ZodTypeAny>(make: (self: () => Parser) => T) => {
+    let s!: Parser;
+    const stock = make(() => s);
+    s = stock;
+    let c!: Parser;
+    const schema = make(() => c);
+    c = compile(schema); // a second compile() of the same schema shares the cached validator, holder included
+    return { stock, compiled: compile(schema) as Parser };
+  };
+  const same = (p: { stock: Parser; compiled: Parser }, input: unknown) => {
+    const s = p.stock.safeParse(input);
+    const c = p.compiled.safeParse(input);
+    assert.equal(c.success, s.success);
+    if (s.success) assert.deepEqual(c.data, s.data);
+    else assert.deepEqual(issueShape(c.error.issues), issueShape(s.error.issues));
+  };
+
+  // superRefine: the nested parses complete, then the outer issue must reach the outer list at the outer path
+  const paths: unknown[][] = [];
+  const refine = pair((self) =>
+    z.object({
+      k: z.string().superRefine((v, ctx) => {
+        if (v !== "outer") return;
+        assert.equal(self().safeParse({ k: "inner" }).success, true);
+        assert.equal(self().safeParse({ k: 1 }).success, false); // the nested issues stay in the nested context
+        paths.push(ctx.path.slice());
+        ctx.addIssue({ code: "custom", message: "outer issue" });
+      }),
+    }),
+  );
+  same(refine, { k: "outer" });
+  assert.deepEqual(paths, [["k"], ["k"]]); // stock's path, then the compiled path after re-entry
+  same(refine, { k: "inner" });
+
+  // A fatal issue raised before the nested parse still aborts (the ancestor refine does not run)
+  const fatal = pair((self) =>
+    z
+      .object({
+        k: z.string().superRefine((v, ctx) => {
+          if (v !== "outer") return;
+          ctx.addIssue({ code: "custom", message: "stop", fatal: true });
+          self().safeParse({ k: "inner" });
+        }),
+      })
+      .refine(() => false, "never reached"),
+  );
+  same(fatal, { k: "outer" });
+
+  // transform and preprocess go through the same wrapper
+  const transform = pair((self) =>
+    z.string().transform((v, ctx) => {
+      if (v === "outer") {
+        self().safeParse("inner");
+        ctx.addIssue({ code: "custom", message: "outer transform" });
+      }
+      return v.toUpperCase();
+    }),
+  );
+  same(transform, "outer");
+  same(transform, "inner");
+  const preprocess = pair((self) =>
+    z.preprocess((v, ctx) => {
+      if (v === "outer") {
+        self().safeParse("inner");
+        ctx.addIssue({ code: "custom", message: "outer preprocess", fatal: true });
+      }
+      return v;
+    }, z.string()),
+  );
+  same(preprocess, "outer");
+  same(preprocess, "inner");
+
+  // A nested callback that throws and is caught by the outer callback must not leave a stale context behind
+  const caught = pair((self) =>
+    z.string().superRefine((v, ctx) => {
+      if (v === "inner") throw new Error("inner throws");
+      if (v !== "outer") return;
+      assert.throws(() => self().safeParse("inner"), /inner throws/);
+      ctx.addIssue({ code: "custom", message: "after the caught throw" });
+    }),
+  );
+  same(caught, "outer");
+});
+
 console.log("── readonly: what stock freezes ──");
 
 test("readonly over a union freezes the winning option's output: the input in place through a pass-through option, a copy through a container option", () => {

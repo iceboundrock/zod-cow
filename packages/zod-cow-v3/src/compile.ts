@@ -1335,7 +1335,12 @@ function makeDiscriminated(def: any): Validator {
 
 /* ════════════════════════════ Wrapper nodes ════════════════════════════ */
 
-/** The ctx parameter inside transform/refinement callbacks — one per effect, reused across calls */
+/**
+ * The ctx parameter inside transform/refinement callbacks — one per effect node, reused across
+ * calls. Stock builds a fresh one per invocation; here the holder's fields are saved and restored
+ * around every callback (`makeEffects`), so a callback that re-enters its own schema (a nested
+ * parse through the same compiled parser) still reports to the invocation it belongs to
+ */
 interface EffectShim {
   readonly path: PathSegment[];
   addIssue(arg: any): void;
@@ -1371,13 +1376,40 @@ function makeEffects(def: any): Validator {
   const eff = def.effect;
   const holder: EffectHolder = { ctx: null, data: undefined, fatal: false };
   const shim = makeShim(holder, em);
+  // One holder serves every invocation of this node, and a callback may re-enter the node (a nested
+  // parse through the same schema, direct or through a compiled parser, is valid in stock). An
+  // invocation therefore saves the fields of the invocation it interrupts, points the holder at
+  // itself for the callback and restores them once the callback returns, throw included; the outer
+  // callback's `addIssue`, `fatal` flag and `path` then still reach the outer parse. `fatal` is
+  // read from the invocation that finished last, which is always the caller's own: a nested
+  // invocation completes inside the outer callback, before the outer `finally` runs
+  let fatal = false;
+  const call = (
+    fn: (v: unknown, c: EffectShim) => unknown,
+    arg: unknown,
+    data: unknown,
+    ctx: Ctx,
+  ) => {
+    const outerCtx = holder.ctx;
+    const outerData = holder.data;
+    const outerFatal = holder.fatal;
+    holder.ctx = ctx;
+    holder.data = data;
+    holder.fatal = false;
+    try {
+      return fn(arg, shim); // May throw (same as stock, propagates upward)
+    } finally {
+      fatal = holder.fatal;
+      holder.ctx = outerCtx;
+      holder.data = outerData;
+      holder.fatal = outerFatal;
+    }
+  };
 
   if (eff.type === "preprocess") {
+    const transform = eff.transform;
     return (data, ctx) => {
-      holder.ctx = ctx;
-      holder.data = data;
-      holder.fatal = false;
-      const mapped = eff.transform(data, shim); // May throw (same as stock, propagates upward)
+      const mapped = call(transform, data, data, ctx);
       // Stock's sync parser hands a Promise on to the inner schema as data; this line refuses it
       // (an explicit failure, documented under known limitations) instead of validating a Promise
       if (mapped instanceof Promise) {
@@ -1388,21 +1420,19 @@ function makeEffects(def: any): Validator {
       // Same as stock: a fatal issue from the callback aborts; otherwise the inner schema runs on
       // the mapped value, dirty when the callback left a non-fatal issue (issues from other
       // nodes of the same parse do not matter here)
-      if (holder.fatal) return FAILED;
+      if (fatal) return FAILED;
       return inner(mapped, ctx);
     };
   }
 
   if (eff.type === "transform") {
+    const transform = eff.transform;
     return (data, ctx) => {
       const base = ctx.issues.length;
       const r = inner(data, ctx);
       if (r === FAILED) return FAILED;
       if (ctx.issues.length !== base) return r; // dirty: stock does not run the transform
-      holder.ctx = ctx;
-      holder.data = data;
-      holder.fatal = false;
-      const t = eff.transform(r, shim); // Returns a new value → the parent's reference comparison marks dirty automatically
+      const t = call(transform, r, data, ctx); // Returns a new value → the parent's reference comparison marks dirty automatically
       // Stock's detector: an actual Promise, not any thenable (an object with a `then` method is
       // an ordinary sync result there and here)
       if (t instanceof Promise) {
@@ -1410,23 +1440,21 @@ function makeEffects(def: any): Validator {
           "async transforms (the sync compiler only accepts sync data)",
         );
       }
-      return holder.fatal ? FAILED : t; // a fatal issue from the callback aborts, as in stock
+      return fatal ? FAILED : t; // a fatal issue from the callback aborts, as in stock
     };
   }
 
   // refinement: a pure predicate. By contract the callback must not modify the input (the premise of CoW, explained in the README).
   // Same as stock, it also runs on a dirty inner value (a failed check), only an aborted inner skips it.
+  const refinement = eff.refinement;
   return (data, ctx) => {
     const r = inner(data, ctx);
     if (r === FAILED) return FAILED;
-    holder.ctx = ctx;
-    holder.data = data;
-    holder.fatal = false;
-    const ret = eff.refinement(r, shim);
+    const ret = call(refinement, r, data, ctx);
     if (ret instanceof Promise) {
       throw new ZcNotSupportedError("async refinements (the sync compiler only accepts sync data)");
     }
-    return holder.fatal ? FAILED : r;
+    return fatal ? FAILED : r;
   };
 }
 

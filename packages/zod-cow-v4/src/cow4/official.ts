@@ -139,6 +139,39 @@ function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
 }
 
 /**
+ * Whether the subtree holds a transform whose function is not an async function (a `.transform`, a `z.transform`,
+ * the transform side of a `pipe` / `preprocess`, the decode function of a `z.codec`, which zod 4.5.4 stores on the
+ * `pipe` def itself rather than in a child transform node, review of #89), the one position where a plain function
+ * returning a `Promise` is not thrown at the sync API by the official products: their transform helpers answer
+ * `INVALID` for a `Promise` (`generateTransformCheck` and the pipe helper of zod 4.5.4 `compile.js`), which every other entry of `compile()`
+ * hands to stock, while `validate` would read as a rejection. `validate` consults stock's sync parse before
+ * answering null for such a tree (#79). An async-function transform makes the tree async, so its sync entries throw
+ * before any product runs. A `lazy` is not descended, since the official transform helper is never reached inside
+ * one: the official validator runs a `lazy` in the runtime and its lazy check reads `.issues` off the thenable, a
+ * `TypeError` rather than stock's class (the residual #90 tracks), and the skeleton runs it through an island, which
+ * throws `$ZodAsyncError`. A shape getter that throws is contained as in `subtreeHasAsync`; the parse meets it again.
+ */
+export function subtreeHasPlainTransform(schema: Node): boolean {
+  try {
+    return walkHasPlainTransform(schema, new Set());
+  } catch {
+    return false;
+  }
+}
+
+function walkHasPlainTransform(schema: Node, seen: Set<Node>): boolean {
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  const def = schema._zod.def;
+  if (def.type === "lazy") return false;
+  // a `transform` node, or a `pipe` node carrying the decode function of a `z.codec` on its own def
+  if ((def.type === "transform" || def.type === "pipe") && typeof def.transform === "function") {
+    if (!isAsyncFn(def.transform)) return true;
+  }
+  return childrenOf(schema).some((k) => walkHasPlainTransform(k, seen));
+}
+
+/**
  * The schema nodes directly below `schema` (every def slot that holds one), object shape included, and the schema a
  * check carries (`z.property` / `z.properties`, whose `$ZodCheckProperty` holds a schema stock's compiler compiles
  * inline through `generatePropertyCheck` while the runtime runs it through `_zod.run`, review of #84): a wrapper

@@ -6,7 +6,7 @@
 > Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `packages/bench-v4/bench.ts` (reproducible benchmarks),
 > `packages/zod-cow-v4/tests/differential-z4.test.ts` (50 000-case differential suite).
 > Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)).
-> If upstream would rather fix the bug first, the runtime quirk in the "Bonus" section can be filed as a separate issue.
+> If upstream would rather fix the bugs first, the runtime quirk in the first "Bonus" section and the compiler / runtime disagreement in the second can be filed as separate issues.
 
 ---
 
@@ -122,6 +122,28 @@ console.log(Object.getOwnPropertyNames(r.data).join(",")); // "0,2,length": slot
 
 Reproduction, differential suite, and benchmarks: [zod-cow](https://github.com/iceboundrock/zod-cow) (`packages/zod-cow-v4`), zod 4.5.4, node v24.19.0.
 
+### Bonus 2: the compiler and the runtime disagree on a check attached to an optional / nullable wrapper
+
+A check attached to an `optional` / `nullable` schema through `.check()` (rather than to the inner leaf) is answered differently by `compileFn` and by the interpreter when the shortcut value (`undefined` / `null`) reaches it. Found while fuzzing our layer against the runtime (zod 4.5.4; the typings reject `.check(z.minLength(n))` on a wrapper, `HasLength` admits no `undefined` / `null`, so the schema needs a cast, but the runtime accepts it):
+
+| schema | input | runtime `safeParse` | `compileFn(schema)(input)` |
+|---|---|---|---|
+| `z.string().optional().check(z.minLength(3))` | `undefined` | ok(undefined) | throws `TypeError` (`.length` of undefined) |
+| `z.string().nullable().check(z.minLength(3))` | `null` | ok(null) | throws `TypeError` (`.length` of null) |
+| `z.array(z.number()).optional().check(z.minLength(2))` | `undefined` | ok(undefined) | throws `TypeError` |
+| `z.set(z.number()).optional().check(z.minSize(1))` | `undefined` | ok(undefined) | throws `TypeError` (`.size` of undefined) |
+| `z.object({ a: z.string().optional().check(z.minLength(3)) })` | `{}` | ok({}) | throws `TypeError` |
+| `z.number().optional().check(z.gt(1))` | `undefined` | fail | ok(undefined) |
+| `z.number().optional().check(z.lt(1))` | `undefined` | fail | ok(undefined) |
+| `z.string().optional().check(z.regex(/^a/))` | `undefined` | fail | fail |
+
+Two mechanisms:
+
+- The length / size checks carry a default `when` (`_whenHasLength`) that skips a nullish value in the runtime; `generateChecks` accepts that default (it is on `WHEN_DEFAULTED_CHECKS`) but emits the check without the guard, so the generated code reads `.length` / `.size` off the shortcut.
+- `z.gt` / `z.lt` have no `when`: the runtime evaluates `undefined > 1`, which is false, and fails; the compiled code skips the check on the shortcut and passes.
+
+With the `zod/compile` shim installed, `schema.safeParse` and `z.validate` give the compiler's answer (the `bag.validator` fast path runs first), so the public API changes behavior on these schemas once the shim is in. A value that is not the shortcut answers the same on both sides. Our layer routes such a wrapper to the interpreter and pins both rows in a version canary, so a fix on either side shows up as a red test.
+
 ### Compatibility & risk
 
 - The compiler is already load-bearing for `zod/compile`; promoting it formalizes what already exists and adds no surface.
@@ -135,5 +157,6 @@ Reproduction, differential suite, and benchmarks: [zod-cow](https://github.com/i
 - [x] Every benchmark number is reproducible from `packages/bench-v4/bench.ts` (all scenarios S1 to S7)
 - [x] The dependency table matches `docs/ARCHITECTURE-z4.md` §9, including `getTupleOptStart` / `dropsWhenAbsent` introduced by the tuple skeleton (v0.5)
 - [x] The minimal reproduction of the quirk in the "Bonus" section was verified in a `node` REPL of this project (ownKeys is stably "0,2,length", sync rest parses correctly)
+- [x] Every row of the table in the second bonus section was verified against zod 4.5.4 with `compileFn` from `zod/v4/core` and the interpreter's `safeParse` (`packages/zod-cow-v4/src/probe-z4-flags.ts` pins the length and range rows; smoke group 23 of `tests/smoke-z4.test.ts` holds the others).
 - [x] Tone: a request to promote an existing surface plus an attached bug report, not a wish list; the proposed API shape is deliberately minimal
 - [ ] Before submitting: check whether colinhacks/zod already has an issue or PR about `zod/compile`, and reference and extend it rather than opening a duplicate

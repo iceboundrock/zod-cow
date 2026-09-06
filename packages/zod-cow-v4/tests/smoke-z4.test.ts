@@ -1823,4 +1823,128 @@ import { compile } from "../src/index.js";
   console.log("  exactOptional over a leaf unchanged ✓");
 }
 
+/* ── 23. a non-callback check on an optional / nullable wrapper follows stock's runtime, not its compiler (#69) ── */
+{
+  console.log("\n── wrapper .check() follows the runtime (#69) ──");
+  // zod's typings reject `.check(z.minLength(n))` on a wrapper (`HasLength` admits no undefined / null); the runtime accepts it
+  const wrap = (s: z.ZodType, c: unknown) => (s as any).check(c) as z.ZodType;
+  // [name, schema, shortcut input, valid input, invalid input]
+  const rows: Array<[string, z.ZodType, unknown, unknown, unknown]> = [
+    [
+      "string.optional.minLength(3)",
+      wrap(z.string().optional(), z.minLength(3)),
+      undefined,
+      "abc",
+      "ab",
+    ],
+    [
+      "string.nullable.minLength(3)",
+      wrap(z.string().nullable(), z.minLength(3)),
+      null,
+      "abc",
+      "ab",
+    ],
+    [
+      "array.optional.minLength(2)",
+      wrap(z.array(z.number()).optional(), z.minLength(2)),
+      undefined,
+      [1, 2],
+      [1],
+    ],
+    [
+      "set.optional.minSize(1)",
+      wrap(z.set(z.number()).optional(), z.minSize(1)),
+      undefined,
+      new Set([1]),
+      new Set(),
+    ],
+    [
+      "map.nullable.maxSize(1)",
+      wrap(z.map(z.string(), z.number()).nullable(), z.maxSize(1)),
+      null,
+      new Map([["a", 1]]),
+      new Map([
+        ["a", 1],
+        ["b", 2],
+      ]),
+    ],
+    ["number.optional.gt(1)", wrap(z.number().optional(), z.gt(1)), undefined, 5, 0],
+    ["number.nullable.lt(1)", wrap(z.number().nullable(), z.lt(1)), null, 0, 5],
+    [
+      "string.optional.regex(/^a/)",
+      wrap(z.string().optional(), z.regex(/^a/)),
+      undefined,
+      "ab",
+      "ba",
+    ],
+    [
+      "object.optional.minLength(1)",
+      wrap(z.object({ a: z.number() }).optional(), z.minLength(1)),
+      undefined,
+      { a: 1 },
+      { a: "x" },
+    ],
+  ];
+  const same = (name: string, S: z.ZodType, input: unknown) => {
+    const stock = S.safeParse(input);
+    const ours = compile(S).safeParse(input);
+    assert.equal(ours.success, stock.success, `${name}: success on ${repr(input)}`);
+    if (stock.success && ours.success)
+      assert.deepEqual(ours.data, stock.data, `${name}: data on ${repr(input)}`);
+    // `validate` answers null on failure, so a null input cannot be told apart from one
+    if (input !== null)
+      assert.equal(
+        compile(S).validate(input) !== null,
+        stock.success,
+        `${name}: validate on ${repr(input)}`,
+      );
+  };
+  const repr = (v: unknown) =>
+    v instanceof Map || v instanceof Set ? `${v.constructor.name}(${v.size})` : JSON.stringify(v);
+  for (const [name, S, shortcut, valid, invalid] of rows) {
+    for (const input of [shortcut, valid, invalid]) {
+      same(name, S, input);
+      // the same wrapper under an object key, with the runtime's answer read through the parent
+      const K = z.object({ k: S, keep: z.object({ n: z.number() }) });
+      const kIn = input === undefined ? { keep: { n: 1 } } : { k: input, keep: { n: 1 } };
+      const stock = K.safeParse(kIn);
+      const ours = compile(K).safeParse(kIn);
+      assert.equal(ours.success, stock.success, `${name} under a key: success on ${repr(input)}`);
+      if (stock.success && ours.success) {
+        assert.deepEqual(ours.data, stock.data, `${name} under a key: data on ${repr(input)}`);
+        assert.equal(ours.data.keep, kIn.keep, `${name} under a key: the sibling stays shared`);
+      }
+    }
+    assert.equal(compile(S).stock, false, `${name}: no whole-tree degradation`);
+  }
+  console.log("  every row answers what the runtime answers, at the top level and under a key ✓");
+  // A leaf under such a wrapper keeps the reference on the clean path; a container under it is stock's rebuild
+  const L = z.object({ s: wrap(z.string().optional(), z.minLength(3)) });
+  const lIn = { s: "abc" };
+  assert.equal(compile(L).parse(lIn), lIn, "leaf under the wrapper: clean input shared");
+  const lAbsent = {};
+  assert.equal(compile(L).parse(lAbsent), lAbsent, "leaf under the wrapper: absent key shared");
+  const strip = wrap(z.object({ a: z.number() }).optional(), z.minLength(1));
+  assert.deepEqual(
+    compile(strip).parse({ a: 1, extra: 2 }),
+    { a: 1 },
+    "container under the wrapper: strips like stock",
+  );
+  console.log("  a leaf under the wrapper keeps sharing, a container strips like stock ✓");
+  // With an async check beside it the subtree takes the async island, and the async entries answer like the runtime
+  const A = z.object({
+    s: wrap(z.string().optional(), z.minLength(3)).refine(async (v) => v !== "abd"),
+  });
+  const CA = compile(A);
+  assert.equal(CA.async, true, "an async refine beside the wrapper check: async product");
+  assert.equal(CA.stock, false);
+  for (const v of [{}, { s: "abc" }, { s: "ab" }, { s: "abd" }]) {
+    const stock = await A.safeParseAsync(v);
+    const ours = await CA.safeParseAsync(v);
+    assert.equal(ours.success, stock.success, `async: ${JSON.stringify(v)}`);
+    if (stock.success && ours.success) assert.deepEqual(ours.data, stock.data);
+  }
+  console.log("  an async check beside the wrapper check takes the async island ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

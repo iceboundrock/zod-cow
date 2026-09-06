@@ -7,6 +7,7 @@
  * upgrade changes the implicit contract the test goes red instead of drifting silently.
  */
 import { z } from "zod";
+import { compileFn } from "zod/v4/core";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -36,6 +37,18 @@ export interface Probe4Flags {
   readonlyFreezesPassThroughInput: boolean;
   /** readonly over a container freezes a fresh copy and leaves the input unfrozen */
   readonlyContainerFreezesCopy: boolean;
+  /**
+   * A length check attached to an optional wrapper through `.check()` (`z.string().optional().check(z.minLength(3))`):
+   * the runtime passes the shortcut `undefined` (the check's default `when` skips a nullish value) where stock's
+   * compiler reads `.length` off it and throws a TypeError. The zod4 line routes such a wrapper to the runtime (#69);
+   * an upstream fix turns this flag false, the signal to revisit that route
+   */
+  compilerThrowsOnWrapperLengthShortcut: boolean;
+  /**
+   * A range check on such a wrapper (`z.number().optional().check(z.gt(1))`): the runtime evaluates `undefined > 1`
+   * and fails where stock's compiler skips the check on the shortcut and passes (#69, same route and signal)
+   */
+  compilerPassesWrapperRangeShortcut: boolean;
   zodVersion: string;
 }
 
@@ -97,6 +110,25 @@ function computeFlags(): Probe4Flags {
   const readonlyContainerFreezesCopy =
     roObjOut !== roObjIn && !Object.isFrozen(roObjIn) && Object.isFrozen(roObjOut);
 
+  const wrapperLength = (z.string().optional() as any).check(z.minLength(3));
+  let compilerThrowsOnWrapperLengthShortcut = false;
+  try {
+    compileFn(wrapperLength)(undefined);
+  } catch (e) {
+    compilerThrowsOnWrapperLengthShortcut =
+      e instanceof TypeError && wrapperLength.safeParse(undefined).success === true;
+  }
+
+  const wrapperRange = (z.number().optional() as any).check(z.gt(1));
+  let compilerPassesWrapperRangeShortcut = false;
+  try {
+    compilerPassesWrapperRangeShortcut =
+      compileFn(wrapperRange)(undefined) === undefined &&
+      wrapperRange.safeParse(undefined).success === false;
+  } catch {
+    /* keep */
+  }
+
   let zodVersion = "unknown";
   try {
     zodVersion = require("zod/package.json").version as string;
@@ -116,6 +148,8 @@ function computeFlags(): Probe4Flags {
     cleanParseClones,
     readonlyFreezesPassThroughInput,
     readonlyContainerFreezesCopy,
+    compilerThrowsOnWrapperLengthShortcut,
+    compilerPassesWrapperRangeShortcut,
     zodVersion,
   };
 }

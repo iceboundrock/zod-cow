@@ -722,7 +722,10 @@ compile(schema)
   │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise),
   │     │     │     │     │     or makeAsyncIsland when subtreeHasAsync says the subtree holds an async check (#75;
   │     │     │     │     │     a shape getter that throws during that walk keeps the sync island, review of #82)
-  │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
+  │     │     │     │     ├─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
+  │     │     │     │     └─ an optional / nullable layer with a non-callback check anywhere in the subtree
+  │     │     │     │           (subtreeFollowsRuntime, #69) → makeIsland / makeAsyncIsland before compileFn is tried:
+  │     │     │     │           stock's compiler answers the shortcut value differently from its runtime
   │     │     │     ├─ container subtree → subFn recursion (a seen set prevents circular references)
   │     │     │     │     └─ the sub-skeleton is itself async → kind:"async", the parent position emits await ★v0.5
   │     │     │     └─ async subtree → makeAsyncIsland + ctx.async (the skeleton becomes an async function) ★v0.5
@@ -742,6 +745,17 @@ Sync skeleton (ctx.async = false):
   $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6); a $ZodAsyncError a
   callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
 ```
+
+A check attached to an optional / nullable layer through `.check()` (`z.string().optional().check(z.minLength(3))`) is a
+fourth reason for an island (#69). Stock's compiler emits every non-callback check as an inline test of the value's own
+properties without the runtime's `when` guard, so on the shortcut value a length / size check reads `.length` / `.size`
+off `undefined` / `null` and throws where the runtime's default `when` passes, and a range check is skipped where the
+runtime evaluates `undefined > n` and fails. The two callback checks (`custom`, `overwrite`) are called with the layer's
+value as the runtime calls them and keep their routes. `wrapperFollowsRuntime` (`purity.ts`) names such a layer, `isPure`
+judges it impure so no pure subtree holds one (the direct `assertOnly` compile of `emitNode` therefore never meets it),
+`subtreeFollowsRuntime` (`official.ts`) walks the official subtree for one (a `lazy` is not descended: stock's product
+runs it in the runtime already) and `officialFn` takes the island for the whole subtree, `subtreeHasAsync` choosing which;
+`officialValidator` declines a tree holding one, so `validate` runs the skeleton. The canary pins both divergences.
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
 compiles as usual. The lazy subtree goes through the official parser product at the element position, and the official `generateLazyCheck`

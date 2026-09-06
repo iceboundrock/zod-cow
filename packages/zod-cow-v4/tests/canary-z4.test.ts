@@ -40,6 +40,16 @@ test(`PROBE4: stock zod4 semantics match the compiler's assumptions (zod ${PROBE
     true,
     "stock readonly over a container must freeze a copy and leave the input unfrozen",
   );
+  assert.equal(
+    PROBE4.compilerThrowsOnWrapperLengthShortcut,
+    true,
+    "stock's compiler must still throw on the shortcut for a wrapper length check while the runtime passes it (#69: revisit the runtime-island route when this changes)",
+  );
+  assert.equal(
+    PROBE4.compilerPassesWrapperRangeShortcut,
+    true,
+    "stock's compiler must still pass the shortcut for a wrapper range check while the runtime fails it (#69: revisit the runtime-island route when this changes)",
+  );
 });
 
 summary("canary-z4");

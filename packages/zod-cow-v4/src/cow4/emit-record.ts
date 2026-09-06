@@ -56,6 +56,15 @@ export function emitCoWRecord(
     const stringKeys: string[] = [];
     const symbolKeys: symbol[] = [];
 
+    /** One plan per declared key, products built up front in declaration order */
+    type KeyPlan = {
+      keyExpr: string;
+      inVar: string;
+      missing: string;
+      product: ChildProduct;
+      fnVar: string;
+    };
+    const plans: KeyPlan[] = [];
     for (const kv of keyValues) {
       if (typeof kv !== "string" && typeof kv !== "number" && typeof kv !== "symbol") {
         throw new ZodCompileUnsupportedError(`record key value ${String(kv)}`);
@@ -66,29 +75,56 @@ export function emitCoWRecord(
       if (typeof inputKey === "string") stringKeys.push(inputKey);
       else symbolKeys.push(inputKey);
       const keyExpr = typeof inputKey === "symbol" ? ctx.addConst(inputKey) : escKey(inputKey);
-      const inVar = ctx.var();
-      // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
-      ctx.write(`const ${inVar} = ${accessor}[${keyExpr}];`);
       const product = childProduct(def.valueType, childSeen, ctx);
-      const f = ctx.addConst(product.fn);
-      const pAsync = product.kind === "async";
-      if (pAsync) ctx.async = true;
-      const awaitKw = pAsync ? "await " : "";
+      plans.push({
+        keyExpr,
+        inVar: ctx.var(),
+        missing: ctx.var(),
+        product,
+        fnVar: ctx.addConst(product.fn),
+      });
+    }
+    /** The checks on a declared key's settled result `res` (a call expression or a local) and its dirtiness */
+    const emitKeyResult = (p: KeyPlan, res: string): void => {
+      const { keyExpr, inVar, missing } = p;
       // Missing declared key: the official code materializes it unconditionally (value = undefined) → absence in the input means dirty
-      const missing = ctx.var();
       ctx.write(`const ${missing} = !(${keyExpr} in ${accessor});`);
-      if (product.kind === "validator") {
-        ctx.write(`if (${f}(${inVar}) === INVALID) return INVALID;`);
+      if (p.product.kind === "validator") {
+        ctx.write(`if (${res} === INVALID) return INVALID;`);
         ctx.write(`if (${missing}) ${dirty} = true;`);
         // validator product: value = input (when present inVar is the original value; when missing inVar === undefined)
         writebacks.push({ keyExpr, valueVar: inVar });
       } else {
         const outVar = ctx.var();
-        ctx.write(`const ${outVar} = ${awaitKw}${f}(${inVar});`);
+        ctx.write(`const ${outVar} = ${res};`);
         ctx.write(`if (${outVar} === INVALID) return INVALID;`);
         ctx.write(`if (${outVar} !== ${inVar} || ${missing}) ${dirty} = true;`);
         writebacks.push({ keyExpr, valueVar: outVar });
       }
+    };
+    if (!plans.some((p) => p.product.kind === "async")) {
+      // Sync layout: read, call and check each declared key in declaration order
+      for (const p of plans) {
+        // The official code runs the keyType check on a constant key (enum has, known to be always true at compile time) → omitted
+        ctx.write(`const ${p.inVar} = ${accessor}[${p.keyExpr}];`);
+        emitKeyResult(p, `${p.fnVar}(${p.inVar})`);
+      }
+    } else {
+      // Async layout (#71), the object skeleton's: every value product called in declaration order
+      // before the first await, one `Promise.all` over the async ones, the checks on the settled
+      // results in the same order; no return between the first start and the `Promise.all`
+      ctx.async = true;
+      const started = plans.map((p) => {
+        ctx.write(`const ${p.inVar} = ${accessor}[${p.keyExpr}];`);
+        const resVar = ctx.var();
+        ctx.write(`const ${resVar} = ${p.fnVar}(${p.inVar});`);
+        return { p, resVar, settledVar: p.product.kind === "async" ? ctx.var() : null };
+      });
+      const asyncOnes = started.filter((s) => s.settledVar !== null);
+      ctx.write(
+        `const [${asyncOnes.map((s) => s.settledVar).join(", ")}] = await Promise.all([${asyncOnes.map((s) => s.resVar).join(", ")}]);`,
+      );
+      for (const s of started) emitKeyResult(s.p, s.settledVar ?? s.resVar);
     }
 
     // Undeclared keys, the official for...in template: strict rejects them on every path; loose keeps

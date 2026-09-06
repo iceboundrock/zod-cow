@@ -212,7 +212,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - refine 不得修改输入（CoW 前提）；开发期可 deep-freeze 输入抓违规。
 - 回调看到的是 CoW 输出而不是新容器：容器之上的 `refine` / `superRefine` / `transform` 在其下没有任何改动时收到的是输入引用，而 stock 的回调收到的是 stock 刚重建的容器。仅因自身长度 / 大小检查而变脏的容器（`array.max`、`set.size`）也包括在内：值按原引用继续向上，issue 已记录。容器之上 optional / nullable 包装层的 `refine` 也是这样的回调：骨架像 stock 一样在短路值和容器输出上运行它，内层包装先于外层（#56）。只有在回调内比较引用身份时才能观察到。在 `readonly` 或已触发的 `default` 之下，zod3 骨架运行于 stock 的重建模式，那里的回调与 stock 的回调一样收到新容器。
 - 失败时的 refine 副作用：parse 失败时 refine 回调先在骨架里跑一次，再在 stock 回退里跑一次，共两次。官方 `zod/compile` shim 语义相同。
-- 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。zod4 对象骨架做出的拷贝按 shape 序排列，与 stock 一致。
+- 键序：纯透传保留输入键序；stock 按 shape 序重排（`deepStrictEqual` 不感知，快照工具可能感知）。async 解析时 stock 在每个 async 键的 promise 结算时写入它，键序即结算顺序，而这里的拷贝保持 shape 序（#71）。zod4 对象骨架做出的拷贝按 shape 序排列，与 stock 一致。
 - 不支持，明确失败而非静默漂移：
   - zod4 线：`intersection`、`file` / `templateLiteral` / `promise`、无 `pattern` 的 `string_format`（如 `url`）、递归顶层 schema、schema 级 `catchall`。官方 `ZodCompileUnsupportedError` 使整树降级到 stock（`compiled.stock === true`），正确但不是 CoW。
   - zod3 线：`intersection`、`catchall`、tuple rest、`ZodPromise`。编译期抛 `ZcNotSupportedError`；async refine / transform / preprocess（回调返回 `Promise`）在 parse 时抛出。普通 thenable 与 stock 一样按同步结果处理（stock 的检测是 `instanceof Promise`）；stock 的同步 parser 会把 preprocess 返回的 `Promise` 当作数据交给内层 schema，本线则拒绝它。

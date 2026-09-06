@@ -4,7 +4,7 @@
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import type { CodeCtx } from "./codectx.js";
-import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
+import { childProduct, containerChecksFn } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
@@ -27,6 +27,14 @@ import { isAsyncProduct, type Node } from "./product.js";
  * Cleanliness: out === input (a copy never happened) ⇔ every slot reference is unchanged, no hole was seen and there
  * was no truncation/fill. Once copied, every visited slot is written.
  * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
+ *
+ * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
+ * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
+ * then awaits them together. The skeleton then reads every fixed slot once and starts its product,
+ * reads and starts the rest elements, awaits one `Promise.all` over the async ones, and runs the
+ * three segments above on the captured reads and the settled results, so a slot with two async
+ * children settles in the same round as one with a single child (a sync slot's result is captured
+ * in the same pass, in stock's order). Nothing returns between the first start and the `Promise.all`.
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -56,10 +64,73 @@ export function emitCoWTuple(
 
   // The product for each fixed slot (generated once at compile time; key/element/value positions all go through childProduct)
   const itemProducts = items.map((it) => childProduct(it, childSeen, ctx));
+  const restProduct = rest ? childProduct(rest, childSeen, ctx) : null;
+  const restFn = restProduct ? ctx.addConst(restProduct.fn) : "";
+  const anyAsync = itemProducts.some((p) => p.kind === "async") || restProduct?.kind === "async";
+  if (anyAsync) ctx.async = true;
 
   const out = ctx.var();
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
+
+  /** Async layout: the local holding the single read of fixed slot i, and the one holding its settled result */
+  const slotRead: string[] = [];
+  const slotResult: string[] = [];
+  /** Async layout: the reads and the settled results of the rest elements, indexed by `i - N` */
+  const restReads = anyAsync && rest ? ctx.var() : "";
+  const restResults = anyAsync && rest ? ctx.var() : "";
+  if (anyAsync) {
+    const started: string[] = [];
+    for (let i = 0; i < N; i++) {
+      const e = ctx.var();
+      const r = ctx.var();
+      ctx.write(`const ${e} = ${accessor}[${i}];`);
+      ctx.write(`const ${r} = ${ctx.addConst(itemProducts[i]!.fn)}(${e});`);
+      slotRead.push(e);
+      started.push(r);
+      slotResult.push(itemProducts[i]!.kind === "async" ? ctx.var() : r);
+    }
+    const restStarted = rest ? ctx.var() : "";
+    if (rest) {
+      ctx.write(`const ${restReads} = [], ${restStarted} = [];`);
+      ctx.write(`for (let i = ${N}; i < ${accessor}.length; i++) {`);
+      ctx.indented(() => {
+        const e = ctx.var();
+        ctx.write(`const ${e} = ${accessor}[i];`);
+        ctx.write(`${restReads}.push(${e});`);
+        ctx.write(`${restStarted}.push(${restFn}(${e}));`);
+      });
+      ctx.write(`}`);
+    }
+    const settledVars: string[] = [];
+    const startedVars: string[] = [];
+    for (let i = 0; i < N; i++) {
+      if (itemProducts[i]!.kind !== "async") continue;
+      settledVars.push(slotResult[i]!);
+      startedVars.push(started[i]!);
+    }
+    if (rest && restProduct!.kind === "async") {
+      settledVars.push(`...${restResults}`);
+      startedVars.push(`...${restStarted}`);
+    }
+    ctx.write(
+      `const [${settledVars.join(", ")}] = await Promise.all([${startedVars.join(", ")}]);`,
+    );
+    if (rest && restProduct!.kind !== "async") {
+      ctx.write(`const ${restResults} = ${restStarted};`);
+    }
+  }
+  /** The single read of fixed slot i: emitted here in the sync layout, captured above in the async one */
+  const readSlot = (i: number): string => {
+    if (anyAsync) return slotRead[i]!;
+    const e = ctx.var();
+    ctx.write(`const ${e} = ${accessor}[${i}];`);
+    return e;
+  };
+  /** The result of fixed slot i's product on `argExpr`: the call in the sync layout, the settled local in the async one
+   *  (started on `input[i]`, which is what an absent slot's `undefined` reads as) */
+  const slotCall = (i: number, argExpr: string): string =>
+    anyAsync ? slotResult[i]! : `${ctx.addConst(itemProducts[i]!.fn)}(${argExpr})`;
 
   /** The first forced change at slot `idxExpr`: a fresh array holding the clean prefix [0, idxExpr), read from the input a
    *  second time (#36); every later slot is written from the loop's single read (review of #70) */
@@ -68,19 +139,12 @@ export function emitCoWTuple(
   /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too) */
   const isHole = (eVar: string, idxExpr: string): string =>
     `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
-  /** Value-shaped slot (parser/cow/async product): test for INVALID + reference comparison + prefix rebuild at the first dirt.
+  /** Value-shaped slot (parser/cow/async product), its result `res` (a call expression or a settled local): test for
+   *  INVALID + reference comparison + prefix rebuild at the first dirt.
    *  eVar=null marks an absent slot (the official code unconditionally does out[i] = result, including materializing undefined / extending the shape) → write unconditionally. */
-  const emitValueSlot = (
-    p: ChildProduct,
-    argExpr: string,
-    idxExpr: string,
-    eVar: string | null,
-  ): void => {
-    const f = ctx.addConst(p.fn);
-    const isA = p.kind === "async";
-    if (isA) ctx.async = true;
+  const emitValueSlot = (res: string, idxExpr: string, eVar: string | null): void => {
     const t = ctx.var();
-    ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(${argExpr});`);
+    ctx.write(`const ${t} = ${res};`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
     if (eVar === null) {
       // Absent slot: the official code writes out[i] unconditionally (materializing even when t === undefined, keeping output length/content identical)
@@ -101,21 +165,14 @@ export function emitCoWTuple(
     ctx.write(copyAt(idxExpr));
     ctx.write(`${out}[${idxExpr}] = undefined;`);
   };
-  /** Check-shaped slot (validator product): answers pass/fail only; when absent the official code still materializes out[i] = undefined (a pure subtree's output = input = undefined) */
-  const emitValidatorSlot = (
-    p: ChildProduct,
-    argExpr: string,
-    idxExpr: string,
-    present: boolean,
-  ): void => {
-    const f = ctx.addConst(p.fn);
-    const isA = p.kind === "async";
-    if (isA) ctx.async = true;
-    ctx.write(`if ((${isA ? "await " : ""}${f}(${argExpr})) === INVALID) return INVALID;`);
-    if (present) {
-      // argExpr is the local holding the value read from the slot: written once copied, a hole is materialized
-      ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${argExpr};`);
-      ctx.write(`else if (${isHole(argExpr, idxExpr)}) {`);
+  /** Check-shaped slot (validator product), its result `res`: answers pass/fail only; when absent (eVar=null) the official code
+   *  still materializes out[i] = undefined (a pure subtree's output = input = undefined) */
+  const emitValidatorSlot = (res: string, idxExpr: string, eVar: string | null): void => {
+    ctx.write(`if ((${res}) === INVALID) return INVALID;`);
+    if (eVar !== null) {
+      // eVar is the local holding the value read from the slot: written once copied, a hole is materialized
+      ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${eVar};`);
+      ctx.write(`else if (${isHole(eVar, idxExpr)}) {`);
       ctx.indented(() => emitHole(idxExpr));
       ctx.write(`}`);
     } else {
@@ -142,27 +199,26 @@ export function emitCoWTuple(
     const p = itemProducts[i]!;
     ctx.write(`{`);
     ctx.indented(() => {
-      const e = ctx.var();
-      ctx.write(`const ${e} = ${accessor}[${i}];`);
+      const e = readSlot(i);
       if (i < optinStart) {
         // The length guard already proved input.length >= optinStart: the slot is present, so the
         // runtime present/absent split below is skipped for it (this `return` leaves the indented
         // callback for this slot only, not the loop over the slots)
-        if (p.kind === "validator") emitValidatorSlot(p, e, String(i), true);
-        else emitValueSlot(p, e, String(i), e);
+        if (p.kind === "validator") emitValidatorSlot(slotCall(i, e), String(i), e);
+        else emitValueSlot(slotCall(i, e), String(i), e);
         return;
       }
       // Absence is not knowable at compile time (input.length is a runtime value) → the present branch is guarded at runtime
       ctx.write(`if (${i} < ${accessor}.length) {`);
       ctx.indented(() => {
-        if (p.kind === "validator") emitValidatorSlot(p, e, String(i), true);
-        else emitValueSlot(p, e, String(i), e);
+        if (p.kind === "validator") emitValidatorSlot(slotCall(i, e), String(i), e);
+        else emitValueSlot(slotCall(i, e), String(i), e);
       });
       ctx.write(`} else {`);
       ctx.indented(() => {
         // Absent (i >= input.length): the official code still runs child(undefined) (semantics equivalent to the IIFE)
-        if (p.kind === "validator") emitValidatorSlot(p, "undefined", String(i), false);
-        else emitValueSlot(p, "undefined", String(i), null);
+        if (p.kind === "validator") emitValidatorSlot(slotCall(i, "undefined"), String(i), null);
+        else emitValueSlot(slotCall(i, "undefined"), String(i), null);
       });
       ctx.write(`}`);
     });
@@ -183,10 +239,9 @@ export function emitCoWTuple(
       ctx.indented(() => {
         ctx.write(`if (${i} < ${accessor}.length) {`);
         ctx.indented(() => {
-          const e = ctx.var();
-          ctx.write(`const ${e} = ${accessor}[${i}];`);
-          if (p.kind === "validator") emitValidatorSlot(p, e, String(i), true);
-          else emitValueSlot(p, e, String(i), e);
+          const e = readSlot(i);
+          if (p.kind === "validator") emitValidatorSlot(slotCall(i, e), String(i), e);
+          else emitValueSlot(slotCall(i, e), String(i), e);
           ctx.write(`${fillLen} = ${i + 1};`);
         });
         ctx.write(`} else {`);
@@ -197,19 +252,13 @@ export function emitCoWTuple(
             emitTruncate(i);
           } else if (p.kind === "validator") {
             // Pure-subtree slot absent: check child(undefined) (the pure optional family always passes; INVALID guarded defensively) → output = undefined → the official truncation
-            const f = ctx.addConst(p.fn);
-            const isA = (p as ChildProduct).kind === "async"; // defensive (a validator product is always sync)
-            if (isA) ctx.async = true;
-            ctx.write(`if ((${isA ? "await " : ""}${f}(undefined)) === INVALID) return INVALID;`);
+            ctx.write(`if ((${slotCall(i, "undefined")}) === INVALID) return INVALID;`);
             ctx.write(`${fillLen} = ${i};`);
             emitTruncate(i);
           } else {
             // The official IIFE branch: branch = child(undefined); INVALID/undefined → truncate, a value → out[i] = branch (extends the shape)
-            const f = ctx.addConst(p.fn);
-            const isA = p.kind === "async";
-            if (isA) ctx.async = true;
             const t = ctx.var();
-            ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(undefined);`);
+            ctx.write(`const ${t} = ${slotCall(i, "undefined")};`);
             ctx.write(`if (${t} === INVALID || ${t} === undefined) {`);
             ctx.indented(() => {
               ctx.write(`${fillLen} = ${i};`);
@@ -232,24 +281,22 @@ export function emitCoWTuple(
   }
 
   /* Segment 3: rest [N, L) -- the official ungated per-slot write */
-  if (rest) {
-    const restProduct = childProduct(rest, childSeen, ctx);
-    const f = ctx.addConst(restProduct.fn);
-    const isA = restProduct.kind === "async";
-    if (isA) ctx.async = true;
+  if (rest && restProduct) {
     ctx.write(`for (let i = ${N}; i < ${accessor}.length; i++) {`);
     ctx.indented(() => {
+      // The sync layout reads and calls in the loop; the async one reads the captured element and its settled result
       const e = ctx.var();
-      ctx.write(`const ${e} = ${accessor}[i];`);
+      ctx.write(`const ${e} = ${anyAsync ? `${restReads}[i - ${N}]` : `${accessor}[i]`};`);
+      const res = anyAsync ? `${restResults}[i - ${N}]` : `${restFn}(${e})`;
       if (restProduct.kind === "validator") {
-        ctx.write(`if ((${isA ? "await " : ""}${f}(${e})) === INVALID) return INVALID;`);
+        ctx.write(`if ((${res}) === INVALID) return INVALID;`);
         ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${e};`);
         ctx.write(`else if (${isHole(e, "i")}) {`);
         ctx.indented(() => emitHole("i"));
         ctx.write(`}`);
       } else {
         const t = ctx.var();
-        ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(${e});`);
+        ctx.write(`const ${t} = ${res};`);
         ctx.write(`if (${t} === INVALID) return INVALID;`);
         ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${t};`);
         ctx.write(`else if (${t} !== ${e} || (${isHole(e, "i")})) {`);

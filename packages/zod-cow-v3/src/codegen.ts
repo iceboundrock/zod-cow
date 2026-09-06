@@ -142,8 +142,10 @@ export function inlinePredicate(
     case "ZodEnum":
       return `(typeof ${V} === "string" && ${g.hoist(new Set(def.values), "set")}.has(${V}))`;
     case "ZodDate":
+      // In stock's rebuild mode (`ctx.force`, below a readonly or a fired default) the leaf closure
+      // returns a copy, so the inline test hands the value to it there
       return (def.checks ?? []).length === 0
-        ? `(${V} instanceof Date && !Number.isNaN(${V}.getTime()))`
+        ? `(!ctx.force && ${V} instanceof Date && !Number.isNaN(${V}.getTime()))`
         : null;
     case "ZodOptional": {
       const inner = inlinePredicate(def.innerType, g, V, regexOf);
@@ -234,7 +236,9 @@ function childBlock(
  * declared key the input defines as non-enumerable, drops undeclared own symbol keys, reads a
  * getter once and, in passthrough mode, appends the undeclared keys the way stock's `for...in`
  * does (inherited enumerable keys included, an `undefined` value dropped). The strip / strict
- * probe is stock's `for...in` as well, so an inherited enumerable key counts as undeclared.
+ * probe is stock's `for...in` as well, so an inherited enumerable key counts as undeclared. In
+ * stock's rebuild mode (`ctx.force`, below a readonly or a fired default) the skeleton starts out
+ * dirty and always takes that assembly.
  */
 export function genObject(spec: ObjectSpec): Validator {
   const g = new Gen();
@@ -293,7 +297,7 @@ export function genObject(spec: ObjectSpec): Validator {
       : "";
   const src = `return function generatedObject(data, ctx) {
     if (!isObjectType(data)) { pushInvalidType(ctx, data, ${em}, "object"); return FAILED; }
-    let dirty = false, anyFailed = false;
+    let dirty = ctx.force, anyFailed = false;
     ${n === 0 ? "" : `let ${spec.keys.map((_, i) => `v${i}`).join(", ")};`}
     ${slots.join("\n    ")}
     ${spec.mode === "strict" ? "" : "if (anyFailed) return FAILED;"}
@@ -356,7 +360,7 @@ export function genArray(spec: ArraySpec): Validator {
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let out = data, dirty = false, anyFailed = false;
+    let dirty = ctx.force, out = dirty ? data.slice() : data, anyFailed = false;
     for (let i = 0; i < data.length; i++) ${slot}
     if (anyFailed) return FAILED;
     return out;
@@ -391,8 +395,9 @@ export function genTuple(spec: TupleSpec): Validator {
   const src = `return function generatedTuple(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
-    let out = data, dirty = false, anyFailed = false;
+    let dirty = ctx.force, out = data, anyFailed = false;
     if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); out = data.slice(0, ${n}); dirty = true; }
+    else if (dirty) out = data.slice();
     ${slots.join("\n    ")}
     if (anyFailed) return FAILED;
     return out;

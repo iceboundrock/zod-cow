@@ -57,13 +57,15 @@ export interface Ctx {
    */
   path: PathSegment[];
   /**
-   * Whether stock zod would have built a fresh output for the value the last branch-deciding node
-   * returned (a union whose options disagree, a catch whose fallback may hand back the input, a
-   * pipeline of two such nodes). Written only by those nodes and read only by a `readonly` above
-   * them that cannot decide statically (`stockRebuilds` in compile.ts returning `null`), so that it
-   * freezes a copy where stock froze its own fresh output and the input in place where stock did.
+   * Stock's rebuild mode. Set by a `readonly` node and by a `default` whose value fired, for the
+   * duration of their inner call, when stock would build a fresh output below them: every
+   * container skeleton then assembles its output from the validated values instead of returning
+   * the input by reference (the same assembly the dirty path uses), and a `date` leaf returns a
+   * copy, so `readonly` freezes exactly what stock freezes (a fresh container, the input in place
+   * over a pass-through leaf) and a parsed default never aliases the schema's default value.
+   * Off everywhere else: the CoW paths are untouched.
    */
-  rebuilt: boolean;
+  force: boolean;
 }
 
 export type Validator = (data: any, ctx: Ctx) => any;

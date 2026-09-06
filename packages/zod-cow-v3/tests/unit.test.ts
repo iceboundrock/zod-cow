@@ -1310,4 +1310,175 @@ test("record: an own __proto__ is dropped, a key transformed to __proto__ is ski
   assert.equal(compile(R).parse(plain), plain);
 });
 
+/** Every object reachable from `v` (objects, arrays, Dates, Map keys and values, Set members) */
+function reachable(v: unknown, out = new Set<object>()): Set<object> {
+  if (v === null || (typeof v !== "object" && typeof v !== "function") || out.has(v)) return out;
+  out.add(v);
+  if (v instanceof Map) {
+    for (const [k, x] of v) {
+      reachable(k, out);
+      reachable(x, out);
+    }
+  } else if (v instanceof Set) {
+    for (const x of v) reachable(x, out);
+  } else {
+    for (const k of Reflect.ownKeys(v)) reachable((v as any)[k], out);
+  }
+  return out;
+}
+
+test("default: a container default is rebuilt at every level like stock, so the output never aliases the schema's default value", () => {
+  // Stock hands the default value to the inner schema, whose containers and dates build fresh
+  // output; the compiled skeletons do the same below a default that fired (stock's rebuild mode)
+  const fallback = {
+    a: "x",
+    n: { d: new Date(0), t: ["p", 1] as [string, number] },
+    arr: [{ v: 1 }],
+    rec: { k: { v: 2 } },
+    m: new Map([["k", { v: 3 }]]),
+    s: new Set([{ v: 4 }]),
+  };
+  const Inner = z.object({
+    a: z.string(),
+    n: z.object({ d: z.date(), t: z.tuple([z.string(), z.number()]) }),
+    arr: z.array(z.object({ v: z.number() })),
+    rec: z.record(z.string(), z.object({ v: z.number() })),
+    m: z.map(z.string(), z.object({ v: z.number() })),
+    s: z.set(z.object({ v: z.number() })),
+  });
+  const S = Inner.default(fallback);
+  const owned = reachable(fallback);
+  for (const out of [S.parse(undefined), compile(S).parse(undefined)]) {
+    assert.deepEqual(out, fallback);
+    for (const o of reachable(out)) assert.equal(owned.has(o), false, "output aliases the default");
+    assert.equal(Object.isFrozen(out), false);
+  }
+  // Mutating the parsed result does not change the schema's state for later parses
+  const C = compile(S);
+  const first = C.parse(undefined);
+  first.a = "mutated";
+  first.n.d.setTime(1);
+  first.arr[0]!.v = 99;
+  assert.deepEqual(C.parse(undefined), fallback);
+  assert.equal(fallback.a, "x");
+  assert.equal(fallback.n.d.getTime(), 0);
+  assert.equal(fallback.arr[0]!.v, 1);
+  // A present value still takes the CoW path by reference
+  const present = structuredClone(fallback);
+  assert.equal(C.parse(present), present);
+  // Nested position: only the defaulted subtree is rebuilt, the siblings stay shared
+  const nestedFallback = { v: 1 };
+  const N = z.object({
+    keep: z.object({ q: z.string() }),
+    n: z.object({ v: z.number() }).default(nestedFallback),
+  });
+  const nin = { keep: { q: "x" } };
+  const nout = compile(N).parse(nin);
+  assert.notEqual(nout, nin);
+  assert.equal(nout.keep, nin.keep);
+  assert.notEqual(nout.n, nestedFallback);
+  assert.deepEqual(nout, N.parse(nin));
+  // A pass-through leaf hands the default back as it is, like stock (`unknown` builds nothing)
+  const raw = { v: 1 };
+  const U = z.unknown().default(raw);
+  assert.equal(U.parse(undefined), raw);
+  assert.equal(compile(U).parse(undefined), raw);
+  // A default function still runs per parse and its result is rebuilt like stock
+  let calls = 0;
+  const F = z.object({ v: z.number() }).default(() => ({ v: ++calls }));
+  const CF = compile(F);
+  assert.deepEqual(CF.parse(undefined), { v: 1 });
+  assert.deepEqual(CF.parse(undefined), { v: 2 });
+  // An invalid default fails like stock
+  const bad = compile(z.object({ v: z.number() }).default({ v: "no" } as never)).safeParse(
+    undefined,
+  );
+  assert.equal(bad.success, false);
+  assert.equal(bad.error.issues[0]!.code, "invalid_type");
+  assert.deepEqual(bad.error.issues[0]!.path, ["v"]);
+});
+
+test("readonly: the frozen copy is stock's output assembly (getter read once, own symbol dropped, nested containers and dates fresh and unfrozen)", () => {
+  const S = z
+    .object({ a: z.string(), d: z.date(), n: z.object({ v: z.number() }), l: z.array(z.number()) })
+    .readonly();
+  let reads = 0;
+  const mk = () => ({
+    get a() {
+      return ++reads === 1 ? "first" : "later";
+    },
+    d: new Date(0),
+    n: { v: 1 },
+    l: [1],
+  });
+  const stockIn = mk();
+  const stockOut = S.parse(stockIn);
+  assert.equal(stockOut.a, "first");
+  assert.equal(reads, 1);
+  reads = 0;
+  const input = mk();
+  const out = compile(S).parse(input);
+  assert.equal(out.a, "first");
+  assert.equal(reads, 1);
+  assert.equal(Object.isFrozen(out), true);
+  assert.equal(Object.isFrozen(input), false);
+  // Stock's freeze is shallow and its nested output is fresh: same here
+  assert.notEqual(out.d, input.d);
+  assert.notEqual(out.n, input.n);
+  assert.notEqual(out.l, input.l);
+  assert.equal(Object.isFrozen(out.n), false);
+  assert.equal(Object.isFrozen(out.l), false);
+  assert.equal(Object.isFrozen(input.n), false);
+  assert.deepEqual(out, stockOut);
+  // An undeclared own symbol key is dropped by the copy, as stock's assembly drops it
+  const sym = Symbol("s");
+  const T = z.object({ a: z.string() }).readonly();
+  const symIn = { a: "x", [sym]: 1 };
+  assert.deepEqual(Object.getOwnPropertySymbols(T.parse({ a: "x", [sym]: 1 })), []);
+  assert.deepEqual(Object.getOwnPropertySymbols(compile(T).parse(symIn)), []);
+  // The other containers: fresh copies with fresh members where stock rebuilds them
+  const inner = { v: 1 };
+  for (const [R, input2] of [
+    [z.array(z.object({ v: z.number() })).readonly(), [inner]],
+    [z.tuple([z.object({ v: z.number() })]).readonly(), [inner]],
+    [z.record(z.string(), z.object({ v: z.number() })).readonly(), { k: inner }],
+    [z.map(z.string(), z.object({ v: z.number() })).readonly(), new Map([["k", inner]])],
+    [z.set(z.object({ v: z.number() })).readonly(), new Set([inner])],
+  ] as const) {
+    const o = compile(R as z.ZodTypeAny).parse(input2) as object;
+    assert.equal(Object.isFrozen(o), true);
+    assert.equal(reachable(o).has(inner), false, `member aliased for ${R.constructor.name}`);
+    assert.deepEqual(o, (R as z.ZodTypeAny).parse(input2));
+  }
+  assert.equal(Object.isFrozen(inner), false);
+});
+
+test("z.lazy: the getter is resolved once, when the schema is compiled, and never during a parse", () => {
+  // Stock calls the getter on every parse; a compiled parser resolves it once and every analysis
+  // (`.pure`, effects below, rebuild) and every parse use that one schema (zod 4's own compiler
+  // resolves it once as well, on the first parse). A getter that changes its answer is therefore
+  // pinned to its first answer, which the documentation states.
+  let calls = 0;
+  const L = z.lazy(() => (++calls % 2 ? z.string() : z.number()));
+  assert.deepEqual([L.safeParse("x").success, L.safeParse(1).success], [true, true]);
+  calls = 0;
+  const C = compile(L);
+  assert.equal(calls, 1);
+  assert.equal(C.pure, true);
+  assert.equal(C.safeParse("x").success, true);
+  assert.equal(C.safeParse(1).success, false);
+  assert.equal(C.safeParse("y").success, true);
+  assert.equal(calls, 1);
+  // The resolution is shared: a second compile of the same lazy node resolves nothing again
+  compile(z.object({ l: L }));
+  assert.equal(calls, 1);
+  // A lazy over a container is not pure and rebuilds under readonly like stock
+  const R = z.lazy(() => z.object({ a: z.string() })).readonly();
+  const CR = compile(R);
+  assert.equal(CR.pure, false);
+  const rin = { a: "x" };
+  assert.notEqual(CR.parse(rin), rin);
+  assert.equal(Object.isFrozen(rin), false);
+});
+
 summary(noCodegen ? "unit (closure skeletons, --no-codegen)" : "unit (generated skeletons)");

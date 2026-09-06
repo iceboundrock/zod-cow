@@ -49,6 +49,41 @@ function makeRng(seed: number): RNG {
 
 const ABSENT = Symbol("absent");
 
+/**
+ * The default values the current case's schema owns (every `.default(dv)` wrapper records its
+ * value here; reset per case). Stock hands a default to the inner schema, whose containers and
+ * dates build fresh output, so a parsed default never aliases the schema's value except through a
+ * pass-through leaf (`unknown.default(obj)` returns `obj` itself in stock); the runner requires
+ * the compiled output to alias the defaults exactly where stock's does.
+ */
+let caseDefaults: unknown[] = [];
+
+/** Every object reachable from `v` (objects, arrays, Dates, Map keys and values, Set members) */
+function reachable(v: unknown, out = new Set<object>()): Set<object> {
+  if (v === null || (typeof v !== "object" && typeof v !== "function") || out.has(v)) return out;
+  out.add(v);
+  if (v instanceof Map) {
+    for (const [k, x] of v) {
+      reachable(k, out);
+      reachable(x, out);
+    }
+  } else if (v instanceof Set) {
+    for (const x of v) reachable(x, out);
+  } else {
+    for (const k of Reflect.ownKeys(v)) reachable((v as any)[k], out);
+  }
+  return out;
+}
+
+/** Whether `output` shares an object with the case's default values that the input itself did not carry */
+function aliasesDefaults(output: unknown, input: unknown): boolean {
+  if (caseDefaults.length === 0) return false;
+  const owned = reachable(caseDefaults);
+  for (const o of reachable(input)) owned.delete(o);
+  for (const o of reachable(output)) if (owned.has(o)) return true;
+  return false;
+}
+
 const STRINGS = [
   "",
   "a",
@@ -336,6 +371,7 @@ function bWrap(rng: RNG, inner: Built): Built {
     if (dv === undefined && !inner.schema.safeParse(undefined).success) {
       return inner;
     }
+    caseDefaults.push(dv);
     return {
       schema: inner.schema.default(dv as never),
       desc: `${inner.desc}.default(${repr(dv)})`,
@@ -664,6 +700,7 @@ function issueView(issues: readonly any[]): string {
 for (let seed = 1; seed <= SEEDS; seed++) {
   const rng = makeRng(seed);
   for (let i = 0; i < CASES_PER_SEED; i++) {
+    caseDefaults = [];
     const built = bAny(rng, 3);
     let input = built.gen(rng);
     if (input === ABSENT) input = undefined; // the top-level wrapper may be absent
@@ -755,6 +792,16 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       if (!assertDeepEqual(orderedView(ours!.data), orderedView(stock!.data))) {
         failures.push(
           `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}`,
+        );
+        continue;
+      }
+      // A parsed default aliases the schema's default value exactly where stock's output does
+      // (through a pass-through leaf only; a container default is rebuilt at every level)
+      const stockAliases = aliasesDefaults(so, stockInput);
+      const oursAliases = aliasesDefaults(oo, input);
+      if (stockAliases !== oursAliases) {
+        failures.push(
+          `DEFAULT ALIASING MISMATCH stock=${stockAliases} ours=${oursAliases} → ${caseId}`,
         );
         continue;
       }

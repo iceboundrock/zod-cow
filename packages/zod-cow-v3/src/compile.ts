@@ -14,7 +14,13 @@
  * (default map, `z.setErrorMap` override, the schema's create-param map), so messages, params and paths match stock.
  *
  * Compile-time cache: a global WeakMap<schema, validator>, so the same schema instance is compiled only once;
- * the z.lazy getter is resolved lazily on the first parse, which together with "placeholder first, compile later" supports recursive schemas.
+ * a z.lazy getter is resolved once, at compile time (`resolveLazy`, memoized per lazy node and shared by every
+ * analysis), and "placeholder first, compile later" closes the recursion of a recursive schema.
+ *
+ * Stock's rebuild mode (`ctx.force`, see `Ctx` in internal.ts): a `readonly` node and a `default` whose value
+ * fired switch it on for their inner call when stock would build a fresh output there; every container
+ * skeleton below then starts out dirty and assembles its output from the validated values, and a `date` leaf
+ * returns a copy, so what stock rebuilds is rebuilt here and what stock passes through passes through.
  */
 import { z, type ZodErrorMap } from "zod";
 import {
@@ -117,7 +123,7 @@ function subtreeHasEffect(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()):
     case "ZodBranded":
       return subtreeHasEffect(def.type, seen);
     case "ZodLazy":
-      return subtreeHasEffect(def.getter(), seen);
+      return subtreeHasEffect(resolveLazy(def), seen);
     default:
       return false;
   }
@@ -612,7 +618,9 @@ function makeDate(def: any): Validator {
         });
       }
     }
-    return data;
+    // Stock returns `new Date(input.getTime())`; the CoW path keeps the instance and stock's
+    // rebuild mode (below a readonly or a fired default) copies it as stock does
+    return ctx.force ? new Date(data.getTime()) : data;
   };
 }
 
@@ -769,7 +777,7 @@ function makeObject(def: any): Validator {
     }
 
     const vals: any[] = new Array(n);
-    let dirty = false;
+    let dirty = ctx.force; // stock's rebuild mode: always assemble the copy below
     let anyFailed = false;
 
     for (let i = 0; i < n; i++) {
@@ -933,8 +941,8 @@ function makeArray(def: any): Validator {
       });
     }
 
-    let out: any[] = data;
-    let dirty = false;
+    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
+    let out: any[] = dirty ? data.slice() : data;
     let anyFailed = false;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
@@ -1003,7 +1011,7 @@ function makeTuple(def: any): Validator {
       return FAILED;
     }
     let out: any[] = data;
-    let dirty = false;
+    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
     if (data.length > n) {
       // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
       pushIssue(ctx, data, em, {
@@ -1015,6 +1023,8 @@ function makeTuple(def: any): Validator {
       });
       out = data.slice(0, n);
       dirty = true;
+    } else if (dirty) {
+      out = data.slice();
     }
     let anyFailed = false;
     for (let i = 0; i < n; i++) {
@@ -1070,9 +1080,10 @@ function makeRecord(def: any): Validator {
     // that order (`mergeObjectSync`), a pair whose output key is "__proto__" left out. The clean
     // path returns the input by reference; the first forced change rebuilds the clean prefix in
     // order and every later pair is written after it, so a transformed key that collides with a
-    // later entry is overwritten by that entry as in stock.
-    let out: any = data;
-    let dirty = false;
+    // later entry is overwritten by that entry as in stock. Stock's rebuild mode starts out dirty
+    // and writes every pair.
+    let dirty = ctx.force;
+    let out: any = dirty ? {} : data;
     let anyFailed = false;
     for (const k in data) {
       const inVal = data[k];
@@ -1121,8 +1132,8 @@ function makeMap(def: any): Validator {
       pushInvalidType(ctx, data, em, "map");
       return FAILED;
     }
-    let out: Map<any, any> = data;
-    let dirty = false;
+    let dirty = ctx.force; // stock's rebuild mode: a fresh Map from the start
+    let out: Map<any, any> = dirty ? new Map() : data;
     let anyFailed = false;
     let i = 0;
     for (const [k, v] of data) {
@@ -1202,8 +1213,8 @@ function makeSet(def: any): Validator {
         message: max.message,
       });
     }
-    let out: Set<any> = data;
-    let dirty = false;
+    let dirty = ctx.force; // stock's rebuild mode: a fresh Set from the start
+    let out: Set<any> = dirty ? new Set() : data;
     let anyFailed = false;
     let i = 0;
     for (const item of data) {
@@ -1246,22 +1257,10 @@ function makeSet(def: any): Validator {
 
 /* ════════════════════════════ Union / DiscriminatedUnion ════════════════════════════ */
 
-/**
- * Per-option provenance reports for a union whose options disagree on whether stock rebuilds
- * (see `stockRebuilds`): the report of the winning option, or `undefined` where the option reports
- * for itself or the union needs no report at all.
- */
-function unionReports(options: z.ZodTypeAny[]): (boolean | undefined)[] | null {
-  const answers = options.map((o) => stockRebuilds(o));
-  if (answers.every((a) => a === true) || answers.every((a) => a === false)) return null;
-  return answers.map((a) => (a === null ? undefined : a));
-}
-
 function makeUnion(def: any): Validator {
   const em: ZodErrorMap | undefined = def.errorMap;
   const opts: Validator[] = (def.options as z.ZodTypeAny[]).map(go);
   const n = opts.length;
-  const reports = unionReports(def.options);
   return (data, ctx): any => {
     const base = ctx.issues.length;
     // Same as stock: the first valid option wins; failing that, the first dirty option (a value with
@@ -1272,10 +1271,7 @@ function makeUnion(def: any): Validator {
     for (let i = 0; i < n; i++) {
       const r = opts[i]!(data, ctx);
       if (ctx.issues.length === base) {
-        if (r !== FAILED) {
-          if (reports !== null && reports[i] !== undefined) ctx.rebuilt = reports[i]!;
-          return r;
-        }
+        if (r !== FAILED) return r;
         continue; // an option that aborted without an issue cannot happen; keep looking
       }
       const issues = ctx.issues.splice(base); // Truncate the issues produced by this option
@@ -1306,14 +1302,6 @@ function makeDiscriminated(def: any): Validator {
   const map = new Map<unknown, Validator>();
   for (const [v, opt] of optionsMap) map.set(v, go(opt));
   const options = [...optionsMap.keys()];
-  const reports = unionReports(def.options);
-  const reportOf = new Map<unknown, boolean>();
-  if (reports !== null) {
-    (def.options as z.ZodTypeAny[]).forEach((opt, i) => {
-      if (reports[i] === undefined) return;
-      for (const [v, o] of optionsMap) if (o === opt) reportOf.set(v, reports[i]!);
-    });
-  }
   return (data, ctx): any => {
     if (!isObjectType(data)) {
       pushInvalidType(ctx, data, em, "object");
@@ -1324,12 +1312,7 @@ function makeDiscriminated(def: any): Validator {
       pushIssue(ctx, data, em, { code: "invalid_union_discriminator", options, path: [disc] });
       return FAILED;
     }
-    const r = option(data, ctx); // The option's result passes through as it is, issues included (same as stock)
-    if (reports !== null) {
-      const report = reportOf.get(data[disc]);
-      if (report !== undefined) ctx.rebuilt = report;
-    }
-    return r;
+    return option(data, ctx); // The option's result passes through as it is, issues included (same as stock)
   };
 }
 
@@ -1461,10 +1444,20 @@ function makeEffects(def: any): Validator {
 function makeDefault(def: any): Validator {
   const inner = go(def.innerType);
   const getDefaultValue: () => unknown = def.defaultValue;
+  // Stock hands the default value to the inner schema, whose containers and dates build fresh
+  // output, so a parsed default never aliases the schema's default value (a caller mutating the
+  // result would otherwise change every later parse). Where stock would rebuild, the inner call
+  // runs in stock's rebuild mode; a primitive or pass-through default needs nothing.
+  const rebuilds = mayRebuild(def.innerType);
   return (data, ctx) => {
     if (data === undefined) {
       // Same as stock: the default value also runs through the inner validation (an invalid default → validation failure)
-      return inner(getDefaultValue(), ctx); // A new value → the parent marks dirty automatically
+      if (!rebuilds) return inner(getDefaultValue(), ctx); // A new value → the parent marks dirty automatically
+      const outer = ctx.force;
+      ctx.force = true;
+      const r = inner(getDefaultValue(), ctx); // a throw abandons this ctx (no restore needed)
+      ctx.force = outer;
+      return r;
     }
     return inner(data, ctx);
   };
@@ -1473,21 +1466,13 @@ function makeDefault(def: any): Validator {
 function makeCatch(def: any): Validator {
   const inner = go(def.innerType);
   const catchValue: (p: { error: ZcError; input: unknown }) => unknown = def.catchValue;
-  // Provenance for a `readonly` above (see `stockRebuilds`): stock hands the fallback callback the
-  // raw input, so a callback returning it gives readonly the input to freeze in place, where the
-  // success path gives it the inner schema's output
-  const innerRebuilds = stockRebuilds(def.innerType);
-  const reports = innerRebuilds !== false;
   return (data, ctx) => {
     const base = ctx.issues.length;
     const r = inner(data, ctx); // A throwing callback propagates, as in stock (no try/catch)
-    if (r !== FAILED && ctx.issues.length === base) {
-      if (reports && innerRebuilds !== null) ctx.rebuilt = innerRebuilds;
-      return r;
-    }
-    if (reports) ctx.rebuilt = false;
+    if (r !== FAILED && ctx.issues.length === base) return r;
     // Aborted or dirty: the inner issues are dropped (stock parses into a separate context) and
-    // handed to the catch callback, which gets the input too
+    // handed to the catch callback, which gets the input too (the fallback it returns is stock's
+    // output as it is, raw, never rebuilt: a readonly above freezes it in place like stock)
     const issues = ctx.issues.splice(base);
     return catchValue({
       get error() {
@@ -1499,33 +1484,23 @@ function makeCatch(def: any): Validator {
 }
 
 /**
- * Whether stock zod builds a fresh container for this schema's valid output (object / array /
- * tuple / record / map / set, or a wrapper around one), so that `readonly` freezes a copy there
- * and leaves the caller's input untouched. A pass-through leaf (`any` / `unknown`) returns the
- * input itself in stock and is frozen in place there too; a Date is rebuilt by stock as well.
- *
- * `true`: always rebuilt; `false`: never (the input passes through); `null`: decided by the branch
- * taken at run time, which the deciding node reports through `ctx.rebuilt` (a union whose options
- * disagree, a catch whose fallback may hand back the input, a pipeline of two such nodes).
- *
- * A transform, refinement or preprocess reports its inner schema: `readonly` only consults this
- * when the callback handed back the very reference it received, and stock's callback received the
- * inner schema's output (fresh over a container, the input over a pass-through leaf). A callback
- * returning another reference is frozen in place, as stock freezes what it is handed.
+ * Whether stock zod may build a fresh output for this schema's valid value on some path: a
+ * container (object / array / tuple / record / map / set), a `date` (`new Date(input.getTime())`),
+ * or a wrapper, union option, effect or pipeline side around one. A pass-through leaf (`any` /
+ * `unknown`) and every primitive leaf return the input itself in stock. A `readonly` and a fired
+ * `default` switch stock's rebuild mode on (`ctx.force`) for an inner schema that may rebuild;
+ * `isStaticPure` counts a `readonly` over such a schema as impure.
  */
-function stockRebuilds(
-  schema: z.ZodTypeAny,
-  memo = new Map<z.ZodTypeAny, boolean | null>(),
-): boolean | null {
+function mayRebuild(schema: z.ZodTypeAny, memo = new Map<z.ZodTypeAny, boolean>()): boolean {
   const known = memo.get(schema);
   if (known !== undefined) return known;
   memo.set(schema, true); // a cycle (through z.lazy) always runs through a container
-  const answer = stockRebuildsOf((schema as any)._def, memo);
+  const answer = mayRebuildOf((schema as any)._def, memo);
   memo.set(schema, answer);
   return answer;
 }
 
-function stockRebuildsOf(def: any, memo: Map<z.ZodTypeAny, boolean | null>): boolean | null {
+function mayRebuildOf(def: any, memo: Map<z.ZodTypeAny, boolean>): boolean {
   switch (def.typeName) {
     case "ZodObject":
     case "ZodArray":
@@ -1533,67 +1508,53 @@ function stockRebuildsOf(def: any, memo: Map<z.ZodTypeAny, boolean | null>): boo
     case "ZodRecord":
     case "ZodMap":
     case "ZodSet":
-    case "ZodDate": // stock returns `new Date(input.getTime())`
+    case "ZodDate":
       return true;
     case "ZodUnion":
-    case "ZodDiscriminatedUnion": {
-      const answers = (def.options as z.ZodTypeAny[]).map((o) => stockRebuilds(o, memo));
-      if (answers.every((a) => a === true)) return true;
-      if (answers.every((a) => a === false)) return false;
-      return null;
-    }
+    case "ZodDiscriminatedUnion":
+      return (def.options as z.ZodTypeAny[]).some((o) => mayRebuild(o, memo));
     case "ZodEffects":
-      return stockRebuilds(def.schema, memo);
-    case "ZodCatch":
-      // The fallback callback may return the raw input; only a never-rebuilding inner is static
-      return stockRebuilds(def.innerType, memo) === false ? false : null;
+      return mayRebuild(def.schema, memo);
     case "ZodOptional":
     case "ZodNullable":
     case "ZodDefault":
+    case "ZodCatch": // the fallback is returned raw; the success path is the inner schema's output
     case "ZodReadonly":
-      return stockRebuilds(def.innerType, memo);
-    case "ZodPipeline": {
-      // Either side rebuilding gives the `out` side a fresh reference in stock
-      const a = stockRebuilds(def.in, memo);
-      const b = stockRebuilds(def.out, memo);
-      if (a === true || b === true) return true;
-      if (a === false && b === false) return false;
-      return null;
-    }
+      return mayRebuild(def.innerType, memo);
+    case "ZodPipeline":
+      return mayRebuild(def.in, memo) || mayRebuild(def.out, memo);
     case "ZodBranded":
-      return stockRebuilds(def.type, memo);
+      return mayRebuild(def.type, memo);
     case "ZodLazy":
-      return stockRebuilds(def.getter(), memo);
+      return mayRebuild(resolveLazy(def), memo);
     default:
       return false;
   }
 }
 
-function shallowCopy(v: object): object {
-  if (Array.isArray(v)) return v.slice();
-  if (v instanceof Date) return new Date(v.getTime());
-  if (v instanceof Map) return new Map(v);
-  if (v instanceof Set) return new Set(v);
-  return { ...v };
-}
-
 function makeReadonly(def: any): Validator {
   const inner = go(def.innerType);
-  const rebuilds = stockRebuilds(def.innerType);
+  // Stock freezes the output it built: a fresh container where the inner schema rebuilds, the
+  // input itself over a pass-through leaf. The inner call runs in stock's rebuild mode, so every
+  // container and date below assembles stock's output from the validated values (a getter read
+  // once, undeclared symbol keys dropped, nested containers fresh) and the caller's input is never
+  // frozen in place where stock leaves it alone (#27); a callback in that subtree receives what
+  // stock's callback receives, and what it hands back is what gets frozen, as in stock.
+  const rebuilds = mayRebuild(def.innerType);
   return (data, ctx) => {
     const base = ctx.issues.length;
-    let r = inner(data, ctx);
+    let r: any;
+    if (rebuilds) {
+      const outer = ctx.force;
+      ctx.force = true;
+      r = inner(data, ctx); // a throw abandons this ctx (no restore needed)
+      ctx.force = outer;
+    } else {
+      r = inner(data, ctx);
+    }
     if (r === FAILED) return FAILED;
     if (ctx.issues.length !== base) return r; // dirty: stock does not freeze a dirty value
-    if (r !== null && (typeof r === "object" || typeof r === "function")) {
-      // Stock freezes the output it built. Where that output would be a fresh container, freeze a
-      // copy so the caller's input is not frozen in place (#27); a pass-through leaf is frozen in
-      // place, exactly as stock does. When the inner schema decides that per branch (a union, a
-      // catch) the deciding node reported it through `ctx.rebuilt`.
-      if (r === data && (rebuilds === true || (rebuilds === null && ctx.rebuilt)))
-        r = shallowCopy(r);
-      Object.freeze(r);
-    }
+    if (r !== null && (typeof r === "object" || typeof r === "function")) Object.freeze(r);
     return r;
   };
 }
@@ -1601,25 +1562,36 @@ function makeReadonly(def: any): Validator {
 function makePipe(def: any): Validator {
   const a = go(def.in);
   const b = go(def.out);
-  // Both sides deciding provenance at run time (see `stockRebuilds`): a rebuilt `in` output stays
-  // fresh through a pass-through `out` branch, so the reports combine as an OR
-  const bothReport = stockRebuilds(def.in) === null && stockRebuilds(def.out) === null;
   return (data, ctx) => {
     const base = ctx.issues.length;
     const r = a(data, ctx);
     if (r === FAILED) return FAILED;
     if (ctx.issues.length !== base) return r; // dirty: stock stops before the `out` side
-    if (!bothReport) return b(r, ctx); // The dirty mark propagates naturally along the chain
-    const inRebuilt = ctx.rebuilt;
-    const out = b(r, ctx);
-    if (inRebuilt) ctx.rebuilt = true;
-    return out;
+    return b(r, ctx); // The dirty mark propagates naturally along the chain
   };
 }
 
 /* ════════════════════════════ Compile cache and dispatcher ════════════════════════════ */
 
 const cache = new WeakMap<z.ZodTypeAny, Validator>();
+
+/**
+ * The schema behind a z.lazy node, resolved once per node and memoized: the analyses
+ * (`subtreeHasEffect`, `mayRebuild`, `isStaticPure`) and the compiled validator all see the same
+ * schema, and no parse calls the getter. Stock calls it on every parse; zod 4's own compiler
+ * resolves it once as well (on the first parse) and caches the result. The getter is the one piece
+ * of user code `compile()` runs, once, and a getter whose answer changes over time is pinned to
+ * its first answer (documented under known limitations).
+ */
+const lazyMemo = new WeakMap<object, z.ZodTypeAny>();
+function resolveLazy(def: any): z.ZodTypeAny {
+  let inner = lazyMemo.get(def);
+  if (inner === undefined) {
+    inner = (def.getter as () => z.ZodTypeAny)();
+    lazyMemo.set(def, inner);
+  }
+  return inner;
+}
 
 /**
  * Compilation entry point: schema tree → specialized validation closure.
@@ -1728,14 +1700,10 @@ function build(def: any): Validator {
       return makeReadonly(def);
     case "ZodPipeline":
       return makePipe(def);
-    case "ZodLazy": {
-      const getter: () => z.ZodTypeAny = def.getter;
-      let inner: Validator | null = null;
-      return (data, ctx) => {
-        if (inner === null) inner = go(getter()); // Resolved on the first parse; the cache hit closes the recursion
-        return inner(data, ctx);
-      };
-    }
+    case "ZodLazy":
+      // Resolved once, here; a recursive schema finds its placeholder in the cache, which closes
+      // the recursion (the lazy node's validator is then that placeholder, one forwarding call)
+      return go(resolveLazy(def));
     case "ZodBranded":
       return go(def.type);
     default:
@@ -1801,16 +1769,15 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodNullable":
       return isStaticPure(def.innerType, seen);
     case "ZodReadonly":
-      // Frozen copy for containers (#27): only a pass-through leaf keeps the reference. A `null`
-      // answer (the branch taken decides at run time, see `stockRebuilds`) may rebuild, so it is
-      // not pure either
-      return stockRebuilds(def.innerType) === false && isStaticPure(def.innerType, seen);
+      // Frozen copy where stock rebuilds (#27, `mayRebuild`, on any branch): only a readonly over
+      // a pass-through leaf keeps the reference
+      return !mayRebuild(def.innerType) && isStaticPure(def.innerType, seen);
     case "ZodPipeline":
       return isStaticPure(def.in, seen) && isStaticPure(def.out, seen);
     case "ZodBranded":
       return isStaticPure(def.type, seen);
     case "ZodLazy":
-      return isStaticPure(def.getter(), seen);
+      return isStaticPure(resolveLazy(def), seen);
     default:
       return false; // Default/Catch/transform/preprocess/Pipe etc.: may produce a new value
   }

@@ -35,6 +35,11 @@ import type { Node } from "./product.js";
  * layouts take the same slice at the same point and walk it: the rest loop reads its elements off the slice,
  * a rest hole is `Object.hasOwn` on the slice, and the prefix rebuild takes the rest part from it. It is the
  * one allocation on the clean path of a tuple with a rest element (a tuple without one allocates nothing).
+ * The sync layout builds the slice by hand (#87): `Array.prototype.slice` costs a near-constant 30 ns per call
+ * (its species lookup and generic entry, not the copy), where an inlined `new Array(n)` plus a copy loop costs
+ * a third at a short rest. The loop reads the length once before any rest element runs, gives an empty copy
+ * when the input is shorter than the fixed slots, and writes a slot only when its value is defined or the
+ * index is own, so a hole stays a hole as under `slice` and the hole test below needs no change.
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -320,7 +325,20 @@ export function emitCoWTuple(
   /* Segment 3: rest [N, L) -- the official ungated per-slot write over stock's slice, taken here in the sync layout
      (after every fixed slot ran, before any rest element runs, #78) and before the await in the async one (#77) */
   if (rest && restProduct) {
-    if (!anyAsync) ctx.write(`const ${restReads} = ${accessor}.slice(${N});`);
+    if (!anyAsync) {
+      // Stock's `input.slice(N)` by hand (#87): the length read once, a short input an empty copy, a hole kept
+      ctx.write(
+        `const ${restReads} = new Array(${accessor}.length > ${N} ? ${accessor}.length - ${N} : 0);`,
+      );
+      ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
+      ctx.indented(() => {
+        ctx.write(`const v = ${accessor}[${N} + j];`);
+        ctx.write(
+          `if (v !== undefined || Object.hasOwn(${accessor}, ${N} + j)) ${restReads}[j] = v;`,
+        );
+      });
+      ctx.write(`}`);
+    }
     ctx.write(`for (let i = ${N}; i < ${N} + ${restReads}.length; i++) {`);
     ctx.indented(() => {
       // The sync layout calls the rest product on the sliced element in the loop; the async one reads its settled result

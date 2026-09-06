@@ -30,10 +30,17 @@ export function isPure(schema: Node): boolean {
     // Wrappers: the wrapper's own checks first (an overwrite, a superRefine or an async refine on the
     // wrapper rewrites or times the value exactly as on a leaf, and the validator would return the
     // input, #57; on a wrapper around a container the same verdict sent the chain to the validator,
-    // which keeps the undeclared keys stock strips, #56), then the inner
+    // which keeps the undeclared keys stock strips, #56), then the inner. Above a container the
+    // verdict holds only where the chain gets a skeleton, so the wrapper's checks must pass the gate
+    // `cowSafeContainerForChild` applies: a length / size check attached through `.check()` is a
+    // pure predicate on a leaf but sends a container chain to the official parser, and judging it
+    // pure here would hand the chain to the validator, which keeps the undeclared keys stock strips
+    // (second review of #68).
     case "optional":
-    case "nullable":
-      return leafChecksArePure(schema) && isPure(def.innerType);
+    case "nullable": {
+      const gate = unwrapsToContainer(def.innerType) ? wrapperChecksAreCowSafe : leafChecksArePure;
+      return gate(schema) && isPure(def.innerType);
+    }
     // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
     // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
     // The verdict holds only where a skeleton is actually emitted for the container (the top level and the
@@ -175,7 +182,8 @@ function checksAreCowSafe(schema: Node): boolean {
  * `.refine` predicates only (`custom` with a sync `fn` and no custom `when`), which `containerChecksFn`
  * emits and `emitBoxedContainer` runs on the layer's value, the shortcut `undefined` / `null` included (#56).
  * A length / size check reaches a wrapper only through `.check()` and, like an overwrite, a superRefine or
- * an async refine, sends the chain to the official parser instead (`isPure` rejects it too).
+ * an async refine, sends the chain to the official parser instead; `isPure` applies this gate too on a
+ * wrapper above a container, so the chain never falls through to the validator.
  */
 function wrapperChecksAreCowSafe(schema: Node): boolean {
   const checks = schema._zod.def.checks;

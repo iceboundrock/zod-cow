@@ -261,7 +261,7 @@ return out;
 | def.type | 判定 | 理由 |
 |---|---|---|
 | string/number/boolean/bigint/symbol/null/undefined/void/nan/date/any/unknown/literal/enum | `leafChecksArePure` | 官方产物透传 accessor；但 checks 例外见下 |
-| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure` 且 inner 纯 | 值透传；包装层上的 overwrite、superRefine 或 async refine 像叶子上一样改写值或改变时序（#57），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56） |
+| optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite、superRefine 或 async refine 像叶子上一样改写值或改变时序（#57），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
 | union | 全分支纯，且没有分支是容器或经 optional / nullable 剥壳后是容器 | 分支透传；容器分支需要 union 位置给不出的骨架，见陷阱四（#47） |
@@ -302,7 +302,10 @@ checks，容器输出则由内到外运行每一层的 checks。带这类 checks
 门控（`wrapperChecksAreCowSafe`）只放行 `.refine` 谓词，即 `containerChecksFn` 能发射的 checks；包装层上的其他
 check（overwrite、superRefine、async refine、经 `.check()` 附加的长度 / 大小检查）让整条链走官方 parser，`isPure`
 同样拒绝它（它以前只递归 inner 而不看包装层的 checks，于是这样的链走了 validator 并保留未声明键；同一行也修复了
-#57 的叶子情形）。差分生成器从未构造过这种形状：一个子节点最多套一层包装，而其 refine 谓词对容器永远不会失败。
+#57 的叶子情形）。在容器之上 `isPure` 用的是骨架的门控而不是叶子的：包装层上的长度 / 大小检查在叶子上是纯谓词，
+而对门控刚拒绝的容器链再判纯，就把 `z.object({ a: z.number() }).optional().check(z.minLength(1))` 交给了
+validator，保留了 stock 会剥掉的未声明键（#68 第二轮评审发现；修法是 inner 剥壳后落在容器时从叶子门控切换到
+包装门控）。差分生成器从未构造过这种形状：一个子节点最多套一层包装，而其 refine 谓词对容器永远不会失败。
 现在三个被包装的子节点里有一个在包装层之上再叠一个 check（同步或 async refine、overwrite），refine 谓词也拒绝恰好
 三个条目的容器；在未修复的引擎上，每一遍各找出 20 000 case 中的 5 个。
 
@@ -549,7 +552,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（19 组行为断言，第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（19 组行为断言，第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser，经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套

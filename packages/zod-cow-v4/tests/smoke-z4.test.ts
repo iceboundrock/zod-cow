@@ -1363,6 +1363,82 @@ import { compile } from "../src/index.js";
     "superRefine on the wrapper rewrites like stock",
   );
   console.log("  async refine and superRefine on the wrapper take the official parser ✓");
+
+  // A length / size check attached to the wrapper through `.check()` is not a predicate the skeleton
+  // runs, so the chain must take the official parser, which strips like stock. `isPure` used to admit
+  // the check as a pure leaf predicate, so the chain took the validator and kept the undeclared key
+  // stock strips (P1 of the second review of #68). Map and set were spared only because `isPure`
+  // rejects them by default; they are pinned here so the wrapper policy is explicit for every kind.
+  // zod's typings reject such a check on the wrapper's type (the value may be `undefined` / `null`),
+  // so the shape is reached at run time only, or through a cast as here.
+  const withExtra = { a: 1, extra: 2 };
+  const wrapperCheck = (c: unknown) => c as never;
+  const lengthChecked: Array<[string, z.ZodType, unknown]> = [
+    [
+      "object",
+      z
+        .object({ a: z.number() })
+        .optional()
+        .check(wrapperCheck(z.minLength(1))),
+      withExtra,
+    ],
+    [
+      "array",
+      z
+        .array(z.object({ a: z.number() }))
+        .nullable()
+        .check(wrapperCheck(z.maxLength(5))),
+      [withExtra],
+    ],
+    [
+      "tuple",
+      z
+        .tuple([z.object({ a: z.number() })])
+        .optional()
+        .check(wrapperCheck(z.length(1))),
+      [withExtra],
+    ],
+    [
+      "map",
+      z
+        .map(z.string(), z.number())
+        .optional()
+        .check(wrapperCheck(z.maxSize(5))),
+      new Map([["a", 1]]),
+    ],
+    [
+      "set",
+      z
+        .set(z.number())
+        .nullable()
+        .check(wrapperCheck(z.minSize(1))),
+      new Set([1]),
+    ],
+  ];
+  for (const [name, S, input] of lengthChecked) {
+    const stock = S.parse(input);
+    assert.notEqual(stock, input, `${name}: stock rebuilds`);
+    const out = compile(S).parse(input);
+    assert.deepEqual(out, stock, `${name}: a wrapper length / size check strips like stock`);
+    assert.notEqual(out, input, `${name}: the chain takes the official parser`);
+    const P = z.object({ k: S, keep: z.object({ n: z.number() }) });
+    const pIn = { k: input, keep: { n: 1 } };
+    const pOut = compile(P).parse(pIn);
+    assert.deepEqual(pOut, P.parse(pIn), `${name}: nested, strips like stock`);
+    assert.notEqual(pOut, pIn, `${name}: nested, the parent copies`);
+    assert.equal(pOut.keep, pIn.keep, `${name}: nested, the sibling still shares`);
+  }
+  assert.equal(
+    compile(
+      z
+        .array(z.number())
+        .optional()
+        .check(wrapperCheck(z.maxLength(1))),
+    ).safeParse([1, 2]).success,
+    false,
+    "a wrapper length check still rejects",
+  );
+  console.log("  a wrapper length / size check takes the official parser and strips like stock ✓");
 }
 
 /* ── 19. a value-rewriting check on an optional / nullable wrapper around a leaf is impure (#57) ── */

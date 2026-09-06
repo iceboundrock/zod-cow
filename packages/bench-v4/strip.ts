@@ -77,8 +77,9 @@ export async function runStripParity(): Promise<ScenarioRun> {
       name: "undeclared symbol key",
       input: withSymbol,
       accept: true,
-      outputDiffers:
-        "zod strips own symbol keys (its strip mode keeps declared keys only), ArkType's undeclared-key deletion sees string keys only and keeps the symbol",
+      outputDiffers: {
+        ark: "zod strips own symbol keys (its strip mode keeps declared keys only), ArkType's undeclared-key deletion sees string keys only and keeps the symbol",
+      },
     },
     {
       name: "extra key next to an invalid field",

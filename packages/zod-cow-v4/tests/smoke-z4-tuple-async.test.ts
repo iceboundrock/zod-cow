@@ -1123,16 +1123,48 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     assert.equal(r.data, holder.input, "the clean output is still the input by reference");
     ok("a refine predicate on the rest sees the sliced value, like stock");
   }
-  // Code pin: a rest tuple's sync skeleton takes the slice once; a fixed tuple allocates nothing on its clean path
+  // A short input under an optional tail: the copy is empty (stock's slice is), never a `new Array(negative)`
+  {
+    const S = z.tuple([z.string(), z.string().optional()], z.number());
+    const C = compile(S);
+    assert.ok(!C.async && !C.stock && !/_zod/.test(C.code ?? ""));
+    const short = ["a"];
+    assert.deepEqual(S.parse(short), ["a"]);
+    assert.equal(C.parse(short), short, "a short input with an empty rest is clean");
+    const full = ["a", "b", 1, 2];
+    assert.equal(C.parse(full), full);
+    assert.deepEqual(C.safeParse(["a", "b", "x"]).success, false);
+    ok("a short input under an optional tail has an empty rest copy, like stock's slice");
+  }
+  // A rest hole over an inherited undefined is an own slot in stock's output (finding 5 of the #70 review for a rest
+  // slot): the copy keeps a hole where the index is not own, so the rest loop materializes it; `slice` (#86) read the
+  // inherited value through `HasProperty` and made it own, and the clean path returned the input with the hole
+  {
+    const S = z.tuple([z.string()], z.number().optional());
+    const C = compile(S);
+    const make = () => {
+      const a: unknown[] = ["h"];
+      a.length = 2;
+      Object.setPrototypeOf(a, Object.assign(Object.create(Array.prototype), { 1: undefined }));
+      return a;
+    };
+    const stock = S.parse(make()) as unknown[];
+    assert.ok(Object.hasOwn(stock, 1) && stock.length === 2, "stock materializes the rest hole");
+    const cow = C.parse(make()) as unknown[];
+    assert.deepEqual(cow, stock);
+    assert.ok(Object.hasOwn(cow, 1) && cow.length === 2, "the skeleton materializes it too");
+    ok("a rest hole over an inherited undefined is materialized, like stock");
+  }
+  // Code pin: a rest tuple's sync skeleton copies the rest by hand once (#87: `slice` pays a fixed builtin cost);
+  // a fixed tuple allocates nothing on its clean path
+  const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
-    /\.slice\(1\)/.test(compile(z.tuple([z.string()], z.string())).code ?? ""),
-    "the sync rest layout slices at items.length",
+    /new Array\(/.test(restCode) && !/\.slice\(/.test(restCode),
+    "the sync rest layout copies by hand",
   );
-  assert.ok(
-    !/\.slice\(/.test(compile(z.tuple([z.string(), z.number().optional()])).code ?? ""),
-    "a tuple without a rest takes no slice",
-  );
-  ok("the slice is emitted for a rest tuple only");
+  const fixedCode = compile(z.tuple([z.string(), z.number().optional()])).code ?? "";
+  assert.ok(!/new Array\(|\.slice\(/.test(fixedCode), "a tuple without a rest takes no copy");
+  ok("the rest copy is emitted for a rest tuple only");
 }
 
 head("async failure path falls back to stock safeParseAsync (official issues structure)");

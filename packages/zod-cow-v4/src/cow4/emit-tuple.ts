@@ -12,7 +12,9 @@ import { isAsyncProduct, type Node } from "./product.js";
 
 /**
  * The tuple CoW skeleton -- line for line with the official generateTupleCheck; the only difference is rewriting
- * the "unconditional new container" (const out = []) into reference comparison for dirtiness + conditional slice copy:
+ * the "unconditional new container" (const out = []) into reference comparison for dirtiness + a prefix rebuild at
+ * the first change (the clean slots before it read from the input a second time, #36; every later slot written from
+ * the loop's single read, review of #70):
  *
  *   Length guard (same as the official one, optinStart/optoutStart computed at compile time)
  *   Segment 1 [0, optoutStart): the official unconditional branch out[i] = child(input[i])
@@ -22,7 +24,8 @@ import { isAsyncProduct, type Node } from "./product.js";
  *           so .length cannot be read and has to be tracked explicitly)
  *   Segment 3 rest [N, L): the official ungated per-slot write → write back on reference comparison
  *
- * Cleanliness: out === input (a copy never happened) ⇔ every slot reference is unchanged and there was no truncation/fill.
+ * Cleanliness: out === input (a copy never happened) ⇔ every slot reference is unchanged, no hole was seen and there
+ * was no truncation/fill. Once copied, every visited slot is written.
  * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
  */
 export function emitCoWTuple(
@@ -58,7 +61,14 @@ export function emitCoWTuple(
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
 
-  /** Value-shaped slot (parser/cow/async product): test for INVALID + reference comparison + slice write-back at the first dirt.
+  /** The first forced change at slot `idxExpr`: a fresh array holding the clean prefix [0, idxExpr), read from the input a
+   *  second time (#36); every later slot is written from the loop's single read (review of #70) */
+  const copyAt = (idxExpr: string): string =>
+    `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
+  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too) */
+  const isHole = (eVar: string, idxExpr: string): string =>
+    `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
+  /** Value-shaped slot (parser/cow/async product): test for INVALID + reference comparison + prefix rebuild at the first dirt.
    *  eVar=null marks an absent slot (the official code unconditionally does out[i] = result, including materializing undefined / extending the shape) → write unconditionally. */
   const emitValueSlot = (
     p: ChildProduct,
@@ -74,16 +84,22 @@ export function emitCoWTuple(
     ctx.write(`if (${t} === INVALID) return INVALID;`);
     if (eVar === null) {
       // Absent slot: the official code writes out[i] unconditionally (materializing even when t === undefined, keeping output length/content identical)
-      ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+      ctx.write(copyAt(idxExpr));
       ctx.write(`${out}[${idxExpr}] = ${t};`);
     } else {
-      ctx.write(`if (${t} !== ${eVar}) {`);
+      ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${t};`);
+      ctx.write(`else if (${t} !== ${eVar} || (${isHole(eVar, idxExpr)})) {`);
       ctx.indented(() => {
-        ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+        ctx.write(copyAt(idxExpr));
         ctx.write(`${out}[${idxExpr}] = ${t};`);
       });
       ctx.write(`}`);
     }
+  };
+  /** A hole: stock writes every slot it visits, so an index absent from the input is an own undefined in its output (#67) */
+  const emitHole = (idxExpr: string): void => {
+    ctx.write(copyAt(idxExpr));
+    ctx.write(`${out}[${idxExpr}] = undefined;`);
   };
   /** Check-shaped slot (validator product): answers pass/fail only; when absent the official code still materializes out[i] = undefined (a pure subtree's output = input = undefined) */
   const emitValidatorSlot = (
@@ -96,13 +112,19 @@ export function emitCoWTuple(
     const isA = p.kind === "async";
     if (isA) ctx.async = true;
     ctx.write(`if ((${isA ? "await " : ""}${f}(${argExpr})) === INVALID) return INVALID;`);
-    if (!present) {
+    if (present) {
+      // argExpr is the local holding the value read from the slot: written once copied, a hole is materialized
+      ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${argExpr};`);
+      ctx.write(`else if (${isHole(argExpr, idxExpr)}) {`);
+      ctx.indented(() => emitHole(idxExpr));
+      ctx.write(`}`);
+    } else {
       // absent + validator (pure optional and friends): stock materializes an undefined slot (output length i+1 > input) → must write
-      ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+      ctx.write(copyAt(idxExpr));
       ctx.write(`${out}[${idxExpr}] = undefined;`);
     }
   };
-  /** The official truncation in three states (the CoW version of out.length = i): already copied → truncate for real; original reference with target ≠ the input length → copy then truncate; original reference with target = the input length → output = input, no operation */
+  /** The official truncation in three states (the CoW version of out.length = i): already copied → truncate for real; original reference with target ≠ the input length → the prefix [0, i) is the copy; original reference with target = the input length → output = input, no operation */
   const emitTruncate = (i: number): void => {
     ctx.write(`if (${out} !== ${accessor}) {`);
     ctx.indented(() => {
@@ -110,8 +132,7 @@ export function emitCoWTuple(
     });
     ctx.write(`} else if (${i} !== ${accessor}.length) {`);
     ctx.indented(() => {
-      ctx.write(`${out} = ${accessor}.slice();`);
-      ctx.write(`${out}.length = ${i};`);
+      ctx.write(copyAt(String(i)));
     });
     ctx.write(`}`);
   };
@@ -196,7 +217,7 @@ export function emitCoWTuple(
             });
             ctx.write(`} else {`);
             ctx.indented(() => {
-              ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+              ctx.write(copyAt(String(i)));
               ctx.write(`${out}[${i}] = ${t};`);
               ctx.write(`${fillLen} = ${i + 1};`);
             });
@@ -222,13 +243,18 @@ export function emitCoWTuple(
       ctx.write(`const ${e} = ${accessor}[i];`);
       if (restProduct.kind === "validator") {
         ctx.write(`if ((${isA ? "await " : ""}${f}(${e})) === INVALID) return INVALID;`);
+        ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${e};`);
+        ctx.write(`else if (${isHole(e, "i")}) {`);
+        ctx.indented(() => emitHole("i"));
+        ctx.write(`}`);
       } else {
         const t = ctx.var();
         ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(${e});`);
         ctx.write(`if (${t} === INVALID) return INVALID;`);
-        ctx.write(`if (${t} !== ${e}) {`);
+        ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${t};`);
+        ctx.write(`else if (${t} !== ${e} || (${isHole(e, "i")})) {`);
         ctx.indented(() => {
-          ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+          ctx.write(copyAt("i"));
           ctx.write(`${out}[i] = ${t};`);
         });
         ctx.write(`}`);

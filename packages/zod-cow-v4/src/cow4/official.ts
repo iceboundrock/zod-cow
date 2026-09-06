@@ -19,13 +19,19 @@ function makeIsland(schema: Node): Fn {
 }
 
 /**
- * Channel for async subtrees: a black-box island returning Promise<output value | INVALID>.
- * The skeleton emits await at the call site and sets CodeCtx.async → the whole skeleton becomes an async function.
+ * Channel for async subtrees. Marked async so the skeleton emits `await` (or the settlement log of
+ * the set / map / record skeletons) at the call site. The island itself is not an async function:
+ * a run that came back synchronously is answered synchronously, so a sync entry of a set, map or
+ * record keeps its place in stock's write order (stock's runtime writes a sync entry inside its
+ * loop and an async one when its promise settles), and an async run adds exactly one `.then`
+ * before the skeleton's own, the same number of microtask hops for every entry (review of #70).
  */
 export function makeAsyncIsland(schema: Node): Fn {
-  return markAsync(async (value: unknown): Promise<unknown> => {
-    const r = await schema._zod.run({ value, issues: [] }, {});
-    return r.issues.length === 0 ? r.value : INVALID;
+  const settle = (r: { issues: unknown[]; value: unknown }): unknown =>
+    r.issues.length === 0 ? r.value : INVALID;
+  return markAsync((value: unknown): unknown => {
+    const r = schema._zod.run({ value, issues: [] }, {});
+    return r instanceof Promise ? r.then(settle) : settle(r);
   });
 }
 

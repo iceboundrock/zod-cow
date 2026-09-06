@@ -207,7 +207,7 @@ return out;
 | 官方 parser | zc-z4 骨架 | 说明 |
 |---|---|---|
 | `const v8 = {...}` 无条件 | `if (!dirty && !extra) return input;` | CoW 核心：干净输入零分配 |
-| `const v5 = new Array(len)` | （元素循环内）`out = input.slice()` | 数组同理，首脏才 slice |
+| `const v5 = new Array(len)` | （元素循环内）`out = new Array(len)` 加干净前缀 | 数组同理，首脏才重建前缀，之后每个元素只写一次（#70） |
 | `if (!c1.test(v2)) return INVALID` | 同左（assertOnly 产物内部） | 叶子校验 100% 官方 |
 | （输出组装隐式处理键存在性） | `{ ...input }` | 扩展天然保真 presence/键序 |
 | `for (const k in …)` unknown 探测 | 同左逐行照抄 | strict/strip/loose 语义对齐 |
@@ -349,19 +349,27 @@ keyType._zod.values 存在且非 partial?
 if (!c0(input)) return INVALID;                            // util.isPlainObject（官方同名函数）
 let x0 = input, x1 = false;
 for (const k of Reflect.ownKeys(input)) {
-  if (k === "__proto__") continue;
+  if (k === "__proto__") { if (!x1) { x1 = true; /* 重建干净前缀 */ } continue; }  // stock 跳过这对键值（#67）
   if (!c1.call(input, k)) {                                // propertyIsEnumerable（官方同款）
-    if (typeof k === "symbol" && !x1) { x1 = true; x0 = { ...input }; }  // 不可枚举的自有 symbol：stock 的重建会丢弃它（#51）
+    if (typeof k !== "symbol") continue;
+    if (!x1) { x1 = true; /* 重建干净前缀 */ }             // 不可枚举的自有 symbol：stock 的重建会丢弃它（#51）
     continue;
   }
   if (typeof k !== "string") return INVALID;               // symbol 键官方拒绝
   const vIn = input[k];
   const t = cValue(vIn);                                   // 值产物（validator/parser/cow 子骨架）
   if (t === INVALID) return INVALID;
-  if (t !== vIn) {                                         // 引用比较
-    if (!x1) { x1 = true; x0 = { ...input }; }
-    x0[k] = t;
+  if (!x1) {
+    if (t === vIn) continue;                               // 引用比较：干净的键值对
+    x1 = true;                                             // 第一对脏键值：重放 stock 到此为止的组装
+    x0 = {};
+    for (const k2 of Reflect.ownKeys(input)) {
+      if (k2 === k) break;
+      if (k2 === "__proto__" || !c1.call(input, k2)) continue;
+      x0[k2] = input[k2];
+    }
   }
+  x0[k] = t;                                               // 这一对与之后的每一对，按顺序写入
 }
 return x0;                                                 // 干净 → 原引用
 ```
@@ -372,9 +380,25 @@ return x0;                                                 // 干净 → 原引�
 `{ ...input }` 只拷贝可枚举键，因此与 stock 一样丢掉它。在 `ownSymbolKeys: "ignore"`（#43）下该分支只是 `continue`，symbol 按原引用保留。
 
 路径 B（数值键重试，键名会变）：沿用官方 `keyFast + regexes.number 重试`
-模板，额外做键名引用比较，`outKey !== k` 也判脏，拷贝分支
-`delete out[k]; out[outKey] = t;`。键名不变的子场景（string format 键如
+模板，额外做键名比较：`outKey !== k` 也判脏，无论值产物是否为 validator（此前纯值会跳过这一比较，
+所以 `z.record(z.string().transform(…), z.number())` 会原样返回输入，#67）；重试得到的数值键若命名同一属性
+（`"1"` 重试为 `1`，stock 写在 `"1"` 下）会归一化回字符串并算作干净；键 schema 把普通键规范化为 `"__proto__"` 时
+record 判脏且该对被丢弃；loose record 一旦为脏会把被拒绝的键写在其原位置。键名不变的子场景（string format 键如
 `z.record(z.email(), v)`）中 `outKey === k` 恒成立，键名比较零成本。
+
+路径 B 与 C 的拷贝是 stock 的组装顺序，而非 `{ ...input }`：stock 按 `Reflect.ownKeys` 顺序对每一对执行
+`out[outKey] = value`，所以经 transform 与后面键冲突的键会被后者覆盖，输出保持输入的顺序。骨架重放这一序列：
+在第一对脏键值处从 `{}` 开始，拷贝干净前缀（当前键之前的每个可枚举自有键，跳过 `__proto__`，值从输入再读一次，
+这是拷贝唯一读两次的地方，#36），然后用循环那一次读取的值写入这一对与之后的每一对（`emitRebuildPrefix`，#67）。自有的 `__proto__` 数据属性（`JSON.parse`）被
+stock 的循环跳过，因而不在其输出里；干净路径会按引用把它保留下来，所以它使 record 判脏，loose 的 enum 键 record
+同理，其 `for...in` 追加会跳过该键（路径 A 在干净路径上测试 `propertyIsEnumerable(input, "__proto__")`）。
+值产物为异步时，循环改用 stock runtime 的调度（#70）：stock 在循环内启动每个值，同步结果立即写入，异步结果等其
+promise 落定后写入，所以输出按落定顺序排列，更早的异步键值对会胜过更晚的同步键值对。骨架在循环内启动每个值，
+按该顺序记录每一对（迭代位置、干净标志、输出键、输出值；loose record 被拒绝的键是同步条目，被丢弃的 `__proto__`
+对置 `dirty`），对已启动的 promise `await Promise.all`，再扫描日志：值失败则 record 失败，位置不在迭代顺序上或
+不是原输入的对判脏，拷贝从日志组装（`emitAsyncRecordTail`），每一对只读一次。异步孤岛（`makeAsyncIsland`）为此
+对同步完成的 run 同步返回，所以同步条目保持原位，异步 run 只在骨架自己的 `.then` 之前多一跳，每个条目的微任务
+跳数相同。zod 自己的编译器没有异步模式（`ZodCompileAsyncError`），所以 runtime 是唯一的 stock 参照。
 
 路径 A（enum 声明驱动）：官方输出 = 按声明序无条件物化全部声明键
 （缺失键 + optional 值 → 写 undefined）+ 未知键 strict 拒绝。骨架：
@@ -399,31 +423,47 @@ return x0;                                                 // 干净 → 原引�
 ### 5.2 map / set
 
 ```js
-// map：键/值双引用比较，首脏 new Map(input)
+// map：键/值双引用比较，首脏时按顺序重建干净前缀
+let out = input, x1 = false, idx = 0;
 for (const [kIn, vIn] of input) {
   /* 纯键：cKey(kIn) 校验，键名恒不变（keyExpr = kIn）
      非纯键：const ko = cKey(kIn)，键名引用比较 */
   const vo = cValue(vIn);
   if (vo === INVALID) return INVALID;
-  if (vo !== vIn || keyExpr !== kIn) {
-    if (!x1) { x1 = true; out = new Map(input); }
-    if (keyExpr !== kIn) out.delete(kIn);
-    out.set(keyExpr, vo);
+  if (!x1) {
+    if (keyExpr === kIn && vo === vIn) { idx++; continue; }   // 只生成实际存在的比较
+    x1 = true; out = new Map();
+    let j = 0; for (const e of input) { if (j++ === idx) break; out.set(e[0], e[1]); }  // 前 idx 对
   }
+  idx++;
+  out.set(keyExpr, vo);                                        // 这一对与之后的每一对，按顺序写入
 }
 return out;
 
-// set：成员引用比较，首脏 new Set(input)，delete(vIn) + add(vo)
+// set：对成员做同样的事：把前 idx 个成员重建进 new Set()，再逐个加入之后的成员
 ```
 
 - 键纯时零开销：键 schema（string/number）官方产物透传原键 → `keyExpr === kIn`
   恒成立，键名比较被 V8 优化掉。
-- 键转换正确性：键是容器/transform 时（罕见），cow/parser 产物返回新键，
-  `delete(kIn) + set(newKey)` 对齐 stock（stock 对 Map 也是 set 转换后的键）。
+- 键转换正确性：stock 按迭代顺序把解析后的键值对 set 进一个新 Map，所以经 transform 与后面条目冲突的键
+  会被后者覆盖，输出保持输入的顺序；前缀重建重放这一序列，而 `new Map(input)` 加 `delete` / `set`
+  会保留旧值并把条目挪到末尾（#67）。
 - NaN：`vo !== vIn` 对 NaN 恒真 → 误判脏 → 过度拷贝但结果正确
-  （SameValueZero 下 `delete/add` 等价）。与 README 已有的 NaN 说明一致。
-- Map/Set deepStrictEqual：Node assert 对 Map/Set 做条目集合比较
-  （顺序无关），`delete+set/add` 的顺序差异不影响差分。
+  （SameValueZero 下重建的 Set 成员相同）。与 README 已有的 NaN 说明一致。
+- 异步条目（#70）：键或值产物为异步时，map 与 set 骨架像上文的 record 一样改用 stock runtime 的调度：在循环内
+  启动每个条目的产物（map 的一对在任一方为 Promise 时经 `Promise.all([key, value])`，即 stock 自己的结构），同步
+  结果立即记录，异步结果落定时记录，对已启动的 promise `await Promise.all` 后扫描日志（条目失败则容器失败，位置
+  不在迭代顺序上或不是原输入的条目判脏），拷贝从日志组装（`emitAsyncSetLoop`、`emitAsyncMapLoop`），每个条目只读
+  一次。只有条目按迭代顺序落定且未变化时才共享输入。
+- 差分中的 Map/Set 比较：Node assert 对 Map/Set 做条目集合比较（顺序无关），正是它在 #67 之前掩盖了
+  顺序与冲突的分歧；差分在每次解析都把两者作为有序列表比较（`orderedView`），其异步 transform 按值决定
+  多等几跳微任务再落定，使相邻条目乱序落定（#70）。
+
+数组与 tuple 的拷贝自 #70 的评审起遵循同一模式：第一次被迫变化（元素变化或空洞）把干净前缀重建到新数组里（这些
+元素从输入再读一次，#36），之后的每个元素都用循环那一次读取的值写入，所以第一次变化之后的 getter 或空洞与 stock
+观察到的一致；`slice()` 会把每个元素再读一遍，并保留 stock 会写成自有 `undefined` 槽位的空洞。空洞指输入不拥有的
+下标（`Object.hasOwn`，所以空洞之下继承的 `undefined` 也算空洞；空洞之下继承的值读到的是该值，仍属于干净路径的
+原型限制，#48）。
 
 ### 5.3 接线方式
 
@@ -559,7 +599,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine/async transform 包装），与 stock zod4 全量一致：
   - 成败奇偶一致（成功 20813 / 失败 29187）
-  - 输出 `deepStrictEqual` 一致（Map/Set 按条目集合比较）
+  - 输出 `deepStrictEqual` 一致（每次解析都按迭代顺序比较 Map 与 Set 的内容，#67、#70）
   - 输入零失真（structuredClone 快照比对）
   - 顶层引用共享率 89.1%（成功 case），stock 降级 0 次
   - 自 #43 起每个 case 都会用 `ownSymbolKeys: "ignore"` 再编译一次，对同一 RNG 流去掉额外自有 symbol 后的输入运行，检查同样的三项，另加：任何深度的生成骨架都不含 `getOwnPropertySymbols`，且该 pass 共享的顶层引用不少于默认 pass。自 #51 起两个 record 生成器也会生成额外的自有 symbol（十分之一，其中一半通过 `Object.defineProperty` 设为不可枚举），输入快照保留可枚举性，运行器在 `deepEqual` 之外还固定检查顶层输出上该 symbol 是否存在，因为 harness 的比较器只拷贝可枚举键，看不到按原引用存活的不可枚举 symbol；未修复的引擎在默认 pass 下该生成器失败 26 / 20 000 case（全部是这项检查），修复后为 0；默认规模下的共享率为 85.1%（默认）与 86.0%（`"ignore"`），新生成器在两个引擎上相同，旧生成器下为 85.6% / 86.2%

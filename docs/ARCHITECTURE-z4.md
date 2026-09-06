@@ -213,7 +213,7 @@ Point-by-point correspondence with the official dump:
 | Official parser | zc-z4 skeleton | Note |
 |---|---|---|
 | `const v8 = {...}` unconditionally | `if (!dirty) { probes; return input; }` | The CoW core: no copy on clean input; the strip probe's one empty own-symbol array per object is the clean path's only allocation |
-| `const v5 = new Array(len)` | (inside the element loop) `out = input.slice()` | Same for arrays: slice only on the first dirt |
+| `const v5 = new Array(len)` | (inside the element loop) `out = new Array(len)` plus the clean prefix | Same for arrays: the prefix rebuild only on the first dirt, every later element written once (#70) |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
 | `const v8 = { "id": v0, … }` in shape order, with the `mayOutputUndefined` / `dropsWhenAbsent` rules for conditional keys and a `for...in` append in passthrough mode | the same literal, from the captured locals, on the copy path | The copy is stock's output: shape order, the same key-presence rules, getters read once. Undeclared keys are dropped by construction, so the copy path needs no probe and no `delete` (the earlier `{ ...input }` plus `delete` copy kept the input's order, re-read every getter (#36) and turned the copy into a dictionary-mode object, which made strip parity (S8) slower than stock) |
 | `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (16) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found (strict and loose objects run the own-symbol probe alone, #42) | Same inherited-enumerable semantics with faster monomorphic small-object membership; both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap bounds the generated code size (see the constant's comment for the measurement). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
@@ -364,19 +364,27 @@ Path C (the most common) generates this skeleton:
 if (!c0(input)) return INVALID;                            // util.isPlainObject (the official function of the same name)
 let x0 = input, x1 = false;
 for (const k of Reflect.ownKeys(input)) {
-  if (k === "__proto__") continue;
+  if (k === "__proto__") { if (!x1) { x1 = true; /* rebuild the clean prefix */ } continue; }  // stock skips the pair (#67)
   if (!c1.call(input, k)) {                                // propertyIsEnumerable (same as the official code)
-    if (typeof k === "symbol" && !x1) { x1 = true; x0 = { ...input }; }  // a non-enumerable own symbol: stock's rebuild drops it (#51)
+    if (typeof k !== "symbol") continue;
+    if (!x1) { x1 = true; /* rebuild the clean prefix */ } // a non-enumerable own symbol: stock's rebuild drops it (#51)
     continue;
   }
   if (typeof k !== "string") return INVALID;               // the official code rejects symbol keys
   const vIn = input[k];
   const t = cValue(vIn);                                   // value product (validator / parser / CoW sub-skeleton)
   if (t === INVALID) return INVALID;
-  if (t !== vIn) {                                         // reference comparison
-    if (!x1) { x1 = true; x0 = { ...input }; }
-    x0[k] = t;
+  if (!x1) {
+    if (t === vIn) continue;                               // reference comparison: clean pair
+    x1 = true;                                             // first dirty pair: replay stock's assembly up to here
+    x0 = {};
+    for (const k2 of Reflect.ownKeys(input)) {
+      if (k2 === k) break;
+      if (k2 === "__proto__" || !c1.call(input, k2)) continue;
+      x0[k2] = input[k2];
+    }
   }
+  x0[k] = t;                                               // this and every later pair, in order
 }
 return x0;                                                 // clean → the original reference
 ```
@@ -389,9 +397,30 @@ a `typeof k === "symbol"` branch at no extra call; the `{ ...input }` copy carri
 like stock. Under `ownSymbolKeys: "ignore"` (#43) the skip is the plain `continue` and the symbol survives by reference.
 
 Path B (numeric-key retry, key names can change): reuses the official `keyFast + regexes.number retry`
-template and also performs a key-name reference comparison: `outKey !== k` also counts as dirty, and the copy branch does
-`delete out[k]; out[outKey] = t;`. In the sub-case where key names do not change (string-format keys such as
-`z.record(z.email(), v)`), `outKey === k` always holds and the key-name comparison costs nothing.
+template and also performs a key-name comparison: `outKey !== k` also counts as dirty, whether or not the value product is
+a validator (a pure value used to skip it, so `z.record(z.string().transform(…), z.number())` returned the input, #67), a
+retried numeric key that names the same property (`"1"` retried as `1`, which stock writes under `"1"`) is normalized back
+to the string and counts as clean, a key the schema normalizes into `"__proto__"` marks the record dirty and is left out,
+and a loose record writes a rejected key in its position once dirty. In the sub-case where key names do not change
+(string-format keys such as `z.record(z.email(), v)`), `outKey === k` always holds and the key-name comparison costs nothing.
+
+The copy of paths B and C is stock's assembly order, not `{ ...input }`: stock writes `out[outKey] = value` for every pair
+in `Reflect.ownKeys` order, so a transformed key that collides with a later key is overwritten by it and the output keeps
+the input's order. The skeleton replays that sequence: at the first dirty pair it starts from `{}`, copies the clean
+prefix (every enumerable own key before the current one, `__proto__` skipped, read from the input a second time, the one
+place the copy reads twice, #36) and writes this and every later pair from the loop's single read (`emitRebuildPrefix`, #67). An own `__proto__` data property (`JSON.parse`) is
+skipped by stock's loop and so missing from its output; the clean path would keep it by reference, so it marks the record
+dirty, and the same holds for a loose enum-keyed record, whose `for...in` append skips that key (path A tests
+`propertyIsEnumerable(input, "__proto__")` on its clean path). With an async value product the loop takes stock's
+runtime schedule instead (#70): stock starts every value inside its loop, writes a sync result at once and an async one
+when its promise settles, so the output is in settlement order and an earlier async pair wins a collision with a later
+sync one. The skeleton starts every value inside the loop and logs each pair in that order (iteration position, clean
+flag, output key, output value; a loose record's rejected key is a sync entry, a dropped `__proto__` pair sets `dirty`),
+awaits `Promise.all` over the started promises, then scans the log: a failed value fails the record, a pair out of
+iteration position or not its input marks it dirty, and the copy is assembled from the log (`emitAsyncRecordTail`), each
+pair read exactly once. The async island (`makeAsyncIsland`) answers a sync run synchronously for this, so a sync entry
+keeps its place, and an async run adds one `.then` before the skeleton's own, the same number of microtask hops for every
+entry. Zod's own compiler has no async mode (`ZodCompileAsyncError`), so the runtime is the only stock reference.
 
 Path A (enum, declaration-driven): the official output unconditionally materializes every declared key in declaration order
 (a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
@@ -430,31 +459,51 @@ data property; the copy path writes it like stock. The object skeleton behaves t
 ### 5.2 map / set
 
 ```js
-// map: reference comparison on both key and value, new Map(input) on the first dirt
+// map: reference comparison on both key and value, ordered rebuild of the clean prefix at the first dirt
+let out = input, x1 = false, idx = 0;
 for (const [kIn, vIn] of input) {
   /* pure key: cKey(kIn) validates, the key name never changes (keyExpr = kIn)
      impure key: const ko = cKey(kIn), key-name reference comparison */
   const vo = cValue(vIn);
   if (vo === INVALID) return INVALID;
-  if (vo !== vIn || keyExpr !== kIn) {
-    if (!x1) { x1 = true; out = new Map(input); }
-    if (keyExpr !== kIn) out.delete(kIn);
-    out.set(keyExpr, vo);
+  if (!x1) {
+    if (keyExpr === kIn && vo === vIn) { idx++; continue; }   // only the comparisons that exist are emitted
+    x1 = true; out = new Map();
+    let j = 0; for (const e of input) { if (j++ === idx) break; out.set(e[0], e[1]); }  // the first idx pairs
   }
+  idx++;
+  out.set(keyExpr, vo);                                        // this and every later pair, in order
 }
 return out;
 
-// set: reference comparison on members, new Set(input) on the first dirt, delete(vIn) + add(vo)
+// set: the same over the members: rebuild the first idx members into new Set(), then add every later one
 ```
 
 - No cost when the key is pure: for a key schema (string/number) the official product passes the original key through →
   `keyExpr === kIn` always holds, and V8 optimizes the key-name comparison away.
-- Key transformation stays correct: when the key is a container or a transform (rare), the CoW/parser product returns a new key, and
-  `delete(kIn) + set(newKey)` matches stock (stock also sets the transformed key on a Map).
+- Key transformation stays correct: stock sets the parsed pairs into a fresh Map in iteration order, so a transformed key
+  that collides with a later entry is overwritten by it and the output keeps the input's order; the prefix rebuild replays
+  that sequence, where `new Map(input)` plus `delete` / `set` kept the old value and moved the entry to the end (#67).
 - NaN: `vo !== vIn` is always true for NaN → a false dirty verdict → an over-copy, but the result is correct
-  (under SameValueZero `delete/add` is equivalent). This matches the NaN note already in the README.
-- Map/Set deepStrictEqual: Node's assert compares Map/Set as entry sets
-  (order-independent), so the ordering difference of `delete+set/add` does not affect the differential.
+  (under SameValueZero the rebuilt Set has the same members). This matches the NaN note already in the README.
+- Async entries (#70): with an async key or value product the map and set skeletons take stock's runtime schedule, like
+  the record above: every entry's product is started inside the loop (a map pair through `Promise.all([key, value])`
+  when either is a Promise, stock's own structure), a sync result is logged at once and an async one when it settles, and
+  after `Promise.all` over the started promises the log is scanned (a failed entry fails the container, an entry out of
+  iteration position or not its input marks it dirty) and the copy is assembled from it (`emitAsyncSetLoop`,
+  `emitAsyncMapLoop`), each entry read exactly once. The input is shared only when the entries settled in iteration
+  order and unchanged.
+- Map/Set comparison in the fuzzer: Node's assert compares Map/Set as entry sets (order-independent), which is what hid
+  the order and collision divergences until #67; the fuzzer compares both as ordered lists on every parse
+  (`orderedView`), and its async transform settles after a value-dependent number of microtask hops so that sibling
+  entries settle out of order (#70).
+
+The array and tuple copies follow the same pattern since the review of #70: the first forced change (a changed element
+or a hole) rebuilds the clean prefix into a fresh array, reading those elements from the input a second time (#36), and
+every later element is written from the single read the loop makes, so a getter or a hole after the first change is
+observed as stock observes it; `slice()` re-read every element and kept a hole where stock writes an own `undefined`
+slot. A hole is an index the input does not own (`Object.hasOwn`, so an inherited `undefined` under a hole is one too;
+an inherited value under a hole reads as that value and stays the prototype limitation of the clean path, #48).
 
 ### 5.3 Wiring
 
@@ -599,7 +648,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine / async transform wrappers), fully consistent with stock zod4:
   - success/failure parity identical (20813 successes / 29187 failures)
-  - outputs identical under `deepStrictEqual` (Map/Set compared as entry sets)
+  - outputs identical under `deepStrictEqual` (Map and Set contents compared in iteration order on every parse, #67, #70)
   - zero input distortion (compared against a structuredClone snapshot)
   - top-level reference-sharing rate 89.1% (over successful cases), 0 degradations to stock
   - since #43 the suite runs every case a second time compiled with `ownSymbolKeys: "ignore"` against the same RNG stream minus the extra own symbol (the one input the option treats differently from stock; since #42 the generator emits it in every object mode, so the default pass compares strict and loose objects carrying an undeclared symbol against stock, which the previous generator excluded), with the same three checks plus: no generated skeleton at any depth carries `getOwnPropertySymbols` (`compiled.code` covered the top-level skeleton only until #46, which appends the nested skeletons to the dump), and the pass shares at least as many top-level references as the default pass (at the 20 000-case default after #42: 88.8% default, 89.4% with the option among successful cases, 0 degradations in both). Since #51 the two record generators emit the extra own symbol too (one in ten, half of them non-enumerable through `Object.defineProperty`), the input snapshot keeps enumerability, and the runner pins the symbol's presence on the top-level output next to the `deepEqual` comparison, because the harness comparator copies enumerable keys only and would not see a non-enumerable symbol surviving by reference; on the unfixed engine that generator fails 26 of 20 000 cases in the default pass (all that check), on the fixed engine none, and the sharing rate at the default size is 85.1% (default) and 86.0% (`"ignore"`) on both engines with the new generator, from 85.6% / 86.2% with the previous one

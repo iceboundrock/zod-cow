@@ -77,14 +77,29 @@ export function makeAsyncIsland(schema: Node): Fn {
  * async of its subtree raises no compile-time error and would leak out silently as a Promise), and a subtree
  * whose stock compile fails for a non-async reason before its checks are reached (a symbol literal, coercion,
  * `z.xor`, a `catch` callback, #75). For every other subtree the official compileFn throws on its own.
+ *
+ * The walk reads every object shape below the subtree, which stock reads only at parse time (`$ZodObject` copies
+ * the caller's shape on the first read of `def.shape`, so a shape getter may reference a schema still under
+ * construction), and stock's compile of a refused subtree never reached the shape. A getter that throws here is
+ * therefore contained rather than raised from `compile()`: the subtree takes the sync island, whose run meets the
+ * same throw at parse time where stock's parser does, and a getter that resolves by then meets any Promise on
+ * the #76 route (review of #82). A `lazy` getter that throws still takes the async island (#83).
  */
-function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
+function subtreeHasAsync(schema: Node): boolean {
+  try {
+    return walkHasAsync(schema, new Set());
+  } catch {
+    return false;
+  }
+}
+
+function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
   if (seen.has(schema)) return false; // recursive subtree (lazy self-reference) -- asyncness is decided by the first expansion
   seen.add(schema);
   const def = schema._zod.def;
   if (def.type === "lazy") {
     try {
-      if (subtreeHasAsync(def.getter(), seen)) return true;
+      if (walkHasAsync(def.getter(), seen)) return true;
     } catch {
       return true; // the getter throws → conservatively treated as async (no loss of correctness)
     }
@@ -112,7 +127,7 @@ function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
     for (const k of Object.keys(def.shape)) kids.push(def.shape[k]);
     for (const s of Object.getOwnPropertySymbols(def.shape)) kids.push(def.shape[s]);
   }
-  return kids.some((k) => subtreeHasAsync(k, seen));
+  return kids.some((k) => walkHasAsync(k, seen));
 }
 
 /**

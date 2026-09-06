@@ -1658,6 +1658,87 @@ head(
   ok(
     "the issue's loose record with a symbol-literal key and an async refine stays on the CoW path",
   );
+
+  // A shape getter that throws while the walk classifies a refused subtree (review of #82). Stock reads an
+  // object's shape only at parse time (`$ZodObject` copies the caller's shape on the first read of `def.shape`,
+  // so a getter may reference a schema still under construction) and its compile of the refused subtree never
+  // reached the shape, so the throw is contained: `compile()` does not throw, the subtree takes the sync island,
+  // and the getter's error surfaces at parse time where stock's does. The object option comes first so the
+  // walk reads the shape before it meets the async refine.
+  const throwingShape = Object.create(null, {
+    a: {
+      enumerable: true,
+      get: () => {
+        throw new Error("shape getter");
+      },
+    },
+  });
+  const X = z.xor([z.object(throwingShape), z.string().refine(async () => true)]);
+  const isShapeError = (e: unknown): boolean =>
+    e instanceof Error && !(e instanceof $ZodAsyncError) && e.message === "shape getter";
+  for (const [posName, wrap, place] of positions) {
+    const name = `throwing shape getter at ${posName}`;
+    const S = wrap(X);
+    const input = place("x");
+    const C = compile(S);
+    assert.ok(!C.stock && !C.async, `${name}: compiled to a sync product`);
+    assert.throws(() => S.safeParse(input as never), isShapeError);
+    assert.throws(
+      () => C.safeParse(input),
+      isShapeError,
+      `${name}: the sync API throws stock's error`,
+    );
+    await assert.rejects(S.safeParseAsync(input), isShapeError);
+    await assert.rejects(
+      C.safeParseAsync(input),
+      isShapeError,
+      `${name}: the async API rejects with stock's error`,
+    );
+  }
+  ok(
+    "a shape getter that throws during the walk is contained: the sync island surfaces its error at parse time like stock",
+  );
+
+  // The same getter resolving by parse time (a schema declared later in the module): the sync island meets the
+  // Promise of the async option, and the async entries hand the parse to stock's async runtime, the #76 route.
+  let lateInner: z.ZodType | undefined;
+  const lateShape = Object.create(null, {
+    a: {
+      enumerable: true,
+      get: () => {
+        if (lateInner === undefined) throw new Error("not yet");
+        return lateInner;
+      },
+    },
+  });
+  const lateLog: number[] = [];
+  const L = z.tuple([
+    z.xor([
+      z.object(lateShape),
+      z.string().refine(async () => {
+        lateLog.push(1);
+        return true;
+      }),
+    ]),
+    z.string(),
+  ]);
+  const LC = compile(L);
+  assert.ok(!LC.stock && !LC.async);
+  lateInner = z.string();
+  const lIn = ["x", "s"];
+  assert.throws(() => LC.safeParse(lIn), $ZodAsyncError);
+  assert.throws(() => L.safeParse(lIn as never), $ZodAsyncError);
+  lateLog.length = 0;
+  const lR = await LC.safeParseAsync(lIn);
+  assert.equal(
+    lateLog.length,
+    2,
+    "the predicate ran in the island and again in stock's async runtime",
+  );
+  const lStock = await L.safeParseAsync(lIn as never);
+  assert.ok(lR.success && lStock.success);
+  assert.deepEqual(lR.data, lStock.data);
+  ok("a shape getter that resolves by parse time answers like stock through the #76 fallback");
 }
 
 console.log("\nAll tuple + async smoke assertions passed ✓");

@@ -667,6 +667,12 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    Promise at parse time: `.async` reported false, and since #76 the async entries caught the throw and reran the parse in
    stock's async runtime, so every callback ran twice and the CoW reference was lost. With `subtreeHasAsync` consulted the
    subtree is an async island, the skeleton awaits it, and a tuple, array or object around it returns the clean input.
+   The walk reads every object shape below the subtree, which stock reads only at parse time (`$ZodObject` copies the
+   caller's shape on the first read of `def.shape`, so a shape getter may reference a schema still under construction)
+   and which stock's compile of a refused subtree never reached, so a shape getter that throws during the walk is
+   contained instead of raised from `compile()` (review of #82): the subtree takes the sync island, whose run meets the
+   same throw at parse time where stock's parser does, and a getter that resolves by then meets any Promise on the #76
+   route. A `lazy` getter that throws still takes the async island (#83).
    Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
    (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
    runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
@@ -714,7 +720,8 @@ compile(schema)
   │     │     │     │     └─ generation failed → officialFn(parser) → island
   │     │     │     ├─ impure subtree → officialFn (parser product)
   │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise),
-  │     │     │     │     │     or makeAsyncIsland when subtreeHasAsync says the subtree holds an async check (#75)
+  │     │     │     │     │     or makeAsyncIsland when subtreeHasAsync says the subtree holds an async check (#75;
+  │     │     │     │     │     a shape getter that throws during that walk keeps the sync island, review of #82)
   │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
   │     │     │     ├─ container subtree → subFn recursion (a seen set prevents circular references)
   │     │     │     │     └─ the sub-skeleton is itself async → kind:"async", the parent position emits await ★v0.5

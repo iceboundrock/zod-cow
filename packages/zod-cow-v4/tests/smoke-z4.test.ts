@@ -1222,7 +1222,60 @@ import { compile } from "../src/index.js";
   const arr = [1, 2];
   assert.equal(compile(A).parse(arr), arr);
   assert.equal(compile(A).parse(null), null);
-  console.log("  top-level and nested refine rejects like stock, a passing one keeps sharing ✓");
+  // The same refine above the other four containers: on main only the object / array shapes were probed
+  const three = (v: unknown) =>
+    v === undefined || v === null
+      ? true
+      : v instanceof Map || v instanceof Set
+        ? v.size !== 3
+        : Array.isArray(v)
+          ? v[0] !== 3
+          : Object.keys(v as object).length !== 3;
+  const others: Array<[string, z.ZodType, unknown, unknown, unknown]> = [
+    [
+      "record",
+      z.record(z.string(), z.number()).optional().refine(three),
+      { a: 1, b: 2, c: 3 },
+      { a: 1 },
+      undefined,
+    ],
+    [
+      "map",
+      z.map(z.string(), z.number()).nullable().refine(three),
+      new Map([
+        ["a", 1],
+        ["b", 2],
+        ["c", 3],
+      ]),
+      new Map([["a", 1]]),
+      null,
+    ],
+    [
+      "set",
+      z.set(z.number()).optional().refine(three),
+      new Set([1, 2, 3]),
+      new Set([1]),
+      undefined,
+    ],
+    [
+      "tuple",
+      z.tuple([z.number(), z.number(), z.number()]).nullable().refine(three),
+      [3, 1, 1],
+      [1, 2, 3],
+      null,
+    ],
+  ];
+  for (const [name, S, bad, good, shortcut] of others) {
+    assert.equal(S.safeParse(bad).success, false);
+    const CS = compile(S);
+    assert.equal(CS.safeParse(bad).success, false, `${name}: the wrapper refine rejects`);
+    assert.equal(CS.parse(good), good, `${name}: a passing refine keeps sharing`);
+    assert.equal(CS.parse(shortcut), shortcut, `${name}: the shortcut passes`);
+    assert.ok(CS.code!.includes("nested skeleton #1"), `${name}: nested container skeleton`);
+  }
+  console.log(
+    "  top-level and nested refine rejects like stock, a passing one keeps sharing, all six containers ✓",
+  );
 
   // The refine sees the shortcut value, and a chain runs its layers on it in stock's order
   const log: string[] = [];

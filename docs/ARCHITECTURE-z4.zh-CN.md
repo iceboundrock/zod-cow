@@ -161,7 +161,7 @@ zc-z4 的编译期分派（`emitNode`）：
 
 ```
 needsValue && cowSafeContainerForChild(schema)?
-  ├─ 是 → emitBoxedContainer（optional/nullable 剥壳，运行包装层自己的 refine 谓词）→ 五个容器骨架之一
+  ├─ 是 → emitBoxedContainer（optional/nullable 剥壳，运行包装层自己的 refine 谓词）→ 六个容器骨架之一
   └─ 否 → isPure(schema)?
         ├─ 是 → 官方 assertOnly 产物 + return accessor（输出===输入）
         └─ 否 → 官方 parser 产物（引用比较判脏，由宿主骨架执行）
@@ -549,7 +549,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（19 组行为断言，第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（19 组行为断言，第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套
@@ -561,6 +561,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   - 顶层引用共享率 89.1%（成功 case），stock 降级 0 次
   - 自 #43 起每个 case 都会用 `ownSymbolKeys: "ignore"` 再编译一次，对同一 RNG 流去掉额外自有 symbol 后的输入运行，检查同样的三项，另加：任何深度的生成骨架都不含 `getOwnPropertySymbols`，且该 pass 共享的顶层引用不少于默认 pass。自 #51 起两个 record 生成器也会生成额外的自有 symbol（十分之一，其中一半通过 `Object.defineProperty` 设为不可枚举），输入快照保留可枚举性，运行器在 `deepEqual` 之外还固定检查顶层输出上该 symbol 是否存在，因为 harness 的比较器只拷贝可枚举键，看不到按原引用存活的不可枚举 symbol；未修复的引擎在默认 pass 下该生成器失败 26 / 20 000 case（全部是这项检查），修复后为 0；默认规模下的共享率为 85.1%（默认）与 86.0%（`"ignore"`），新生成器在两个引擎上相同，旧生成器下为 85.6% / 86.2%
 - 自 #47 起生成器生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion），上面的列表此前虚有其名；在未修复的引擎上新生成器在默认 pass 失败 15 / 20 000 case、`"ignore"` pass 失败 11 个，全部是陷阱四形态的输出不一致，修复后为 0。默认规模下成功 case 的顶层引用共享率为 85.6%（默认）与 86.2%（`"ignore"`），同一生成器在未修复引擎上为 85.9% 与 86.6%（该规则放弃的容器分支 union 的 CoW 路径），旧生成器下为 88.8% / 89.4%。
+- 自 #56 起三个被包装的子节点里有一个在包装层之上再叠一个 check（同步或 async refine，或把字符串转大写的 overwrite，#57），refine 谓词除字符串 "forbidden" 外也拒绝恰好三个条目的容器；在未修复的引擎上每一遍各找出 20 000 case 中的 5 个（容器之上的包装层 refine 从未运行，或叶子之上的包装层 overwrite 被判为纯），修复后为 0。默认规模下成功 case 的共享率为 85.4%（默认）/ 86.1%（`"ignore"`），旧生成器在两个引擎上均为 85.1% / 86.0%。
 - 已知不对齐项（刻意保留）：async rest 槽 + nullable null 输入时 stock runtime 产生
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）；

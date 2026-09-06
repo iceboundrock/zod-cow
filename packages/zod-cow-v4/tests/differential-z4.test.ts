@@ -123,7 +123,55 @@ function repr(v: unknown): string {
   }
 }
 
+/**
+ * The output comparison sees Map and Set contents in iteration order: stock rebuilds both from
+ * the parsed entries in input order, and the order is observable, so a Map or Set is compared as
+ * the ordered list of its entries or members (the harness comparator, like Node's
+ * `isDeepStrictEqual`, treats them as unordered and can also mismatch two Sets whose object
+ * members are mutually deep-equal, such as two Dates of the same time) (#67).
+ */
+function orderedView(v: unknown, seen = new Map<object, unknown>()): unknown {
+  if (typeof v !== "object" || v === null) return v;
+  if (v instanceof Date) return v;
+  const hit = seen.get(v);
+  if (hit !== undefined) return hit;
+  if (v instanceof Map) {
+    const out = { $map: [] as unknown[] };
+    seen.set(v, out);
+    for (const [k, x] of v) out.$map.push([orderedView(k, seen), orderedView(x, seen)]);
+    return out;
+  }
+  if (v instanceof Set) {
+    const out = { $set: [] as unknown[] };
+    seen.set(v, out);
+    for (const x of v) out.$set.push(orderedView(x, seen));
+    return out;
+  }
+  if (Array.isArray(v)) {
+    const out: unknown[] = new Array(v.length); // holes stay holes
+    seen.set(v, out);
+    for (const k of Object.keys(v)) (out as any)[k] = orderedView((v as any)[k], seen);
+    return out;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v; // class instance: as it is
+  const out = Object.create(proto);
+  seen.set(v, out);
+  for (const k of Object.keys(v)) {
+    Object.defineProperty(out, k, {
+      value: orderedView((v as any)[k], seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
 /* ─────────────────────────── schema generator ─────────────────────────── */
+
+/** The colliding key / member transform of #67: `"a"` lands on `"b"`, so a later `"b"` entry must win and the order must hold */
+const COLLIDE = (k: string): string => (k === "a" ? "b" : k);
 
 interface Built {
   schema: z.ZodType;
@@ -453,6 +501,9 @@ function bArray(rng: RNG, depth: number): Built {
         const v = inner.gen(r);
         if (v !== ABSENT) out.push(v);
       }
+      // Sparse inputs (#67): a trailing hole, or an inner one; stock owns every index of its output
+      if (r.chance(0.1)) out.length = out.length + 1;
+      if (out.length > 1 && r.chance(0.1)) delete out[r.int(out.length)];
       return out;
     },
   };
@@ -487,19 +538,41 @@ function bEnumRecord(rng: RNG, inner: Built): Built {
       }
       if (r.chance(0.2)) out[numeric && r.chance(0.5) ? "99" : "extra"] = r.chance(0.5) ? 1 : "e";
       maybeExtraSymbol(out, r);
+      maybeOwnProto(out, r);
       return out;
     },
   };
 }
 
+/**
+ * An own "__proto__" data property, as JSON.parse produces (#67), one in ten: stock's assembly
+ * skips that key on every path, so a clean input carrying it must still be copied
+ */
+function maybeOwnProto(out: object, r: RNG): void {
+  if (!r.chance(0.1)) return;
+  Object.defineProperty(out, "__proto__", {
+    value: 1,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 function bRecord(rng: RNG, depth: number): Built {
-  const inner = bChild(rng, depth);
-  if (rng.chance(0.3)) return bEnumRecord(rng, inner);
-  const numericKeys = rng.chance(0.15);
-  const keySchema: z.ZodType = numericKeys ? z.number() : z.string();
+  // Colliding key transform (#67): keys drawn from a pool where "a" lands on a later "b"
+  const colliding = rng.chance(0.15);
+  const inner = colliding ? bSyncLeaf(rng) : bChild(rng, depth);
+  if (!colliding && rng.chance(0.3)) return bEnumRecord(rng, inner);
+  const numericKeys = !colliding && rng.chance(0.15);
+  const keySchema: z.ZodType = colliding
+    ? z.string().transform(COLLIDE)
+    : numericKeys
+      ? z.number()
+      : z.string();
+  const keyDesc = colliding ? "string.transform(a→b)" : numericKeys ? "number" : "string";
   return {
     schema: z.record(keySchema as any, inner.schema),
-    desc: `record(${numericKeys ? "number" : "string"}, ${inner.desc})`,
+    desc: `record(${keyDesc}, ${inner.desc})`,
     gen: (r) => {
       const out: Record<string, unknown> = {};
       const keys = ["a", "b", "c", "d"];
@@ -509,14 +582,65 @@ function bRecord(rng: RNG, depth: number): Built {
         if (v !== ABSENT) out[numericKeys ? String(r.int(4)) : keys[i]!] = v;
       }
       maybeExtraSymbol(out, r);
+      maybeOwnProto(out, r);
       return out;
     },
   };
 }
 
+/**
+ * A sync leaf value for the colliding variants: stock's runtime writes an async value when its
+ * promise settles, after the loop, so with a key collision an earlier async pair overwrites the
+ * later sync one (settlement order, which the skeleton does not reproduce); the colliding key
+ * variants keep every value sync so a collision has stock's iteration-order outcome
+ */
+function bSyncLeaf(rng: RNG): Built {
+  const leaf = bLeaf(rng);
+  const which = rng.int(3);
+  if (which === 0) {
+    return {
+      schema: leaf.schema.nullable(),
+      desc: `${leaf.desc}.nullable()`,
+      gen: (r) => (r.chance(0.2) ? null : leaf.gen(r)),
+    };
+  }
+  if (which === 1) {
+    return {
+      schema: leaf.schema.transform((v: any) => (typeof v === "string" ? `${v}!` : v)),
+      desc: `${leaf.desc}.transform(+!)`,
+      gen: leaf.gen,
+    };
+  }
+  return leaf;
+}
+
+/** A key transform that collides with a later key (`"a"` → `"b"`), so the copy must keep stock's order and let the later entry win (#67) */
+function bCollidingMap(rng: RNG, inner: Built): Built {
+  let schema = z.map(z.string().transform(COLLIDE), inner.schema);
+  let desc = `map(string.transform(a→b), ${inner.desc})`;
+  if (rng.chance(0.2)) {
+    schema = schema.min(1);
+    desc += ".min(1)";
+  }
+  return {
+    schema,
+    desc,
+    gen: (r) => {
+      const m = new Map<string, unknown>();
+      const n = 1 + r.int(3);
+      for (let i = 0; i < n; i++) {
+        const v = inner.gen(r);
+        if (v !== ABSENT) m.set(r.pick(["a", "b", "c"] as const), v);
+      }
+      return m;
+    },
+  };
+}
+
 function bMap(rng: RNG, depth: number): Built {
-  const key = rng.chance(0.8) ? z.string() : z.number();
+  if (rng.chance(0.15)) return bCollidingMap(rng, bSyncLeaf(rng));
   const inner = bChild(rng, depth);
+  const key = rng.chance(0.8) ? z.string() : z.number();
   let schema = z.map(key as any, inner.schema);
   let desc = `map(${rng.chance(0.8) ? "string" : "number"}, ${inner.desc})`;
   if (rng.chance(0.2)) {
@@ -543,7 +667,28 @@ function bMap(rng: RNG, depth: number): Built {
   };
 }
 
+/** A member transform that lands on a later member (`"a"` → `"b"`), so the copy must keep stock's order and let the later member win (#67) */
+function bCollidingSet(rng: RNG): Built {
+  let schema = z.set(z.string().transform(COLLIDE));
+  let desc = "set(string.transform(a→b))";
+  if (rng.chance(0.3)) {
+    schema = schema.min(1);
+    desc += ".min(1)";
+  }
+  return {
+    schema,
+    desc,
+    gen: (r) => {
+      const st = new Set<string>();
+      const n = 1 + r.int(3);
+      for (let i = 0; i < n; i++) st.add(r.pick(["a", "b", "c"] as const));
+      return st;
+    },
+  };
+}
+
 function bSet(rng: RNG, depth: number): Built {
+  if (rng.chance(0.15)) return bCollidingSet(rng);
   const inner = bChild(rng, depth);
   let schema = z.set(inner.schema);
   let desc = `set(${inner.desc})`;
@@ -618,6 +763,8 @@ function bTuple(rng: RNG, depth: number): Built {
       }
       // Sometimes trim the input short (triggers the trailing absent / defaulted slot-range semantics)
       if (r.chance(0.15)) out.length = Math.max(0, out.length - 1 - r.int(2));
+      // A hole in a fixed slot (#67): read as undefined, written as an own slot by stock
+      if (out.length > 0 && r.chance(0.1)) delete out[r.int(out.length)];
       if (rest) {
         const extra = r.int(3);
         for (let i = 0; i < extra; i++) {
@@ -823,7 +970,13 @@ async function runPass(
 
       if (stock!.success) {
         bothOk++;
-        if (!assertDeepEqual(ours!.data, stock!.data)) {
+        // Sync parses compare Map and Set contents in iteration order. Stock's runtime writes a sync
+        // entry when it is parsed and an async one when its promise settles, after the loop, so an
+        // async parse can hand back a Set or Map in settlement order (`Set {"a", 1}` under
+        // `set(union([string.refine(async …), number]))` comes back as `Set {1, "a"}`); the skeleton
+        // keeps iteration order, as stock's own compiler does, and async cases stay unordered here
+        const view = useAsync ? (v: unknown) => v : orderedView;
+        if (!assertDeepEqual(view(ours!.data), view(stock!.data))) {
           failures.push(
             `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}\n      def: ${defRepr(built.schema)}\n      cow code:\n${(
               compiled.code ?? "(stock)"

@@ -9,7 +9,9 @@
  *     .safeParseAsync(data)   async variant; a Promise the fast path meets at runtime (a plain function returning one,
  *                             which no static detector sees) hands that parse to stock's async runtime
  *     .validate(data)   pure validation: official whole-tree assertOnly product; returns the input
- *                       reference when it passes, null when it fails
+ *                       reference when it passes, null when it fails; a tree holding a plain transform consults
+ *                       stock's sync parse before answering null, so a Promise the transform returned throws
+ *                       $ZodAsyncError like the other sync entries (#79)
  *     .code             generated CoW skeleton source (for debugging)
  *     .stock            stock degradation flag (true = this layer gave up, everything goes through stock)
  *     .async            true = the skeleton holds an async subtree, so the sync API throws
@@ -21,6 +23,7 @@ import {
   type CompileOptions,
   compileCowDebug,
   officialValidator,
+  subtreeHasPlainTransform,
   isAsyncProduct,
   isPromiseSignal,
   resolveOptions,
@@ -46,7 +49,7 @@ export interface Compiled<T extends z.ZodType> {
   safeParseAsync(
     data: unknown,
   ): Promise<{ success: true; data: z.output<T> } | { success: false; error: z.ZodError }>;
-  /** Pure validation: on success returns the original input reference (typed `unknown`; unlike the zod3 line there is no DeepReadonly view), null on failure */
+  /** Pure validation: on success returns the original input reference (typed `unknown`; unlike the zod3 line there is no DeepReadonly view), null on failure. Throws `$ZodAsyncError` when a plain function returned a `Promise`, as the other sync entries do */
   validate(data: unknown): unknown;
 }
 
@@ -140,6 +143,16 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
   // checks per call; the per-record scenarios of bench-v4 see the difference)
   const fast = cowFn;
   const validateFast = validator ?? fast;
+  // The official products answer INVALID for a Promise a plain transform returned, where stock's sync parse throws
+  // `$ZodAsyncError`; the parse entries reach that throw through their stock fallback, and so does `validate` on a
+  // tree holding such a transform: stock's sync parse is consulted before an INVALID becomes null (the one extra run,
+  // on the rejected inputs of such a tree only, #79). A transform-free tree keeps the single validator run.
+  const validate: (data: unknown) => unknown = subtreeHasPlainTransform(schema)
+    ? (data) => {
+        if (validateFast(data) !== INVALID) return data;
+        return stockParse(data).success ? data : null;
+      }
+    : (data) => (validateFast(data) !== INVALID ? data : null);
   return {
     ...common,
     parse(data) {
@@ -174,8 +187,6 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
       if (out !== INVALID) return ok(out);
       return (await stockParseAsync(data)) as Err;
     },
-    validate(data) {
-      return validateFast(data) !== INVALID ? data : null;
-    },
+    validate,
   } satisfies Compiled<T>;
 }

@@ -686,7 +686,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    official `isAsyncFunction` and `isAsyncFn` are syntactic), so the schema is a sync skeleton and the `Promise` is met at
    runtime. The checks subroutine and the official products throw `$ZodAsyncError` there (`throwAsync` in `product.ts`
    throws stock's class, as the official `throwAsync` does; a plain-`Promise` transform answers INVALID in the official
-   product). The sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
+   product, its transform helpers answering INVALID for a `Promise` on purpose, so the parse entries reach stock's throw
+   through their stock fallback and `validate` consults stock's sync parse before an INVALID becomes null on a tree
+   holding a plain transform, `subtreeHasPlainTransform` in `official.ts` naming such a tree at compile time, #79). The
+   sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
    kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
    own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
    output is then stock's copy and the callbacks called before the `Promise` run twice, the failure-path duplicate of §6.
@@ -749,6 +752,9 @@ Sync skeleton (ctx.async = false):
   parseAsync/safeParseAsync run the fast path and fall back to stock safeParseAsync on INVALID, and on the
   $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6); a $ZodAsyncError a
   callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
+  validate runs the official validator (or the skeleton, #69) and answers null on INVALID; on a tree holding a plain
+  transform (subtreeHasPlainTransform) it consults stock's sync parse first, since the official transform helpers
+  answer INVALID for a Promise where stock throws $ZodAsyncError (#79).
 ```
 
 A check attached to an optional / nullable layer through `.check()` (`z.string().optional().check(z.minLength(3))`) is a
@@ -882,7 +888,7 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | `codectx.ts` | §3 | `CodeCtx` (carries the resolved options and the shared `sources` list of the debug dump), `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
-| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync` |
+| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple` |

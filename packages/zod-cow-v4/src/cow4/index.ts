@@ -37,7 +37,7 @@ import { emitNode } from "./emit.js";
 import type { CowOptions } from "./options.js";
 import type { Fn, Node } from "./product.js";
 
-export { officialValidator } from "./official.js";
+export { officialValidator, subtreeHasPlainTransform } from "./official.js";
 export { type CompileOptions, resolveOptions } from "./options.js";
 export { type Fn, isAsyncProduct, isPromiseSignal, ZC_ASYNC } from "./product.js";
 

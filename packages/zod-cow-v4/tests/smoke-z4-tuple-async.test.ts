@@ -1203,12 +1203,13 @@ head(
   // `AsyncFunction`), so the schema compiles as sync (`async === false`) and the fast path meets the Promise at
   // runtime, where the official code throws `$ZodAsyncError`. Stock's own `z.compile()` never runs its fast path on
   // an async parse; here the async entries catch that throw (or the INVALID a plain-Promise transform answers) and
-  // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's class.
+  // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's
+  // class, `validate` included: the official assertOnly product answers INVALID for a Promise from a transform, so a
+  // tree holding a plain transform consults stock's sync parse before answering null, and the throw surfaces (#79).
   type Case = {
     name: string;
     make: (ok: boolean) => z.ZodType;
     input: () => unknown;
-    validateThrows: boolean;
   };
   const plain = (ok: boolean) => () => Promise.resolve(ok);
   const cases: Case[] = [
@@ -1216,19 +1217,16 @@ head(
       name: "top-level array refine",
       make: (ok) => z.array(z.string()).refine(plain(ok)),
       input: () => ["x"],
-      validateThrows: true,
     },
     {
       name: "leaf refine under an object key",
       make: (ok) => z.object({ a: z.string().refine(plain(ok)) }),
       input: () => ({ a: "x" }),
-      validateThrows: true,
     },
     {
       name: "refine on optional(object)",
       make: (ok) => z.object({ a: z.string() }).optional().refine(plain(ok)),
       input: () => ({ a: "x" }),
-      validateThrows: true,
     },
     {
       name: "custom check returning a Promise",
@@ -1238,13 +1236,40 @@ head(
           return Promise.resolve();
         }),
       input: () => ["x"],
-      validateThrows: true,
     },
     {
       name: "transform returning a Promise",
       make: () => z.array(z.string()).transform((v) => Promise.resolve([...v, "t"])),
       input: () => ["x"],
-      validateThrows: false, // the official assertOnly product answers INVALID for a Promise from a transform, so `validate` gives null
+    },
+    {
+      name: "pipe into a transform returning a Promise",
+      make: () => z.array(z.string()).pipe(z.transform((v) => Promise.resolve(v.length))),
+      input: () => ["x"],
+    },
+    {
+      name: "preprocess returning a Promise",
+      make: () => z.preprocess((v) => Promise.resolve(v), z.array(z.string())),
+      input: () => ["x"],
+    },
+    {
+      name: "transform returning a Promise inside a union option",
+      make: () => z.union([z.number(), z.array(z.string()).transform((v) => Promise.resolve(v))]),
+      input: () => ["x"],
+    },
+    {
+      name: "transform returning a Promise under a wrapper the runtime answers (#69)",
+      // zod's typings reject `.check(z.minLength(n))` on a wrapper; the runtime accepts it (as in the #69 smoke)
+      make: () =>
+        z.object({
+          a: (
+            z
+              .array(z.string())
+              .transform((v) => Promise.resolve(v))
+              .optional() as any
+          ).check(z.minLength(1)) as z.ZodType,
+        }),
+      input: () => ({ a: ["x"] }),
     },
   ];
   for (const c of cases) {
@@ -1282,17 +1307,50 @@ head(
         $ZodAsyncError,
         `${c.name}: parse throws stock's class`,
       );
-      if (c.validateThrows) {
-        assert.throws(
-          () => C.validate(c.input()),
-          $ZodAsyncError,
-          `${c.name}: validate throws stock's class`,
-        );
-      } else {
-        assert.equal(C.validate(c.input()), null);
-      }
+      assert.throws(
+        () => C.validate(c.input()),
+        $ZodAsyncError,
+        `${c.name}: validate throws stock's class`,
+      );
     }
     ok(c.name);
+  }
+
+  // The consultation is stock's sync parse, so a rejected input of a transform-holding schema still answers null,
+  // and the callbacks the validator ran before the rejection run again there (the failure-path duplicate of the
+  // README); a transform-free schema keeps the one validator run
+  {
+    let calls = 0;
+    const T = z
+      .array(z.string())
+      .refine(() => {
+        calls++;
+        return false;
+      })
+      .transform((v) => Promise.resolve(v));
+    const CT = compile(T);
+    assert.ok(!CT.async && !CT.stock);
+    assert.equal(CT.validate(["x"]), null, "a rejected input answers null");
+    assert.equal(calls, 2, "the validator and stock's parse each ran the predicate");
+    calls = 0;
+    assert.equal(CT.validate(5), null, "a type mismatch answers null");
+    assert.equal(calls, 0);
+    calls = 0;
+    const F = z.array(z.string()).refine(() => {
+      calls++;
+      return false;
+    });
+    const CF = compile(F);
+    assert.equal(CF.validate(["x"]), null);
+    assert.equal(calls, 1, "a transform-free schema runs the validator only");
+    // An async-function transform is detected statically: the tree is async and every sync entry throws
+    const A = z.array(z.string()).transform(async (v) => v);
+    const CA = compile(A);
+    assert.ok(CA.async);
+    assert.throws(() => CA.validate(["x"]), $ZodAsyncError);
+    ok(
+      "validate: a rejected input of a transform-holding schema answers null through stock's parse",
+    );
   }
 
   // The predicate runs on the fast path up to the throw and again in stock: the failure-path duplicate of the README

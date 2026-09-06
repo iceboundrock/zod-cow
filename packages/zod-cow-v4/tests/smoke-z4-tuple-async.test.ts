@@ -1545,8 +1545,9 @@ head(
   // but `.async` reported false, the predicate ran twice and the CoW reference was lost. The fallback now asks
   // `subtreeHasAsync`, the same answer the `lazy` case already takes.
   const sym = Symbol("k");
-  // [name, schema builder, clean value, a value the leaf does not accept]. A symbol literal has no failing
-  // fixture: stock's own error map stringifies the expected symbol and throws on every mismatch.
+  // [name, schema builder, clean value, a value the leaf does not accept]: one row per reason stock's compileFn
+  // refuses a subtree before its checks are reached. A symbol literal has no failing fixture: stock's own error
+  // map stringifies the expected symbol and throws on every mismatch.
   type Shape = [string, (log: number[]) => z.ZodType, unknown, unknown?];
   const shapes: Shape[] = [
     [
@@ -1570,6 +1571,29 @@ head(
           .catch((c) => String(c.error.issues.length)),
       "ab",
       42,
+    ],
+    [
+      "a coerced string with an async refine",
+      (log) =>
+        z.coerce
+          .string()
+          .min(3)
+          .refine(async () => {
+            log.push(1);
+            return true;
+          }),
+      "abc",
+      "ab",
+    ],
+    [
+      "an xor with an async refine",
+      (log) =>
+        z.xor([z.string(), z.number()]).refine(async () => {
+          log.push(1);
+          return true;
+        }),
+      "ab",
+      true,
     ],
   ];
   type Pos = [string, (leaf: z.ZodType) => z.ZodType, (v: unknown) => unknown];
@@ -1618,7 +1642,7 @@ head(
         assert.deepEqual(rBad.error.issues, stockBad.error.issues);
     }
   }
-  ok("the four positions of both shapes answer once, share the reference and report async");
+  ok("the four positions of every shape answer once, share the reference and report async");
 
   // The issue's own shape: a loose record with a symbol-literal key and an async refine. The record skeleton
   // has covered a declared symbol key since then, so the refine runs in the checks subroutine of #76 and no

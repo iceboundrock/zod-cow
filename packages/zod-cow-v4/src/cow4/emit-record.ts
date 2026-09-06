@@ -1,7 +1,7 @@
-/** Record skeleton: key-name/value double reference comparison + ordered rebuild of the clean prefix at the first change. */
+/** Record skeleton: key-name/value double reference comparison + ordered rebuild of the clean prefix at the first change; the async value loop follows stock's settlement order. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
-import { childProduct, containerChecksFn } from "./emit.js";
+import { type ChildProduct, childProduct, containerChecksFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
 
@@ -16,7 +16,8 @@ import { isAsyncProduct, type Node } from "./product.js";
  *      keyFast product + numeric key retry; key names compared by reference (outKey !== k → dirty, the pair written under outKey);
  *      loose keeps the keys the key schema rejects in their position, with the value not validated -- same as the official code.
  *   C. bare-string keys (z.record(z.string(), v)): the key name never changes, only values are compared.
- * The copy of paths B and C replays stock's assembly sequence (`emitRebuildPrefix`), never `{ ...input }`.
+ * The copy of paths B and C replays stock's assembly sequence (`emitRebuildPrefix`), never `{ ...input }`;
+ * with an async value product the loop follows stock's runtime schedule instead (`emitAsyncRecordTail`).
  */
 export function emitCoWRecord(
   ctx: CodeCtx,
@@ -156,8 +157,35 @@ export function emitCoWRecord(
     (keyDef.checks?.length ?? 0) === 0;
 
   const propIsEnumerable = ctx.addConst(Object.prototype.propertyIsEnumerable);
+  const valueProduct = childProduct(def.valueType, childSeen, ctx);
+  const valueFn = ctx.addConst(valueProduct.fn);
+  // An async value product: stock's runtime starts every value inside its loop, writes a sync
+  // result at once and an async one when its promise settles, so the output is in settlement order
+  // and an earlier async pair wins a collision with a later sync one. The loop logs every pair in
+  // that order (position, clean flag, output key, output value) and `emitAsyncRecordTail` assembles
+  // the copy from the log, each pair read exactly once (review of #70).
+  const valueAsync = valueProduct.kind === "async";
+  if (valueAsync) ctx.async = true;
+  const log = valueAsync ? ctx.var() : "";
+  const proms = valueAsync ? ctx.var() : "";
+  const idx = valueAsync ? ctx.var() : "";
+  if (valueAsync) ctx.write(`const ${log} = [], ${proms} = []; let ${idx} = 0;`);
+  /** The value of the current pair: started inside the loop, logged at once or when it settles */
+  const emitAsyncValue = (outKeyExpr: string): void => {
+    ctx.write(`const i = ${idx}++;`);
+    ctx.write(`const vIn = ${accessor}[k];`);
+    ctx.write(`const r = ${valueFn}(vIn);`);
+    ctx.write(
+      `if (r instanceof Promise) ${proms}.push(r.then((vo) => { ${log}.push(i, ${outKeyExpr} === k && vo === vIn, ${outKeyExpr}, vo); }));`,
+    );
+    ctx.write(`else ${log}.push(i, ${outKeyExpr} === k && r === vIn, ${outKeyExpr}, r);`);
+  };
   /** A pair stock leaves out of its output: the clean path may not return the input with it, so the record is dirty from here and the pair is skipped */
   const dropPair = (): void => {
+    if (valueAsync) {
+      ctx.write(`${dirty} = true; continue;`);
+      return;
+    }
     ctx.write(`if (!${dirty}) {`);
     ctx.indented(() => {
       ctx.write(`${dirty} = true;`);
@@ -198,11 +226,15 @@ export function emitCoWRecord(
       skipProto();
       skipNonEnumerable();
       ctx.write(`if (typeof k !== "string") return INVALID;`);
+      if (valueAsync) {
+        emitAsyncValue("k");
+        return;
+      }
       ctx.write(`const vIn = ${accessor}[k];`);
       emitRecordValueProduct(
         ctx,
-        def.valueType,
-        childSeen,
+        valueProduct,
+        valueFn,
         dirty,
         out,
         accessor,
@@ -234,8 +266,10 @@ export function emitCoWRecord(
       ctx.write(`if (outKey === INVALID) {`);
       ctx.indented(() => {
         // loose: a key the schema rejects is kept as it is with its value unvalidated, in its
-        // position: part of the clean prefix while clean, written explicitly once dirty
-        if (loose) ctx.write(`if (${dirty}) ${out}[k] = ${accessor}[k];`);
+        // position: part of the clean prefix while clean, written explicitly once dirty; stock
+        // writes it inside its loop, so on the async path it is a sync entry of the log
+        if (loose && valueAsync) ctx.write(`${log}.push(${idx}++, true, k, ${accessor}[k]);`);
+        else if (loose) ctx.write(`if (${dirty}) ${out}[k] = ${accessor}[k];`);
         ctx.write(loose ? `continue;` : `return INVALID;`);
       });
       ctx.write(`}`);
@@ -243,11 +277,15 @@ export function emitCoWRecord(
       ctx.write(`if (outKey === "__proto__") {`);
       ctx.indented(dropPair);
       ctx.write(`}`);
+      if (valueAsync) {
+        emitAsyncValue("outKey");
+        return;
+      }
       ctx.write(`const vIn = ${accessor}[k];`);
       emitRecordValueProduct(
         ctx,
-        def.valueType,
-        childSeen,
+        valueProduct,
+        valueFn,
         dirty,
         out,
         accessor,
@@ -259,7 +297,33 @@ export function emitCoWRecord(
     ctx.write(`}`);
   }
 
+  if (valueAsync) emitAsyncRecordTail(ctx, out, dirty, log, proms);
   return emitRecordChecks(ctx, schema, accessor, out, dirty);
+}
+
+/**
+ * After the async value loop: wait for every started value, then scan the log in stock's write
+ * order. A failed value fails the record; a pair out of iteration position or not its input marks
+ * it dirty, as does a dropped pair (`dirty` set inside the loop). The copy is assembled from the
+ * log, so a colliding output key is overwritten by the later write like in stock (review of #70).
+ */
+function emitAsyncRecordTail(
+  ctx: CodeCtx,
+  out: string,
+  dirty: string,
+  log: string,
+  proms: string,
+): void {
+  ctx.write(`if (${proms}.length) await Promise.all(${proms});`);
+  ctx.write(`for (let j = 0, n = 0; j < ${log}.length; j += 4, n++) {`);
+  ctx.indented(() => {
+    ctx.write(`if (${log}[j + 3] === INVALID) return INVALID;`);
+    ctx.write(`if (${log}[j] !== n || !${log}[j + 1]) ${dirty} = true;`);
+  });
+  ctx.write(`}`);
+  ctx.write(
+    `if (${dirty}) { ${out} = {}; for (let j = 0; j < ${log}.length; j += 4) ${out}[${log}[j + 2]] = ${log}[j + 3]; }`,
+  );
 }
 
 /**
@@ -290,10 +354,11 @@ function emitRecordChecks(
 /**
  * The first forced change of an iterating record: stock assembles its output from the parsed
  * pairs in `Reflect.ownKeys` order, so the copy starts empty and replays the clean prefix (every
- * enumerable own key before `keyVar`, `__proto__` skipped, the value read from the input again)
- * and every later pair is written after it. This keeps stock's assignment sequence, so a
- * transformed key that collides with a later key is overwritten by it and the copy keeps the
- * input's order; `{ ...input }` plus delete / write did neither (#67).
+ * enumerable own key before `keyVar`, `__proto__` skipped) and every later pair is written after
+ * it from the single read the loop makes. This keeps stock's assignment sequence, so a transformed
+ * key that collides with a later key is overwritten by it and the copy keeps the input's order;
+ * `{ ...input }` plus delete / write did neither (#67). The prefix is the one place the input is
+ * read twice: a getter before the first change answers a second time here (#36).
  */
 function emitRebuildPrefix(
   ctx: CodeCtx,
@@ -313,16 +378,17 @@ function emitRebuildPrefix(
 }
 
 /**
- * The two emission shapes for record value handling (every variable parameterized, no hard-coded variable names):
+ * The two sync emission shapes for record value handling (every variable parameterized, no hard-coded variable names):
  *   validator product: answers pass/fail only, value = input; path B still compares the key name;
  *   parser/cow product: returns a value, reference comparison for dirtiness.
+ * An async product takes the settlement-log loop instead (`emitAsyncValue` in `emitCoWRecord`).
  * A clean pair moves on to the next key. The first dirty pair rebuilds the clean prefix
  * (`emitRebuildPrefix`), then this and every later pair is written under its output key, as stock does.
  */
 function emitRecordValueProduct(
   ctx: CodeCtx,
-  valueType: Node,
-  seen: Set<Node>,
+  product: ChildProduct,
+  f: string,
   dirty: string,
   outVar: string,
   accessorVar: string,
@@ -330,8 +396,6 @@ function emitRecordValueProduct(
   keyVar: string,
   outKeyVar?: string,
 ): void {
-  const product = childProduct(valueType, seen, ctx);
-  const f = ctx.addConst(product.fn);
   let valExpr = "vIn";
   if (product.kind === "validator") {
     ctx.write(`if (${f}(vIn) === INVALID) return INVALID;`);
@@ -342,13 +406,9 @@ function emitRecordValueProduct(
       return;
     }
   } else {
+    // The async product never reaches this sync shape: the caller routes it to the settlement log
     const t = ctx.var();
-    if (product.kind === "async") {
-      ctx.async = true;
-      ctx.write(`const ${t} = await ${f}(vIn);`);
-    } else {
-      ctx.write(`const ${t} = ${f}(vIn);`);
-    }
+    ctx.write(`const ${t} = ${f}(vIn);`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
     valExpr = t;
   }

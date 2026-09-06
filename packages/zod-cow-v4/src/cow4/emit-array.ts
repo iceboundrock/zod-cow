@@ -1,4 +1,4 @@
-/** Array skeleton: element-level reference comparison + conditional slice() copy. */
+/** Array skeleton: element-level reference comparison + conditional slice() copy, holes materialized. */
 import type { CodeCtx } from "./codectx.js";
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
@@ -45,16 +45,22 @@ export function emitCoWArray(
     ctx.write(`const ${e} = ${accessor}[${i}];`);
     ctx.write(`const ${t} = ${awaitKw}${f}(${e});`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
+    // A hole reads as undefined and is parsed as such; stock writes every index of its fresh
+    // array (`new Array(len)` then `out[i] = ...`), while `slice()` keeps the hole and the clean
+    // path would return the sparse input: an index absent from the input is materialized as an
+    // own undefined slot, tested only when the value read was undefined (#67)
+    const hole = `if (!${dirty}) { ${dirty} = true; ${out} = ${accessor}.slice(); } ${out}[${i}] = undefined;`;
     if (elemPure && !elemIsContainer) {
       // Pure leaf element: value === input, no copy (the validator product returns true and cannot be reference-compared)
-      // Container elements go through the sub-skeleton: the product returns the original reference or a new container, so a reference comparison is safe
+      ctx.write(`if (${e} === undefined && !(${i} in ${accessor})) { ${hole} }`);
     } else {
+      // Container elements go through the sub-skeleton: the product returns the original reference or a new container, so a reference comparison is safe
       ctx.write(`if (${t} !== ${e}) {`);
       ctx.indented(() => {
         ctx.write(`if (!${dirty}) { ${dirty} = true; ${out} = ${accessor}.slice(); }`);
         ctx.write(`${out}[${i}] = ${t};`);
       });
-      ctx.write(`}`);
+      ctx.write(`} else if (${e} === undefined && !(${i} in ${accessor})) { ${hole} }`);
     }
   });
   ctx.write(`}`);

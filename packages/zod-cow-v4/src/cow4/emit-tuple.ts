@@ -82,8 +82,15 @@ export function emitCoWTuple(
         ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
         ctx.write(`${out}[${idxExpr}] = ${t};`);
       });
+      ctx.write(`} else if (${eVar} === undefined && !(${idxExpr} in ${accessor})) {`);
+      ctx.indented(() => emitHole(idxExpr));
       ctx.write(`}`);
     }
+  };
+  /** A hole: stock writes every slot it visits, so an index absent from the input is an own undefined in its output, where `slice()` keeps the hole (#67) */
+  const emitHole = (idxExpr: string): void => {
+    ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
+    ctx.write(`${out}[${idxExpr}] = undefined;`);
   };
   /** Check-shaped slot (validator product): answers pass/fail only; when absent the official code still materializes out[i] = undefined (a pure subtree's output = input = undefined) */
   const emitValidatorSlot = (
@@ -96,7 +103,12 @@ export function emitCoWTuple(
     const isA = p.kind === "async";
     if (isA) ctx.async = true;
     ctx.write(`if ((${isA ? "await " : ""}${f}(${argExpr})) === INVALID) return INVALID;`);
-    if (!present) {
+    if (present) {
+      // argExpr is the local holding the value read from the slot: a hole is materialized
+      ctx.write(`if (${argExpr} === undefined && !(${idxExpr} in ${accessor})) {`);
+      ctx.indented(() => emitHole(idxExpr));
+      ctx.write(`}`);
+    } else {
       // absent + validator (pure optional and friends): stock materializes an undefined slot (output length i+1 > input) → must write
       ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
       ctx.write(`${out}[${idxExpr}] = undefined;`);
@@ -222,6 +234,9 @@ export function emitCoWTuple(
       ctx.write(`const ${e} = ${accessor}[i];`);
       if (restProduct.kind === "validator") {
         ctx.write(`if ((${isA ? "await " : ""}${f}(${e})) === INVALID) return INVALID;`);
+        ctx.write(`if (${e} === undefined && !(i in ${accessor})) {`);
+        ctx.indented(() => emitHole("i"));
+        ctx.write(`}`);
       } else {
         const t = ctx.var();
         ctx.write(`const ${t} = ${isA ? "await " : ""}${f}(${e});`);
@@ -231,6 +246,8 @@ export function emitCoWTuple(
           ctx.write(`if (${out} === ${accessor}) ${out} = ${accessor}.slice();`);
           ctx.write(`${out}[i] = ${t};`);
         });
+        ctx.write(`} else if (${e} === undefined && !(i in ${accessor})) {`);
+        ctx.indented(() => emitHole("i"));
         ctx.write(`}`);
       }
     });

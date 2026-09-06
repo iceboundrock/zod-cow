@@ -8,7 +8,7 @@ import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "
 import { containerChecksFn, containerChildFn } from "./emit.js";
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
-import { isAsyncProduct, type Node } from "./product.js";
+import { type Fn, isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ── object skeleton ── */
@@ -80,60 +80,68 @@ export function emitCoWObject(
   /** Per key: the expression holding its output value on the copy path */
   const outputs: { key: string | symbol; keyExpr: string; valueVar: string }[] = [];
 
-  for (const key of allKeys) {
+  /**
+   * One plan per key, products built up front (shape order, so nested skeletons are built in the
+   * order the loop below emits them). `validator`: a pure leaf, the official assertOnly product,
+   * output === input (container keys never take it: strip semantics need a CoW sub-skeleton, see
+   * cowSafeContainerForChild); `cow`: a container key, the CoW sub-skeleton; `parser`: an impure
+   * key, the official parser plus a reference comparison for dirtiness.
+   */
+  type KeyPlan = {
+    key: string | symbol;
+    keyExpr: string;
+    inVar: string;
+    kind: "validator" | "cow" | "parser";
+    fnVar: string;
+    async: boolean;
+  };
+  const plans: KeyPlan[] = allKeys.map((key) => {
     const child: Node = shape[key];
     const keyExpr = typeof key === "symbol" ? ctx.addConst(key) : escKey(key);
-    const inVar = ctx.var();
-    // Read the getter only once (official comment: checks and output assembly must not trigger the getter a second time)
-    ctx.write(`const ${inVar} = ${accessor}[${keyExpr}];`);
-
-    // Official presence guard: the value-level fast path cannot tell an absent required key from a present-undefined one
-    if (requiresPresence(child)) {
-      ctx.write(`if (!(${keyExpr} in ${accessor})) return INVALID;`);
-    }
-
+    let kind: KeyPlan["kind"];
+    let fn: Fn;
     if (isPure(child) && !cowSafeContainerForChild(child)) {
-      // Pure leaf key: the official assertOnly product. Output === input, so the captured local is the output value.
-      // (container keys do not take this branch: the strip semantics need a CoW sub-skeleton, see cowSafeContainerForChild)
-      const vFn = officialFn(child, true);
-      const v = ctx.addConst(vFn);
-      if (isAsyncProduct(vFn)) {
-        // A pure key has no async in theory; handled defensively anyway (after awaiting an async validator, output = input)
-        ctx.async = true;
-        ctx.write(`if ((await ${v}(${inVar})) === INVALID) return INVALID;`);
-      } else {
-        ctx.write(`if (${v}(${inVar}) === INVALID) return INVALID;`);
-      }
-      outputs.push({ key, keyExpr, valueVar: inVar });
-      continue;
+      kind = "validator";
+      fn = officialFn(child, true);
+    } else if (cowSafeContainerForChild(child)) {
+      kind = "cow";
+      fn = containerChildFn(child, seen, ctx);
+    } else {
+      kind = "parser";
+      fn = officialFn(child, false);
     }
+    return {
+      key,
+      keyExpr,
+      inVar: ctx.var(),
+      kind,
+      fnVar: ctx.addConst(fn),
+      async: isAsyncProduct(fn),
+    };
+  });
 
-    if (cowSafeContainerForChild(child)) {
-      // Container key (including optional/nullable wrapping): CoW sub-skeleton (nested CoW + strip semantics intact)
-      const vFn = containerChildFn(child, seen, ctx);
-      const v = ctx.addConst(vFn);
-      const isA = isAsyncProduct(vFn);
-      if (isA) ctx.async = true;
-      const outVar = ctx.var();
-      ctx.write(`const ${outVar} = ${isA ? "await " : ""}${v}(${inVar});`);
+  /** The checks on a key's settled result `res` (a call expression or a local) and its dirtiness */
+  const emitKeyResult = (p: KeyPlan, res: string): void => {
+    const { key, keyExpr, inVar } = p;
+    if (p.kind === "validator") {
+      ctx.write(`if (${res} === INVALID) return INVALID;`);
+      outputs.push({ key, keyExpr, valueVar: inVar });
+      return;
+    }
+    const outVar = ctx.var();
+    if (p.kind === "cow") {
+      ctx.write(`const ${outVar} = ${res};`);
       ctx.write(`if (${outVar} === INVALID) return INVALID;`);
       // A clean sub-skeleton returns the original reference → equal, not dirty; a dirty one returns a new reference → mark dirty
       ctx.write(`if (${outVar} !== ${inVar}) ${dirty} = true;`);
       outputs.push({ key, keyExpr, valueVar: outVar });
-      continue;
+      return;
     }
-
-    // Impure key: official parser product + reference comparison for dirtiness
-    const vFn = officialFn(child, false);
-    const v = ctx.addConst(vFn);
-    const isA = isAsyncProduct(vFn);
-    if (isA) ctx.async = true;
-    const awaitKw = isA ? "await " : "";
-    const outVar = ctx.var();
+    const child: Node = shape[key];
     const optoutOptional = child._zod.optin !== undefined && child._zod.optout === "optional";
     if (optoutOptional) {
       // Official optin branch template: an absent key is not a failure, the output is undefined
-      ctx.write(`let ${outVar} = ${awaitKw}${v}(${inVar});`);
+      ctx.write(`let ${outVar} = ${res};`);
       ctx.write(`if (${outVar} === INVALID) {`);
       ctx.indented(() => {
         ctx.write(`if (${keyExpr} in ${accessor}) return INVALID;`);
@@ -141,15 +149,54 @@ export function emitCoWObject(
       });
       ctx.write(`}`);
     } else {
-      ctx.write(`const ${outVar} = ${awaitKw}${v}(${inVar});`);
+      ctx.write(`const ${outVar} = ${res};`);
       ctx.write(`if (${outVar} === INVALID) return INVALID;`);
     }
-
     // Dirtiness: reference comparison. Output undefined with the key absent → treated as unchanged (stock does not materialize the key either)
     ctx.write(
       `if (${outVar} !== ${inVar} && !(${outVar} === undefined && !(${keyExpr} in ${accessor}))) ${dirty} = true;`,
     );
     outputs.push({ key, keyExpr, valueVar: outVar });
+  };
+  /** Official presence guard: the value-level fast path cannot tell an absent required key from a present-undefined one */
+  const emitPresenceGuard = (p: KeyPlan): void => {
+    if (requiresPresence(shape[p.key])) {
+      ctx.write(`if (!(${p.keyExpr} in ${accessor})) return INVALID;`);
+    }
+  };
+
+  if (!plans.some((p) => p.async)) {
+    // Sync layout: read, call and check each key in shape order
+    for (const p of plans) {
+      // Read the getter only once (official comment: checks and output assembly must not trigger the getter a second time)
+      ctx.write(`const ${p.inVar} = ${accessor}[${p.keyExpr}];`);
+      emitPresenceGuard(p);
+      emitKeyResult(p, `${p.fnVar}(${p.inVar})`);
+    }
+  } else {
+    // Async layout (#71): stock's runtime starts every key's parse inside its loop and awaits them
+    // together, so every product is called in shape order before the first await (a sync child's
+    // result is captured, an async child's promise started), one `Promise.all` settles the async
+    // ones, and the checks run on the settled results in shape order. Nothing returns between the
+    // first start and the `Promise.all`, so a rejected promise is always attached.
+    ctx.async = true;
+    const started: { p: KeyPlan; resVar: string }[] = [];
+    for (const p of plans) {
+      ctx.write(`const ${p.inVar} = ${accessor}[${p.keyExpr}];`);
+      const resVar = ctx.var();
+      ctx.write(`const ${resVar} = ${p.fnVar}(${p.inVar});`);
+      started.push({ p, resVar });
+    }
+    const settled = new Map<KeyPlan, string>();
+    const asyncOnes = started.filter((s) => s.p.async);
+    for (const s of asyncOnes) settled.set(s.p, ctx.var());
+    ctx.write(
+      `const [${asyncOnes.map((s) => settled.get(s.p)).join(", ")}] = await Promise.all([${asyncOnes.map((s) => s.resVar).join(", ")}]);`,
+    );
+    for (const s of started) {
+      emitPresenceGuard(s.p);
+      emitKeyResult(s.p, settled.get(s.p) ?? s.resVar);
+    }
   }
 
   // Undeclared-key predicate (official for...in template: inherited keys participate, matching the runtime).

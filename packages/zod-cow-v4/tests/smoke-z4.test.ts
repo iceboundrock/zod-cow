@@ -1492,4 +1492,102 @@ import { compile } from "../src/index.js";
   );
 }
 
+/* ── 20. async children of an object, enum record, array or tuple start before the first await, as stock's runtime does (#71) ── */
+{
+  console.log("\n── async children start together (#71) ──");
+  const refine = z.string().refine(async () => true);
+  const pass = z
+    .string()
+    .transform(async (v) => v)
+    .optional();
+  const firsts = (s: Set<unknown>) =>
+    [...s].map((m: any) => (Array.isArray(m) ? m[0] : m.a)).join(",");
+  // A set adds its members in settlement order (#70). With the children awaited in place, a member
+  // with two async children settled a round after a member with one and lost its place; stock
+  // starts both children before its Promise.all, so both members settle in the same round and the
+  // input order is kept
+  const members = [
+    ["tuple", z.set(z.tuple([refine, pass])), new Set([["b", "y"], ["a"]])],
+    ["object", z.set(z.object({ a: refine, b: pass })), new Set([{ a: "b", b: "y" }, { a: "a" }])],
+    [
+      "enum record",
+      z.set(z.record(z.enum(["a", "b"]), pass)),
+      new Set([{ a: "b", b: "y" }, { a: "a" }]),
+    ],
+    [
+      "array",
+      z.set(z.array(z.string().transform(async (v) => v))),
+      new Set([["b", "b", "b"], ["a"]]),
+    ],
+  ] as const;
+  for (const [label, S, input] of members) {
+    const stock = firsts(await S.parseAsync(input as never));
+    assert.equal(stock, "b,a", `stock ${label}: the members keep the input order`);
+    assert.equal(
+      firsts(await compile(S).parseAsync(input as never)),
+      stock,
+      `${label} members settle in stock's order`,
+    );
+  }
+  console.log(
+    "  set members that are tuples, objects, enum records or arrays settle in stock's order ✓",
+  );
+
+  // The children's side effects interleave like stock: the second key's transform starts before the first settles
+  const log: string[] = [];
+  const E = z.object({
+    a: z.string().transform(async (v) => {
+      log.push("a starts");
+      await null;
+      log.push("a settles");
+      return v;
+    }),
+    b: z.string().transform(async (v) => {
+      log.push("b starts");
+      return v;
+    }),
+  });
+  await E.parseAsync({ a: "x", b: "y" });
+  const stockLog = log.splice(0).join(", ");
+  assert.equal(stockLog, "a starts, b starts, a settles");
+  await compile(E).parseAsync({ a: "x", b: "y" });
+  assert.equal(log.join(", "), stockLog, "the second child starts before the first settles");
+  console.log("  the children's side effects interleave like stock ✓");
+
+  // Nothing returns between the first start and the Promise.all: a rejecting child next to a sync
+  // child that fails still rejects the parse, and no started promise is left unhandled
+  let unhandled = 0;
+  const onUnhandled = () => {
+    unhandled++;
+  };
+  process.on("unhandledRejection", onUnhandled);
+  const R = z.object({
+    a: z.string().transform(async () => {
+      throw new Error("boom");
+    }),
+    b: z.number(),
+  });
+  await assert.rejects(compile(R).parseAsync({ a: "x", b: "no" }), /boom/);
+  await assert.rejects(R.parseAsync({ a: "x", b: "no" }), /boom/);
+  await new Promise((r) => setTimeout(r, 0));
+  process.off("unhandledRejection", onUnhandled);
+  assert.equal(unhandled, 0, "a started promise is always attached to the Promise.all");
+  console.log("  a rejecting child next to a failing sync sibling rejects, nothing unhandled ✓");
+
+  // Code pin: the async layout awaits one Promise.all and nothing else; the sync layout awaits nothing
+  for (const S of [
+    z.tuple([refine, pass]),
+    z.tuple([z.string()], refine),
+    z.object({ a: refine, b: pass }),
+    z.array(refine),
+    z.record(z.enum(["a"]), pass),
+  ]) {
+    const C = compile(S);
+    assert.ok(C.async && C.code!.includes("await Promise.all("), "async layout: one Promise.all");
+    assert.equal((C.code!.match(/await /g) ?? []).length, 1, "async layout: a single await");
+  }
+  assert.ok(!compile(z.tuple([z.string(), z.number().optional()])).code!.includes("await"));
+  console.log("  the async layout awaits one Promise.all; the sync layout awaits nothing ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

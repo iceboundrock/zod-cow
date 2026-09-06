@@ -629,7 +629,14 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    Nothing returns between the first start and the `Promise.all`, so a rejecting promise is always attached. The
    container's own checks run after the children have settled, as stock runs `runChecks` after the parse; an async
    predicate among them makes the checks subroutine itself async on the same schedule (every predicate called before
-   its first `await`, §3.2, #13). The sync layout is unchanged.
+   its first `await`, §3.2, #13). Nothing is read from the input after the `Promise.all` except the tuple's length
+   (#77): the array skeleton takes the length before its loop, captures each read and each hole (`Object.hasOwn`) in
+   the first pass and rebuilds the clean prefix from the captured reads; the tuple skeleton does the same for its fixed
+   slots and the rest elements it sliced before the await, and keeps its presence guards on the live `input.length`,
+   as stock's `handleTupleResults` decides presence after the await. A child that mutates the input before its promise
+   settles is therefore not observed by the copy path, as stock, which reads every element once before any promise
+   settles, does not observe it either; the clean path still returns the input as it then is. The sync layout is
+   unchanged, with its documented second read of the prefix (#36).
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;

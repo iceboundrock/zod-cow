@@ -13,8 +13,8 @@ import type { Node } from "./product.js";
 /**
  * The tuple CoW skeleton -- line for line with the official generateTupleCheck; the only difference is rewriting
  * the "unconditional new container" (const out = []) into reference comparison for dirtiness + a prefix rebuild at
- * the first change (the clean slots before it read from the input a second time, #36; every later slot written from
- * the loop's single read, review of #70):
+ * the first change (in the sync layout the clean slots before it read from the input a second time, #36; the async
+ * layout rebuilds them from its captured reads, #77; every later slot written from the loop's single read, review of #70):
  *
  *   Length guard (same as the official one, optinStart/optoutStart computed at compile time)
  *   Segment 1 [0, optoutStart): the official unconditional branch out[i] = child(input[i])
@@ -34,7 +34,11 @@ import type { Node } from "./product.js";
  * reads and starts the rest elements, awaits one `Promise.all` over the async ones, and runs the
  * three segments above on the captured reads and the settled results, so a slot with two async
  * children settles in the same round as one with a single child (a sync slot's result is captured
- * in the same pass, in stock's order). Nothing returns between the first start and the `Promise.all`.
+ * in the same pass, in stock's order). Nothing returns between the first start and the `Promise.all`,
+ * and nothing is read from the input after it except its length (#77): stock reads `input[i]` and
+ * `input.slice(items.length)` before any promise settles but decides presence from the live length
+ * in `handleTupleResults`, so the prefix rebuild and the hole test use the captured reads while the
+ * presence guards stay on `input.length`.
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -73,30 +77,39 @@ export function emitCoWTuple(
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
 
-  /** Async layout: the local holding the single read of fixed slot i, and the one holding its settled result */
+  /** Async layout: the local holding the single read of fixed slot i, the one holding whether it was a hole, and the one holding its settled result */
   const slotRead: string[] = [];
+  const slotHole: string[] = [];
   const slotResult: string[] = [];
-  /** Async layout: the reads and the settled results of the rest elements, indexed by `i - N` */
+  /** Async layout: the reads, the holes (null until the first one) and the settled results of the rest elements, indexed by `i - N` */
   const restReads = anyAsync && rest ? ctx.var() : "";
+  const restHoles = anyAsync && rest ? ctx.var() : "";
   const restResults = anyAsync && rest ? ctx.var() : "";
   if (anyAsync) {
     const started: string[] = [];
     for (let i = 0; i < N; i++) {
       const e = ctx.var();
+      const h = ctx.var();
       const r = ctx.var();
       ctx.write(`const ${e} = ${accessor}[${i}];`);
+      ctx.write(`const ${h} = ${e} === undefined && !Object.hasOwn(${accessor}, ${i});`);
       ctx.write(`const ${r} = ${ctx.addConst(itemProducts[i]!.fn)}(${e});`);
       slotRead.push(e);
+      slotHole.push(h);
       started.push(r);
       slotResult.push(itemProducts[i]!.kind === "async" ? ctx.var() : r);
     }
     const restStarted = rest ? ctx.var() : "";
     if (rest) {
       ctx.write(`const ${restReads} = [], ${restStarted} = [];`);
+      ctx.write(`let ${restHoles} = null;`);
       ctx.write(`for (let i = ${N}; i < ${accessor}.length; i++) {`);
       ctx.indented(() => {
         const e = ctx.var();
         ctx.write(`const ${e} = ${accessor}[i];`);
+        ctx.write(
+          `if (${e} === undefined && !Object.hasOwn(${accessor}, i)) (${restHoles} ??= [])[i - ${N}] = true;`,
+        );
         ctx.write(`${restReads}.push(${e});`);
         ctx.write(`${restStarted}.push(${restFn}(${e}));`);
       });
@@ -132,13 +145,26 @@ export function emitCoWTuple(
   const slotCall = (i: number, argExpr: string): string =>
     anyAsync ? slotResult[i]! : `${ctx.addConst(itemProducts[i]!.fn)}(${argExpr})`;
 
-  /** The first forced change at slot `idxExpr`: a fresh array holding the clean prefix [0, idxExpr), read from the input a
-   *  second time (#36); every later slot is written from the loop's single read (review of #70) */
-  const copyAt = (idxExpr: string): string =>
-    `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
-  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too) */
-  const isHole = (eVar: string, idxExpr: string): string =>
-    `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
+  /** The first forced change at slot `idxExpr` (a fixed slot's literal index, or `i` inside the rest loop): a fresh array
+   *  holding the clean prefix [0, idxExpr). The sync layout reads it from the input a second time (#36); the async layout
+   *  takes it from the captured reads (#77). Every later slot is written from the loop's single read (review of #70) */
+  const copyAt = (idxExpr: string): string => {
+    if (!anyAsync) {
+      return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
+    }
+    if (idxExpr !== "i") {
+      // A clean prefix holds present, unchanged slots only (an absent slot, a hole or a truncation copies), so the captured reads are the prefix
+      return `if (${out} === ${accessor}) ${out} = [${slotRead.slice(0, Number(idxExpr)).join(", ")}];`;
+    }
+    return `if (${out} === ${accessor}) { ${out} = [${slotRead.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
+  };
+  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); the
+   *  async layout decided it before the await (#77) */
+  const isHole = (eVar: string, idxExpr: string): string => {
+    if (!anyAsync) return `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
+    if (idxExpr !== "i") return slotHole[Number(idxExpr)]!;
+    return `${restHoles} !== null && ${restHoles}[i - ${N}] === true`;
+  };
   /** Value-shaped slot (parser/cow/async product), its result `res` (a call expression or a settled local): test for
    *  INVALID + reference comparison + prefix rebuild at the first dirt.
    *  eVar=null marks an absent slot (the official code unconditionally does out[i] = result, including materializing undefined / extending the shape) → write unconditionally. */
@@ -280,9 +306,11 @@ export function emitCoWTuple(
     ctx.write(`}`);
   }
 
-  /* Segment 3: rest [N, L) -- the official ungated per-slot write */
+  /* Segment 3: rest [N, L) -- the official ungated per-slot write; the async layout walks the elements it sliced before the await, as stock does (#77) */
   if (rest && restProduct) {
-    ctx.write(`for (let i = ${N}; i < ${accessor}.length; i++) {`);
+    ctx.write(
+      `for (let i = ${N}; i < ${anyAsync ? `${N} + ${restReads}.length` : `${accessor}.length`}; i++) {`,
+    );
     ctx.indented(() => {
       // The sync layout reads and calls in the loop; the async one reads the captured element and its settled result
       const e = ctx.var();

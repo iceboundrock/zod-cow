@@ -567,6 +567,228 @@ head("a failing length check between two predicates: the stock fallback re-runs 
   ok("the subroutine bails at .min(), the fallback runs every check once more");
 }
 
+head(
+  "async array / tuple copy paths use the reads captured before the await, not the live input (#77)",
+);
+{
+  // A child may mutate the input before its promise settles (a violation of the CoW premise, but
+  // stock is unaffected by it: it reads every element once before any promise settles). The copy
+  // path must then carry the captured reads like stock; the clean path still returns the input as
+  // it then is, since the output may alias the input.
+  type Mut = (input: unknown[]) => void;
+  /** An element whose first call mutates the parent through `holder` after an await and returns its value unchanged; every later call appends "!" */
+  const mutating = (holder: { input: unknown[] }, mutate: Mut, calls = { n: 0 }) =>
+    z.string().transform(async (v) => {
+      if (calls.n++ === 0) {
+        await Promise.resolve();
+        mutate(holder.input);
+        return v;
+      }
+      return `${v}!`;
+    });
+  /** Parses a fresh input on both sides and compares with stock, or with `expected` where stock's own answer is the
+   *  quirk the README declines to match (an async rest element: stock's runtime writes every rest result to the last
+   *  index, so its output is sparse and loses elements, while the skeleton outputs the dense array) */
+  const run = async (
+    build: (holder: { input: unknown[] }, calls: { n: number }) => z.ZodType,
+    make: () => unknown[],
+    label: string,
+    expected?: unknown[],
+  ) => {
+    const holder = { input: [] as unknown[] };
+    const calls = { n: 0 };
+    const S = build(holder, calls);
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""), `${label}: the container keeps its skeleton`);
+    calls.n = 0;
+    holder.input = make();
+    const stock = expected ?? (await S.parseAsync(holder.input));
+    calls.n = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock, label);
+    assert.equal((cow as unknown[]).length, (stock as unknown[]).length, `${label}: length`);
+    for (let i = 0; i < (stock as unknown[]).length; i++) {
+      assert.equal(
+        Object.hasOwn(cow as object, i),
+        Object.hasOwn(stock as object, i),
+        `${label}: slot ${i} ownership`,
+      );
+    }
+    ok(label);
+  };
+
+  // array: the clean element 0 is overwritten while element 1 is dirty → the prefix rebuild must carry "a"
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a[0] = "MUT";
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: prefix rebuild carries the captured read",
+  );
+  // array: the input grows before settlement → stock's output keeps the length it read before the await
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a.push("c");
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: a pushed element after the await is not in the output",
+  );
+  // array: the input shrinks before settlement → every element read before the await is still written
+  await run(
+    (h, c) =>
+      z.array(
+        mutating(
+          h,
+          (a) => {
+            a.length = 1;
+          },
+          c,
+        ),
+      ),
+    () => ["a", "b"],
+    "array: a truncation after the await loses nothing",
+  );
+  // array: a hole read before the await is a hole even when the child fills it before settling
+  {
+    const holder = { input: [] as unknown[] };
+    let calls = 0;
+    const S = z.array(
+      z
+        .string()
+        .optional()
+        .transform(async (v) => {
+          if (calls++ === 0) {
+            await Promise.resolve();
+            holder.input[0] = "filled";
+          }
+          return v;
+        }),
+    );
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""));
+    const make = () => {
+      const a: unknown[] = [];
+      a[1] = "b";
+      return a;
+    };
+    calls = 0;
+    holder.input = make();
+    const stock = await S.parseAsync(holder.input);
+    calls = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock);
+    assert.ok(
+      Object.hasOwn(cow as object, 0) && (cow as unknown[])[0] === undefined,
+      "the hole is an own undefined slot like stock",
+    );
+    ok("array: a hole filled after the await stays a hole");
+  }
+
+  // tuple, fixed slots: same prefix rebuild
+  await run(
+    (h, c) => {
+      const e = mutating(
+        h,
+        (a) => {
+          a[0] = "MUT";
+        },
+        c,
+      );
+      return z.tuple([e, e]);
+    },
+    () => ["a", "b"],
+    "tuple: prefix rebuild carries the captured slot read",
+  );
+  // tuple with an async rest: the rest element mutates a fixed slot and the earlier rest slot
+  await run(
+    (h, c) =>
+      z.tuple(
+        [z.string()],
+        mutating(
+          h,
+          (a) => {
+            a[0] = "MUT0";
+            a[1] = "MUT1";
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: the rest prefix and the fixed slots come from the captured reads",
+    ["h", "a", "b!"],
+  );
+  // tuple with an async rest: the input grows before settlement → only the sliced rest elements are in the output
+  await run(
+    (h, c) =>
+      z.tuple(
+        [z.string()],
+        mutating(
+          h,
+          (a) => {
+            a.push("c");
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a pushed rest element after the await is not in the output",
+    ["h", "a", "b!"],
+  );
+  // tuple: a hole in a fixed slot filled after the await stays a hole
+  {
+    const holder = { input: [] as unknown[] };
+    let calls = 0;
+    const S = z.tuple([
+      z
+        .string()
+        .optional()
+        .transform(async (v) => {
+          if (calls++ === 0) {
+            await Promise.resolve();
+            holder.input[0] = "filled";
+          }
+          return v;
+        }),
+      z.string(),
+    ]);
+    const C = compile(S);
+    assert.ok(!/_zod/.test(C.code ?? ""));
+    const make = () => {
+      const a: unknown[] = [];
+      a[1] = "b";
+      return a;
+    };
+    calls = 0;
+    holder.input = make();
+    const stock = await S.parseAsync(holder.input);
+    calls = 0;
+    holder.input = make();
+    const cow = await C.parseAsync(holder.input);
+    assert.deepEqual(cow, stock);
+    assert.ok(
+      Object.hasOwn(cow as object, 0) && (cow as unknown[])[0] === undefined,
+      "the hole is an own undefined slot like stock",
+    );
+    ok("tuple: a hole filled after the await stays a hole");
+  }
+}
+
 head("async failure path falls back to stock safeParseAsync (official issues structure)");
 {
   const S = z.object({

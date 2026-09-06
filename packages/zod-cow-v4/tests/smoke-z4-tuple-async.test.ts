@@ -787,6 +787,72 @@ head(
     );
     ok("tuple: a hole filled after the await stays a hole");
   }
+
+  // tuple rest under the async layout: stock takes `input.slice(items.length)` after it started the fixed slots
+  // and before it runs any rest element, so a sync rest callback that mutates a later rest slot is not observed
+  // by stock (second review of #76); a fixed slot's callback that mutates a rest slot before the slice is.
+  /** A sync rest element whose first call mutates the parent through `holder` and returns its value unchanged; every later call appends "!" */
+  const mutatingSync = (holder: { input: unknown[] }, mutate: Mut, calls: { n: number }) =>
+    z.string().transform((v) => {
+      if (calls.n++ === 0) {
+        mutate(holder.input);
+        return v;
+      }
+      return `${v}!`;
+    });
+  const asyncId = z.string().transform(async (v) => {
+    await Promise.resolve();
+    return v;
+  });
+  await run(
+    (h, c) =>
+      z.tuple(
+        [asyncId],
+        mutatingSync(
+          h,
+          (a) => {
+            a[2] = "MUT";
+          },
+          c,
+        ),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a sync rest element that overwrites a later rest slot is read from the slice, like stock",
+  );
+  await run(
+    (h) =>
+      z.tuple(
+        [
+          z.string().transform(async (v) => {
+            h.input[1] = "MUT";
+            await Promise.resolve();
+            return v;
+          }),
+        ],
+        z.string().transform((v) => `${v}!`),
+      ),
+    () => ["h", "a", "b"],
+    "tuple: a fixed slot that overwrites a rest slot before the slice is observed, like stock",
+  );
+  await run(
+    (h, c) =>
+      z.tuple(
+        [asyncId],
+        z
+          .string()
+          .optional()
+          .transform((v) => {
+            if (c.n++ === 0) h.input[2] = "filled";
+            return v;
+          }),
+      ),
+    () => {
+      const a: unknown[] = ["h", "a"];
+      a.length = 3;
+      return a;
+    },
+    "tuple: a rest hole filled by an earlier rest element stays a hole, like stock",
+  );
 }
 
 head("async failure path falls back to stock safeParseAsync (official issues structure)");

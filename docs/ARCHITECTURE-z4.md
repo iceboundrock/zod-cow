@@ -632,8 +632,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    its first `await`, §3.2, #13). Nothing is read from the input after the `Promise.all` except the tuple's length
    (#77): the array skeleton takes the length before its loop, captures each read and each hole (`Object.hasOwn`) in
    the first pass and rebuilds the clean prefix from the captured reads; the tuple skeleton does the same for its fixed
-   slots and the rest elements it sliced before the await, and keeps its presence guards on the live `input.length`,
-   as stock's `handleTupleResults` decides presence after the await. A child that mutates the input before its promise
+   slots, takes stock's `input.slice(items.length)` after the fixed slots started and before any rest product runs (a
+   sync rest callback that mutates a later rest slot is not observed, a fixed slot's callback that ran before the slice
+   is, a rest hole is decided on the slice), starts every rest element from that slice, and keeps its presence guards
+   on the live `input.length`, as stock's `handleTupleResults` decides presence after the await. A child that mutates the input before its promise
    settles is therefore not observed by the copy path, as stock, which reads every element once before any promise
    settles, does not observe it either; the clean path still returns the input as it then is. The sync layout is
    unchanged, with its documented second read of the prefix (#36).

@@ -31,14 +31,16 @@ import type { Node } from "./product.js";
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
  * then awaits them together. The skeleton then reads every fixed slot once and starts its product,
- * reads and starts the rest elements, awaits one `Promise.all` over the async ones, and runs the
- * three segments above on the captured reads and the settled results, so a slot with two async
- * children settles in the same round as one with a single child (a sync slot's result is captured
- * in the same pass, in stock's order). Nothing returns between the first start and the `Promise.all`,
- * and nothing is read from the input after it except its length (#77): stock reads `input[i]` and
- * `input.slice(items.length)` before any promise settles but decides presence from the live length
- * in `handleTupleResults`, so the prefix rebuild and the hole test use the captured reads while the
- * presence guards stay on `input.length`.
+ * takes `input.slice(N)` and starts every rest element from that slice (stock's own read order: a
+ * rest callback that mutates a later rest slot is not observed, a fixed slot's callback that ran
+ * before the slice is), awaits one `Promise.all` over the async ones, and runs the three segments
+ * above on the captured reads and the settled results, so a slot with two async children settles in
+ * the same round as one with a single child (a sync slot's result is captured in the same pass, in
+ * stock's order). Nothing returns between the first start and the `Promise.all`, and nothing is read
+ * from the input after it except its length (#77): stock reads `input[i]` and `input.slice(items.length)`
+ * before any promise settles but decides presence from the live length in `handleTupleResults`, so
+ * the prefix rebuild and the hole test use the captured reads and the slice while the presence
+ * guards stay on `input.length`.
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -81,9 +83,9 @@ export function emitCoWTuple(
   const slotRead: string[] = [];
   const slotHole: string[] = [];
   const slotResult: string[] = [];
-  /** Async layout: the reads, the holes (null until the first one) and the settled results of the rest elements, indexed by `i - N` */
+  /** Async layout: the rest elements (stock's `input.slice(items.length)`, taken after the fixed slots started and
+   *  before any rest product runs, holes preserved) and their settled results, indexed by `i - N` */
   const restReads = anyAsync && rest ? ctx.var() : "";
-  const restHoles = anyAsync && rest ? ctx.var() : "";
   const restResults = anyAsync && rest ? ctx.var() : "";
   if (anyAsync) {
     const started: string[] = [];
@@ -101,17 +103,12 @@ export function emitCoWTuple(
     }
     const restStarted = rest ? ctx.var() : "";
     if (rest) {
-      ctx.write(`const ${restReads} = [], ${restStarted} = [];`);
-      ctx.write(`let ${restHoles} = null;`);
-      ctx.write(`for (let i = ${N}; i < ${accessor}.length; i++) {`);
+      // Stock slices the rest before it runs any rest element, so a rest callback that mutates a later rest slot
+      // is not observed (second review of #76); a fixed slot's callback that ran before the slice is, like stock
+      ctx.write(`const ${restReads} = ${accessor}.slice(${N}), ${restStarted} = [];`);
+      ctx.write(`for (let i = 0; i < ${restReads}.length; i++) {`);
       ctx.indented(() => {
-        const e = ctx.var();
-        ctx.write(`const ${e} = ${accessor}[i];`);
-        ctx.write(
-          `if (${e} === undefined && !Object.hasOwn(${accessor}, i)) (${restHoles} ??= [])[i - ${N}] = true;`,
-        );
-        ctx.write(`${restReads}.push(${e});`);
-        ctx.write(`${restStarted}.push(${restFn}(${e}));`);
+        ctx.write(`${restStarted}.push(${restFn}(${restReads}[i]));`);
       });
       ctx.write(`}`);
     }
@@ -159,11 +156,11 @@ export function emitCoWTuple(
     return `if (${out} === ${accessor}) { ${out} = [${slotRead.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
   };
   /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); the
-   *  async layout decided it before the await (#77) */
+   *  async layout decided a fixed slot's before the await and reads a rest element's off the slice, which kept it (#77) */
   const isHole = (eVar: string, idxExpr: string): string => {
     if (!anyAsync) return `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
     if (idxExpr !== "i") return slotHole[Number(idxExpr)]!;
-    return `${restHoles} !== null && ${restHoles}[i - ${N}] === true`;
+    return `${eVar} === undefined && !Object.hasOwn(${restReads}, i - ${N})`;
   };
   /** Value-shaped slot (parser/cow/async product), its result `res` (a call expression or a settled local): test for
    *  INVALID + reference comparison + prefix rebuild at the first dirt.

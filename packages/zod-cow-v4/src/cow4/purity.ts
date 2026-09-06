@@ -27,10 +27,13 @@ export function isPure(schema: Node): boolean {
     case "literal":
     case "enum":
       return leafChecksArePure(schema);
-    // Wrappers: recurse into inner
+    // Wrappers: the wrapper's own checks first (an overwrite, a superRefine or an async refine on the
+    // wrapper rewrites or times the value exactly as on a leaf, and the validator would return the
+    // input, #57; on a wrapper around a container the same verdict sent the chain to the validator,
+    // which keeps the undeclared keys stock strips, #56), then the inner
     case "optional":
     case "nullable":
-      return isPure(def.innerType);
+      return leafChecksArePure(schema) && isPure(def.innerType);
     // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
     // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
     // The verdict holds only where a skeleton is actually emitted for the container (the top level and the
@@ -168,24 +171,41 @@ function checksAreCowSafe(schema: Node): boolean {
 }
 
 /**
+ * Whether the checks of an optional / nullable layer above a container can run in the skeleton: none, or
+ * `.refine` predicates only (`custom` with a sync `fn` and no custom `when`), which `containerChecksFn`
+ * emits and `emitBoxedContainer` runs on the layer's value, the shortcut `undefined` / `null` included (#56).
+ * A length / size check reaches a wrapper only through `.check()` and, like an overwrite, a superRefine or
+ * an async refine, sends the chain to the official parser instead (`isPure` rejects it too).
+ */
+function wrapperChecksAreCowSafe(schema: Node): boolean {
+  const checks = schema._zod.def.checks;
+  if (!checks || checks.length === 0) return true;
+  return checks.every((c: Node) => {
+    const d = c._zod?.def ?? c;
+    return d.check === "custom" && !!d.fn && !isAsyncFn(d.fn) && !hasCustomWhen(d);
+  });
+}
+
+/**
  * Pierce the optional/nullable wrapper chain to decide whether it finally lands on a container CoW can take over
  * (object/array/record/map/set), with the whole chain and the container's own checks all safe.
  * This is the only entry point for the key-position/element-position/top-level decision to "use a CoW sub-skeleton" --
  * testing def.type bare would misroute optional(object) to the official assertOnly and lose the strip semantics
- * (demonstrated by differential seed=104/133/137).
+ * (demonstrated by differential seed=104/133/137). A wrapper layer may carry `.refine` predicates, which the
+ * skeleton runs (#56); any other check on a wrapper sends the chain to the official parser.
  */
 export function cowSafeContainerForChild(child: Node): boolean {
   let cur: Node = child;
   for (;;) {
-    if (!leafChecksArePure(cur)) return false; // refine/overwrite and friends on a wrapper layer
     const t: string = cur._zod.def.type;
-    if (t === "object" || t === "array") return checksAreCowSafe(cur);
-    if (t === "record") return recordKeyShapeOk(cur) && checksAreCowSafe(cur);
-    if (t === "map" || t === "set" || t === "tuple") return checksAreCowSafe(cur);
     if (t === "optional" || t === "nullable") {
+      if (!wrapperChecksAreCowSafe(cur)) return false;
       cur = cur._zod.def.innerType;
       continue;
     }
+    if (t === "object" || t === "array") return checksAreCowSafe(cur);
+    if (t === "record") return recordKeyShapeOk(cur) && checksAreCowSafe(cur);
+    if (t === "map" || t === "set" || t === "tuple") return checksAreCowSafe(cur);
     return false;
   }
 }

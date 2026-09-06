@@ -156,33 +156,76 @@ export function containerChildFn(child: Node, seen: Set<Node>, parent: CodeCtx):
   }
 }
 
+/** Dispatch to the skeleton of a bare container (the chain of `emitBoxedContainer` already unwrapped) */
+function emitContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
+  const t: string = schema._zod.def.type;
+  if (t === "object") return emitCoWObject(ctx, schema, accessor, seen);
+  if (t === "array") return emitCoWArray(ctx, schema, accessor, seen);
+  if (t === "tuple") return emitCoWTuple(ctx, schema, accessor, seen);
+  if (t === "record") return emitCoWRecord(ctx, schema, accessor, seen);
+  if (t === "map") return emitCoWMap(ctx, schema, accessor, seen);
+  return emitCoWSet(ctx, schema, accessor, seen);
+}
+
 /**
  * Skeleton for a container wrapped in an optional/nullable chain: emit the shell checks along the chain (null→null,
  * undefined→undefined, value passed through), then the ordinary CoW skeleton once the container is reached.
+ *
+ * A wrapper layer may carry `.refine` predicates (the only checks `cowSafeContainerForChild` admits on a
+ * wrapper, #56), which stock runs after the layer's own codegen on the value the layer produced: the shortcut
+ * value on the shortcut, the inner output otherwise, and the inner wrapper's checks before the outer's. So a
+ * shortcut runs the checks of its own layer and of every layer above it before returning, and the container's
+ * output runs every layer's checks inner to outer. A chain with such checks builds the container as a nested
+ * skeleton called once: an inline skeleton returns the clean input from inside its own branch, so nothing
+ * emitted after it would run on that path. A chain without checks emits the inline skeleton as before.
  */
 function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
+  const layers: { shortcut: "null" | "undefined"; checks: string | null }[] = [];
   let cur: Node = schema;
   for (;;) {
     const def = cur._zod.def;
-    if (def.type === "nullable") {
-      ctx.write(`if (${accessor} === null) return ${accessor};`);
-      cur = def.innerType;
-      continue;
-    }
-    if (def.type === "optional") {
-      ctx.write(`if (${accessor} === undefined) return ${accessor};`);
-      cur = def.innerType;
-      continue;
-    }
-    break;
+    if (def.type !== "nullable" && def.type !== "optional") break;
+    const checksFn = containerChecksFn(cur); // custom predicates only, see wrapperChecksAreCowSafe
+    layers.push({
+      shortcut: def.type === "nullable" ? "null" : "undefined",
+      checks: checksFn ? ctx.addConst(checksFn) : null,
+    });
+    cur = def.innerType;
   }
-  const t2: string = cur._zod.def.type;
-  if (t2 === "object") return emitCoWObject(ctx, cur, accessor, seen);
-  if (t2 === "array") return emitCoWArray(ctx, cur, accessor, seen);
-  if (t2 === "tuple") return emitCoWTuple(ctx, cur, accessor, seen);
-  if (t2 === "record") return emitCoWRecord(ctx, cur, accessor, seen);
-  if (t2 === "map") return emitCoWMap(ctx, cur, accessor, seen);
-  return emitCoWSet(ctx, cur, accessor, seen);
+  // The checks of layer i and of every layer above it, inner first (stock's order)
+  const emitChecksUpTo = (i: number, value: string): void => {
+    for (let j = i; j >= 0; j--) {
+      const c = layers[j]!.checks;
+      if (c) ctx.write(`if (${c}(${value}) === INVALID) return INVALID;`);
+    }
+  };
+  const hasChecksUpTo = (i: number): boolean => layers.slice(0, i + 1).some((l) => l.checks);
+
+  for (let i = 0; i < layers.length; i++) {
+    const { shortcut } = layers[i]!;
+    if (!hasChecksUpTo(i)) {
+      ctx.write(`if (${accessor} === ${shortcut}) return ${accessor};`);
+      continue;
+    }
+    ctx.write(`if (${accessor} === ${shortcut}) {`);
+    ctx.indented(() => {
+      emitChecksUpTo(i, accessor);
+      ctx.write(`return ${accessor};`);
+    });
+    ctx.write(`}`);
+  }
+
+  if (!hasChecksUpTo(layers.length - 1)) return emitContainer(ctx, cur, accessor, seen);
+
+  const fn = containerChildFn(cur, seen, ctx);
+  const f = ctx.addConst(fn);
+  const isAsync = isAsyncProduct(fn);
+  if (isAsync) ctx.async = true;
+  const out = ctx.var();
+  ctx.write(`const ${out} = ${isAsync ? "await " : ""}${f}(${accessor});`);
+  ctx.write(`if (${out} === INVALID) return INVALID;`);
+  emitChecksUpTo(layers.length - 1, out);
+  return out;
 }
 
 /**

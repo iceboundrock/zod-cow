@@ -245,8 +245,63 @@ function validValueFor(b: Built, rng: RNG): unknown {
   return undefined;
 }
 
+/**
+ * Number of entries the value carries: array length, Map / Set size, own enumerable string keys
+ * of any other object, -1 for a primitive. Stock hands a refine the rebuilt output and the
+ * skeleton hands it the input reference or its copy; both carry the same enumerable keys.
+ */
+function entryCount(v: unknown): number {
+  if (Array.isArray(v)) return v.length;
+  if (v instanceof Map || v instanceof Set) return v.size;
+  if (typeof v === "object" && v !== null) return Object.keys(v).length;
+  return -1;
+}
+
+/**
+ * The predicate every refine wrapper attaches: it rejects the string "forbidden" and any container
+ * with exactly three entries, so a refine that the skeleton dropped on a wrapper around a container
+ * shows up as a success-parity failure (#56). Before #56 the container part was missing and a
+ * dropped refine on `optional(object)` was invisible to the fuzzer.
+ */
+function wrapperRefine(v: unknown): boolean {
+  return v !== "forbidden" && entryCount(v) !== 3;
+}
+
+/**
+ * A check attached to the wrapper (or leaf) `inner` rather than a schema layer: a sync or async
+ * `.refine` with the predicate above, or an overwrite that upper-cases a string value and hands
+ * anything else back unchanged (#57). Shared by `bWrap` and the second-wrapper draw of `bChild`.
+ */
+function bCheck(inner: Built, kind: "refine" | "asyncRefine" | "overwrite"): Built {
+  if (kind === "refine") {
+    return {
+      schema: inner.schema.refine(wrapperRefine, { error: "value is forbidden" }),
+      desc: `${inner.desc}.refine(≠forbidden, entries≠3)`,
+      gen: inner.gen,
+    };
+  }
+  if (kind === "asyncRefine") {
+    // Task 6: async refine (same success/failure domain as sync, but it goes through an async island)
+    return {
+      schema: inner.schema.refine(async (v: unknown) => wrapperRefine(v), {
+        error: "value is forbidden",
+      }),
+      desc: `${inner.desc}.refine(async ≠forbidden, entries≠3)`,
+      gen: inner.gen,
+    };
+  }
+  return {
+    schema: inner.schema.overwrite((v: any) => (typeof v === "string" ? v.toUpperCase() : v)),
+    desc: `${inner.desc}.overwrite(upper)`,
+    gen: inner.gen,
+  };
+}
+
 function bWrap(rng: RNG, inner: Built): Built {
-  const which = rng.int(7);
+  const which = rng.int(8);
+  if (which === 7) return bCheck(inner, "overwrite");
+  if (which === 3) return bCheck(inner, "refine");
+  if (which === 5) return bCheck(inner, "asyncRefine");
   if (which === 0) {
     return {
       schema: inner.schema.optional(),
@@ -276,25 +331,6 @@ function bWrap(rng: RNG, inner: Built): Built {
       schema: inner.schema.default(dv as never),
       desc: `${inner.desc}.default(${repr(dv)})`,
       gen: (r) => (r.chance(0.35) ? ABSENT : inner.gen(r)),
-    };
-  }
-  if (which === 3) {
-    return {
-      schema: inner.schema.refine((v: unknown) => v !== "forbidden", {
-        error: "value is forbidden",
-      }),
-      desc: `${inner.desc}.refine(≠forbidden)`,
-      gen: inner.gen,
-    };
-  }
-  if (which === 5) {
-    // Task 6: async refine (same success/failure domain as sync, but it goes through an async island)
-    return {
-      schema: inner.schema.refine(async (v: unknown) => v !== "forbidden", {
-        error: "value is forbidden",
-      }),
-      desc: `${inner.desc}.refine(async ≠forbidden)`,
-      gen: inner.gen,
     };
   }
   if (which === 6) {
@@ -638,7 +674,13 @@ function bUnion(rng: RNG, depth: number): Built {
 
 function bChild(rng: RNG, depth: number): Built {
   const inner = depth <= 0 ? bLeaf(rng) : bAny(rng, depth - 1);
-  return rng.chance(0.4) ? bWrap(rng, inner) : inner;
+  if (!rng.chance(0.4)) return inner;
+  const wrapped = bWrap(rng, inner);
+  // One wrapped child in three gets a check on top of its wrapper (a sync or async refine, an
+  // overwrite), so a check on an optional / nullable layer above a container occurs
+  // (`optional(object).refine(...)`, #56); a single wrapper never put one there.
+  if (!rng.chance(0.33)) return wrapped;
+  return bCheck(wrapped, rng.pick(["refine", "asyncRefine", "overwrite"] as const));
 }
 
 function bAny(rng: RNG, depth: number): Built {

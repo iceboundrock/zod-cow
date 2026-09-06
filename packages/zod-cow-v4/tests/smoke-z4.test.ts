@@ -1193,4 +1193,174 @@ import { compile } from "../src/index.js";
   console.log("  no descriptor or prototype probe in the object skeleton ✓");
 }
 
+/* ── 18. a refine on an optional / nullable wrapper around a container runs in the skeleton (#56) ── */
+{
+  console.log("\n── wrapper refine around a container (#56) ──");
+  const W = z
+    .object({ a: z.string() })
+    .optional()
+    .refine((v) => v === undefined || v.a === "y");
+  const C = compile(W);
+  assert.equal(W.safeParse({ a: "x" }).success, false);
+  assert.equal(C.safeParse({ a: "x" }).success, false, "top level: the wrapper refine rejects");
+  const ok = { a: "y" };
+  assert.equal(C.parse(ok), ok, "a passing refine keeps the CoW path");
+  assert.equal(C.parse(undefined), undefined);
+  const N = z.object({ o: W, keep: z.object({ n: z.number() }) });
+  assert.equal(
+    compile(N).safeParse({ o: { a: "x" }, keep: { n: 1 } }).success,
+    false,
+    "nested: the wrapper refine rejects",
+  );
+  const nIn = { o: ok, keep: { n: 1 } };
+  assert.equal(compile(N).parse(nIn), nIn, "nested: the parent keeps sharing");
+  const A = z
+    .array(z.number())
+    .nullable()
+    .refine((v) => v === null || v.length < 3);
+  assert.equal(compile(A).safeParse([1, 2, 3]).success, false, "nullable(array) refine rejects");
+  const arr = [1, 2];
+  assert.equal(compile(A).parse(arr), arr);
+  assert.equal(compile(A).parse(null), null);
+  console.log("  top-level and nested refine rejects like stock, a passing one keeps sharing ✓");
+
+  // The refine sees the shortcut value, and a chain runs its layers on it in stock's order
+  const log: string[] = [];
+  const tag = (v: unknown) => (v === undefined ? "undefined" : v === null ? "null" : "value");
+  const Chain = z
+    .object({ a: z.string() })
+    .optional()
+    .refine((v) => {
+      log.push(`f1:${tag(v)}`);
+      return true;
+    })
+    .nullable()
+    .refine((v) => {
+      log.push(`f2:${tag(v)}`);
+      return true;
+    });
+  const CC = compile(Chain);
+  for (const input of [null, undefined, { a: "y" }]) {
+    log.length = 0;
+    Chain.parse(input);
+    const stockLog = log.splice(0);
+    assert.equal(CC.parse(input), input);
+    assert.deepEqual(log, stockLog, `wrapper checks on ${tag(input)}: stock's order`);
+  }
+  assert.deepEqual(log, ["f1:value", "f2:value"]);
+  assert.equal(
+    compile(
+      z
+        .object({ a: z.string() })
+        .optional()
+        .refine((v) => v !== undefined),
+    ).safeParse(undefined).success,
+    false,
+    "the optional shortcut runs the refine on undefined",
+  );
+  assert.equal(
+    compile(
+      z
+        .object({ a: z.string() })
+        .nullable()
+        .refine((v) => v !== null),
+    ).safeParse(null).success,
+    false,
+    "the nullable shortcut runs the refine on null",
+  );
+  console.log("  shortcut values reach the refine, chain order matches stock ✓");
+
+  // Copy path: the refine sees the stripped copy, as stock's refine sees the rebuilt object
+  const K = z
+    .object({ a: z.string() })
+    .optional()
+    .refine((v) => v === undefined || Object.keys(v).length === 1);
+  const kIn = { a: "y", extra: 1 };
+  assert.equal(K.safeParse(kIn).success, true);
+  assert.deepEqual(compile(K).parse(kIn), { a: "y" });
+  console.log("  copy path: the refine sees the stripped copy ✓");
+
+  // The refined chain builds the container as a nested skeleton; an unrefined chain stays inline
+  assert.ok(C.code!.includes("nested skeleton #1"), "refined wrapper: nested container skeleton");
+  assert.ok(
+    !compile(z.object({ a: z.string() }).optional()).code!.includes("nested skeleton"),
+    "unrefined wrapper: inline skeleton as before",
+  );
+  console.log("  code dump: nested skeleton only when the wrapper carries a refine ✓");
+
+  // Checks the skeleton cannot run on a wrapper go to the official parser: async refine, superRefine
+  const AR = z
+    .object({ a: z.string() })
+    .optional()
+    .refine(async (v) => v === undefined || v.a === "y");
+  const CAR = compile(AR);
+  assert.equal(CAR.async, true);
+  assert.equal((await CAR.safeParseAsync({ a: "x" })).success, false);
+  assert.deepEqual(await CAR.parseAsync(ok), ok);
+  const SR = z
+    .object({ a: z.string() })
+    .optional()
+    .superRefine((v, ctx) => {
+      if (v !== undefined) ctx.value = { a: v.a.toUpperCase() };
+    });
+  assert.deepEqual(SR.parse(ok), { a: "Y" });
+  assert.deepEqual(
+    compile(SR).parse(ok),
+    { a: "Y" },
+    "superRefine on the wrapper rewrites like stock",
+  );
+  console.log("  async refine and superRefine on the wrapper take the official parser ✓");
+}
+
+/* ── 19. a value-rewriting check on an optional / nullable wrapper around a leaf is impure (#57) ── */
+{
+  console.log("\n── overwrite on a wrapper around a leaf (#57) ──");
+  const O = z
+    .string()
+    .optional()
+    .overwrite((v) => (v === undefined ? v : v.toUpperCase()));
+  assert.equal(O.parse("ab"), "AB");
+  assert.equal(
+    compile(O).parse("ab"),
+    "AB",
+    "top level: the wrapper overwrite rewrites like stock",
+  );
+  assert.equal(compile(O).parse(undefined), undefined);
+  const K = z.object({ a: O, keep: z.object({ n: z.number() }) });
+  const kIn = { a: "ab", keep: { n: 1 } };
+  const kOut = compile(K).parse(kIn);
+  assert.deepEqual(kOut, { a: "AB", keep: { n: 1 } });
+  assert.equal(kOut.keep, kIn.keep, "object key: the parent copies, the sibling stays shared");
+  const cleanIn = { a: undefined, keep: { n: 1 } };
+  assert.equal(compile(K).parse(cleanIn), cleanIn, "object key: nothing rewritten, input kept");
+  const U = z.union([O, z.number()]);
+  assert.equal(
+    compile(U).parse("ab"),
+    "AB",
+    "union option: the wrapper overwrite rewrites like stock",
+  );
+  assert.equal(compile(U).parse(3), 3);
+  const S = z
+    .number()
+    .nullable()
+    .superRefine((v, ctx) => {
+      if (v !== null) ctx.value = v + 1;
+    });
+  assert.equal(S.parse(1), 2);
+  assert.equal(compile(S).parse(1), 2, "superRefine on the wrapper rewrites like stock");
+  // A pure predicate on the wrapper keeps the validator: the input comes back by reference
+  const P = z.object({
+    v: z
+      .string()
+      .optional()
+      .refine((v) => v !== "x"),
+  });
+  const pIn = { v: "y" };
+  assert.equal(compile(P).parse(pIn), pIn);
+  assert.equal(compile(P).safeParse({ v: "x" }).success, false);
+  console.log(
+    "  top-level, object-key and union positions rewrite like stock; a refine keeps sharing ✓",
+  );
+}
+
 console.log("\nAll smoke assertions passed ✓");

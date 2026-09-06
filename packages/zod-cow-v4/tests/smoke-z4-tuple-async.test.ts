@@ -1253,6 +1253,27 @@ head(
       input: () => ["x"],
     },
     {
+      // a codec is a `pipe` node whose decode function sits on the pipe def itself, not in a child transform node
+      name: "codec decode returning a Promise",
+      make: () =>
+        z.codec(z.string(), z.number(), {
+          decode: (v) => Promise.resolve(Number(v)),
+          encode: String,
+        }),
+      input: () => "1",
+    },
+    {
+      name: "codec decode returning a Promise under an array",
+      make: () =>
+        z.array(
+          z.codec(z.string(), z.number(), {
+            decode: (v) => Promise.resolve(Number(v)),
+            encode: String,
+          }),
+        ),
+      input: () => ["1"],
+    },
+    {
       name: "transform returning a Promise inside a union option",
       make: () => z.union([z.number(), z.array(z.string()).transform((v) => Promise.resolve(v))]),
       input: () => ["x"],

@@ -688,7 +688,8 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    throws stock's class, as the official `throwAsync` does; a plain-`Promise` transform answers INVALID in the official
    product, its transform helpers answering INVALID for a `Promise` on purpose, so the parse entries reach stock's throw
    through their stock fallback and `validate` consults stock's sync parse before an INVALID becomes null on a tree
-   holding a plain transform, `subtreeHasPlainTransform` in `official.ts` naming such a tree at compile time, #79). The
+   holding a plain transform, `subtreeHasPlainTransform` in `official.ts` naming such a tree at compile time, a
+   `z.codec` decode function, stored on the `pipe` def itself, counting as one, #79). The
    sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
    kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
    own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The

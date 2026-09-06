@@ -140,9 +140,10 @@ function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
 
 /**
  * Whether the subtree holds a transform whose function is not an async function (a `.transform`, a `z.transform`,
- * the transform side of a `pipe` / `preprocess`), the one position where a plain function returning a `Promise` is
- * not thrown at the sync API by the official products: their transform helpers answer `INVALID` for a `Promise`
- * (`generateTransformCheck` and the pipe helper of zod 4.5.4 `compile.js`), which every other entry of `compile()`
+ * the transform side of a `pipe` / `preprocess`, the decode function of a `z.codec`, which zod 4.5.4 stores on the
+ * `pipe` def itself rather than in a child transform node, review of #89), the one position where a plain function
+ * returning a `Promise` is not thrown at the sync API by the official products: their transform helpers answer
+ * `INVALID` for a `Promise` (`generateTransformCheck` and the pipe helper of zod 4.5.4 `compile.js`), which every other entry of `compile()`
  * hands to stock, while `validate` would read as a rejection. `validate` consults stock's sync parse before
  * answering null for such a tree (#79). An async-function transform makes the tree async, so its sync entries throw
  * before any product runs. A `lazy` is not descended: the official validator runs it in the runtime, and the
@@ -162,7 +163,10 @@ function walkHasPlainTransform(schema: Node, seen: Set<Node>): boolean {
   seen.add(schema);
   const def = schema._zod.def;
   if (def.type === "lazy") return false;
-  if (def.type === "transform" && !isAsyncFn(def.transform)) return true;
+  // a `transform` node, or a `pipe` node carrying the decode function of a `z.codec` on its own def
+  if ((def.type === "transform" || def.type === "pipe") && typeof def.transform === "function") {
+    if (!isAsyncFn(def.transform)) return true;
+  }
   return childrenOf(schema).some((k) => walkHasPlainTransform(k, seen));
 }
 

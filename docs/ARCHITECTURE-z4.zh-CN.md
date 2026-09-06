@@ -587,7 +587,8 @@ return out;
    在那里抛 `$ZodAsyncError`（`product.ts` 的 `throwAsync` 抛的是 stock 的类，与官方 `throwAsync` 一致；
    transform 返回的 `Promise` 在官方产物里答 INVALID：官方的 transform helper 对 `Promise` 有意答 INVALID，所以 parse 入口
    经由 stock 回退才到达 stock 的那个 throw，而 `validate` 在持有普通 transform 的树上先咨询 stock 的同步 parse，再把
-   INVALID 变成 null，`official.ts` 的 `subtreeHasPlainTransform` 在编译期识别这样的树，#79）。同步 API 让这个 throw 出去，与 stock 一致；
+   INVALID 变成 null，`official.ts` 的 `subtreeHasPlainTransform` 在编译期识别这样的树，存放在 `pipe` def 自身上的 `z.codec`
+   decode 函数也算在内，#79）。同步 API 让这个 throw 出去，与 stock 一致；
    `parseAsync` / `safeParseAsync` 在两种骨架下都接住它，并像到达 async 入口的每个 INVALID 一样把这次 parse 交给
    stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
    在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。

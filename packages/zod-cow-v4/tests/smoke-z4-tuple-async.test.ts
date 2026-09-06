@@ -1307,6 +1307,68 @@ head(
       input: () => ({ a: "x" }),
       async: true,
     },
+    // The interpreter calls the callback before the island's run has come back, so the throw leaves
+    // `_zod.run` synchronously, never as a rejection (sixth review of #76). A bare `lazy` is this layer's
+    // island whether or not its subtree is async (stock's own product for it is a runtime island too).
+    {
+      name: "a lazy island inside an async skeleton (the sixth review's reproduction)",
+      make: (fn) =>
+        z.object({
+          a: z.lazy(() => z.string().refine(fn)),
+          b: z.string().refine(async () => true),
+        }),
+      input: () => ({ a: "x", b: "y" }),
+      async: true,
+    },
+    {
+      name: "a lazy island in a sync skeleton",
+      make: (fn) => z.object({ a: z.lazy(() => z.string().refine(fn)) }),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "a lazy island at the top level",
+      make: (fn) => z.lazy(() => z.string().refine(fn)),
+      input: () => "x",
+      async: false,
+    },
+    {
+      name: "an async island throwing synchronously (a sync predicate before an async one under a lazy)",
+      make: (fn) =>
+        z.object({
+          a: z.lazy(() =>
+            z
+              .string()
+              .refine(fn)
+              .refine(async () => true),
+          ),
+        }),
+      input: () => ({ a: "x" }),
+      async: true,
+    },
+    // A sync island: a subtree stock's compiler declines for a non-async reason (an exclusive union)
+    {
+      name: "a sync island in a sync skeleton (a refine on an xor)",
+      make: (fn) => z.object({ a: z.xor([z.string(), z.number()]).refine(fn) }),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "a sync island inside an async skeleton",
+      make: (fn) =>
+        z.object({
+          a: z.xor([z.string(), z.number()]).refine(fn),
+          b: z.string().refine(async () => true),
+        }),
+      input: () => ({ a: "x", b: "y" }),
+      async: true,
+    },
+    {
+      name: "a sync island at the top level",
+      make: (fn) => z.xor([z.string(), z.number()]).refine(fn),
+      input: () => "x",
+      async: false,
+    },
   ];
   for (const c of cases) {
     for (const [tname, thrower] of throwers) {
@@ -1371,6 +1433,60 @@ head(
     );
     const rM = await M.safeParseAsync({ a: "x", b: ["y"] });
     assert.ok(rM.success, "the same inside an async skeleton");
+    // Through a sync island the interpreter chains the Promise and the island throws the signal on the thenable
+    // it gets back, so a plain Promise there still reaches stock's async runtime, whereas a throw that leaves
+    // `_zod.run` synchronously is the callback's (sixth review of #76)
+    const islandCases: [string, z.ZodType, unknown, boolean][] = [
+      [
+        "a plain-Promise refine on an xor under an object key",
+        z.object({ a: z.xor([z.string(), z.number()]).refine(() => Promise.resolve(true)) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise transform on an xor under an object key",
+        z.object({ a: z.xor([z.string(), z.number()]).transform((v) => Promise.resolve(v)) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise refine on a top-level xor",
+        z.xor([z.string(), z.number()]).refine(() => Promise.resolve(true)),
+        "x",
+        false,
+      ],
+      // Stock's own product for a lazy reads `.issues` off the thenable and throws a TypeError here
+      [
+        "a plain-Promise refine under a lazy",
+        z.object({ a: z.lazy(() => z.string().refine(() => Promise.resolve(true))) }),
+        { a: "x" },
+        false,
+      ],
+      [
+        "a plain-Promise refine under a lazy inside an async skeleton",
+        z.object({
+          a: z.lazy(() => z.string().refine(() => Promise.resolve(true))),
+          b: z.string().refine(async () => true),
+        }),
+        { a: "x", b: "y" },
+        true,
+      ],
+    ];
+    for (const [name, S, input, isAsync] of islandCases) {
+      const stock = await S.safeParseAsync(input);
+      assert.ok(stock.success, `${name}: stock`);
+      const CI = compile(S);
+      assert.equal(CI.async, isAsync, `${name}: async flag`);
+      assert.equal(CI.stock, false, `${name}: not degraded`);
+      const rI = await CI.safeParseAsync(input);
+      assert.ok(rI.success, `${name}: still reaches stock's async runtime`);
+      assert.deepEqual(rI.data, stock.data, `${name}: stock's output`);
+      assert.throws(
+        () => CI.parse(input),
+        $ZodAsyncError,
+        `${name}: the sync API throws stock's class`,
+      );
+    }
     ok("the fast path's own Promise signal still reaches stock's async runtime");
   }
 

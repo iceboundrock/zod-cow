@@ -570,6 +570,9 @@ return out;
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
    Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
    pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+   自 #76 第六轮 review 起，裸 `lazy` 不论子树是否 async 都走本层的岛（`officialFn`：`makeAsyncIsland` 或 `makeIsland`）：
+   stock 自己对它的产物也是 runtime island（`generateLazyCheck` 在空 context 下运行 getter 的 `_zod.run`，并直接读返回值的
+   `.issues`，所以普通函数返回的 thenable 在那里以 `TypeError` 告终），因此不损失任何编译快路径，而这次运行由本层接管。
 6. 运行时识别（#76 第四轮 review）：返回 `Promise` 的普通函数能通过所有静态探测（官方的 `isAsyncFunction`
    与 `isAsyncFn` 都只看语法），所以 schema 是同步骨架，`Promise` 在运行时才遇到。checks 子程序与官方产物
    在那里抛 `$ZodAsyncError`（`product.ts` 的 `throwAsync` 抛的是 stock 的类，与官方 `throwAsync` 一致；
@@ -578,14 +581,21 @@ return out;
    stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
    在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。
    回调自己抛出的 `$ZodAsyncError`（对 async schema 做嵌套同步 parse 就会这样）属于调用方，不是那个信号（#76 第五轮
-   review）：checks 子程序把每次谓词调用、`settleChecks` 把每个等待的谓词、`makeAsyncIsland` 把它的 rejection 都包在
+   review）：checks 子程序把每次谓词调用、`settleChecks` 把每个等待的谓词、两种岛把它们的运行都包在
    `rethrowCallerError`（`product.ts`）里，它把该错误记入一个 WeakSet，async 入口对记录过的错误原样重抛（`isPromiseSignal`），
-   于是 parse 像 stock 一样在调用一次后拒绝。由 stock 生成代码调用的回调（官方产物内部）遇到 `Promise` 时从 stock 自己的
-   `throwAsync` 报告，本层无法标记它，所以那里抛出的 `$ZodAsyncError` 仍走回退、回调跑两次；#80 跟踪几种选项（上游给
-   该抛出点加标记是最便宜的精确修法）。
+   于是 parse 像 stock 一样在调用一次后拒绝。对岛而言这覆盖 async 岛运行的 rejection，以及同步地离开任一岛运行的抛出
+   （`official.ts` 的 `runIsland`，#76 第六轮 review）：解释器在运行返回之前就调用同步回调，而在岛交给它的 context 下它
+   自己从不抛 `$ZodAsyncError`（它 check 与 parse 链上的三处抛出点只在 `async: false` 下触发，同步岛的空 context 会把
+   Promise 链起来；core transform 节点的那一处只在 `async` 为假值时触发，而 async 岛以 `async: true` 运行，即 stock 的
+   async runtime 交给子树的 context），所以同步地从 `_zod.run` 抛出的这个类必然来自回调。由 stock 生成代码调用的回调
+   （官方产物内部，包括官方产物里包装器之下或 pipe 里的 `lazy`）遇到 `Promise` 时从 stock 自己的 `throwAsync` 报告，
+   本层无法标记它，所以那里抛出的 `$ZodAsyncError` 仍走回退、回调跑两次；#80 跟踪几种选项（上游给该抛出点加标记是
+   最便宜的精确修法）。
 
 关键语义保留：同步 island（`makeIsland`）遇到 Promise 时抛 `$ZodAsyncError`（官方
-compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。
+compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。这个抛出是本层自己的
+（`product.ts` 的 `throwAsync`），不记录，于是 async 入口把这次 parse 交给 stock 的 async runtime；从岛的 `_zod.run`
+本身抛出来的则属于回调，会被记录（§5.5 第 6 条）。
 
 混搭效果：一棵树里只有 async 子树位付 microtask 成本，其余全部保持引用比较骨架
 （S7：5 万条 async transform 场景 2.50x vs stock safeParseAsync，分配 -63%）。

@@ -661,6 +661,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
+   Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
+   (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
+   runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
+   function returned ends in a `TypeError` there), so no compiled fast path is lost, and the run is then owned by this layer.
 6. runtime detection (fourth review of #76): a plain function that returns a `Promise` passes every static detector (the
    official `isAsyncFunction` and `isAsyncFn` are syntactic), so the schema is a sync skeleton and the `Promise` is met at
    runtime. The checks subroutine and the official products throw `$ZodAsyncError` there (`throwAsync` in `product.ts`
@@ -671,14 +675,23 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    output is then stock's copy and the callbacks called before the `Promise` run twice, the failure-path duplicate of §6.
    A `$ZodAsyncError` a callback throws itself (a nested sync parse of an async schema does) is the caller's, not that
    signal (fifth review of #76): the checks subroutine wraps every predicate call, `settleChecks` every awaited predicate
-   and `makeAsyncIsland` its rejection in `rethrowCallerError` (`product.ts`), which records the error in a WeakSet, and
-   the async entries rethrow a recorded one (`isPromiseSignal`), so the parse rejects after one call, as stock does. A
-   callback that stock's generated code calls (inside an official product) reports its `Promise` from stock's own
-   `throwAsync`, which this layer cannot mark, so its `$ZodAsyncError` still takes the fallback and the callback runs
-   twice; tracked in #80 with the options (an upstream marker on that throw is the cheap exact fix).
+   and both islands their run in `rethrowCallerError` (`product.ts`), which records the error in a WeakSet, and
+   the async entries rethrow a recorded one (`isPromiseSignal`), so the parse rejects after one call, as stock does. For
+   an island that covers a rejection of the async island's run and a throw that leaves either island's run synchronously
+   (`runIsland` in `official.ts`, sixth review of #76): the interpreter calls a sync callback before the run has come
+   back, and it never throws `$ZodAsyncError` on its own under the contexts the islands hand it (its three check and
+   parse chain sites fire only under `async: false`, the sync island's empty context chains a Promise instead; the
+   core transform node's site only under a falsy `async`, and the async island runs under `async: true`, the context
+   stock's async runtime hands the subtree), so a synchronous throw of that class out of `_zod.run` is a callback's.
+   A callback that stock's generated code calls (inside an official product, a `lazy` under a wrapper or in a pipe
+   inside one included) reports its `Promise` from stock's own `throwAsync`, which this layer cannot mark, so its
+   `$ZodAsyncError` still takes the fallback and the callback runs twice; tracked in #80 with the options (an upstream
+   marker on that throw is the cheap exact fix).
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
-compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
+compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive). That throw
+is this layer's own (`throwAsync` in `product.ts`), unrecorded, so the async entries hand the parse to stock's async runtime; a
+throw that leaves the island's `_zod.run` itself is a callback's and is recorded (§5.5 item 6).
 
 In a mixed tree only the async subtree positions pay the microtask cost, everything else keeps the reference-comparison skeleton
 (S7 in run 33948313612: an async transform scenario over 5 000 rows, 1.55x vs stock safeParseAsync, allocation -30%; 1.83x in run 33940596453 and 2.67x in run 33837195401, all inside runner noise at that row count).

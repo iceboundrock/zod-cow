@@ -41,7 +41,8 @@ export function throwAsync(): never {
 
 /**
  * The `$ZodAsyncError`s a caller's callback threw, or rejected with, through this layer's own call sites: the
- * predicates the checks subroutine calls, the promises it settles, the promise of an async island. The class is
+ * predicates the checks subroutine calls, the promises it settles, the run of an island (its rejection and a throw
+ * that leaves it synchronously, `runIsland` in `official.ts`). The class is
  * public, so a callback can throw it itself (a nested sync parse of an async schema does), and such a throw is the
  * caller's: stock rejects with it after one call. The async entries of `compile()` rethrow a recorded error and
  * treat only an unrecorded one as the fast path's Promise signal (fifth review of #76). A callback that stock's own

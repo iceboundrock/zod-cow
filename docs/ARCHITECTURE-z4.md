@@ -269,14 +269,25 @@ the awaits, so every predicate (sync or async) is called before the first `await
 its place, and the results are settled at the end in order by `settleChecks` (a `Promise` is awaited, any other
 result is read as is, a `false` does not stop the settlement of the later ones, a rejection throws at its
 position). A length / size check that fails after a predicate was started settles the started ones before
-returning `INVALID`, so no rejecting promise is left unattached. The call sites (the six container skeletons,
-the union skeleton and the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton becomes async:
+returning `INVALID`, so no rejecting promise is left unattached. One exception to "every predicate is called":
+`runChecks` tracks its abort state synchronously until a check returns a `Promise`, so an `abort: true` predicate
+that fails synchronously while no promise has started skips every later check without a `when` (the length / size
+checks carry one and still run, side-effect free). The subroutine returns `INVALID` at that point instead of
+starting the later predicates, so a predicate stock never calls is never called here either (third review of #76);
+after the first promise stock updates the state inside its chain, too late for the loop, so nothing is skipped and
+the predicates are all started. Whether a promise has started is decided at runtime for the predicates that are
+not async functions, since a plain function may return a `Promise` too. The call sites (the six container
+skeletons, the union skeleton and the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton
+becomes async:
 
 ```js
-const x0 = f0(input);                                   // async predicate, started
-if (input.length < 2) { await settle([x0]); return INVALID; }
-const x1 = f1(input);                                   // sync predicate, called before x0 settles
-if (!(await settle([x0, x1]))) return INVALID;
+const x0 = f0(input);                                   // sync predicate
+const x1 = f1(input);                                   // sync predicate with abort: true
+if (!x1 && !(x0 instanceof Promise)) return INVALID;    // stock skips x2 here; x0 may still have returned a Promise
+const x2 = f2(input);                                   // async predicate, started
+if (input.length < 2) { await settle([x0, x1, x2]); return INVALID; }
+const x3 = f3(input);                                   // sync predicate, called before x2 settles
+if (!(await settle([x0, x1, x2, x3]))) return INVALID;
 return true;
 ```
 

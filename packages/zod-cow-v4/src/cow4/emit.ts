@@ -103,6 +103,14 @@ async function settleChecks(results: unknown[]): Promise<boolean> {
  * predicate (sync or async) is called before the first `await`, a length / size check keeps its place,
  * and the results are settled at the end by `settleChecks`. A length / size check that fails after a
  * predicate was started settles the started ones first, so nothing returns while a promise is unattached.
+ * One exception to "every predicate is called": `runChecks` tracks its abort state synchronously until
+ * a check returns a Promise, so an `abort: true` predicate that fails synchronously while no promise has
+ * started skips every later check without a `when` (the length / size checks carry one and still run,
+ * side-effect free). The subroutine returns INVALID at that point instead of starting the later
+ * predicates (third review of #76); after the first promise the state is updated inside stock's chain,
+ * too late for the loop, so nothing is skipped and the predicates are all started as before. Whether a
+ * promise has started is decided at runtime for the predicates that are not async functions, since a
+ * plain function may return a Promise too.
  * Returning null means a check the skeleton cannot handle is present (the caller should already have blocked it via checksAreCowSafe).
  */
 export function containerChecksFn(schema: Node): Fn | null {
@@ -118,6 +126,7 @@ export function containerChecksFn(schema: Node): Fn | null {
   ctx.async = anyAsync;
   const settleC = anyAsync ? ctx.addConst(settleChecks) : null;
   const started: string[] = []; // async variant: the results of the predicates called so far
+  let promiseStarted = false; // async variant: an async-function predicate was called, so a promise has certainly started
   const fail = (): string =>
     started.length === 0
       ? "return INVALID;"
@@ -129,6 +138,15 @@ export function containerChecksFn(schema: Node): Fn | null {
       const res = ctx.var();
       ctx.write(`const ${res} = ${fnC}(input);`);
       if (anyAsync) {
+        const asyncFn = isAsyncFn(d.fn);
+        if (d.abort && !asyncFn && !promiseStarted) {
+          // stock skips the later checks after a sync aborting failure with no promise started yet;
+          // `!res` already excludes a Promise returned by this plain function, the earlier results
+          // (all from plain functions at this point) are tested at runtime
+          const noPromise = started.map((s) => `!(${s} instanceof Promise)`);
+          ctx.write(`if (${[`!${res}`, ...noPromise].join(" && ")}) return INVALID;`);
+        }
+        if (asyncFn) promiseStarted = true;
         started.push(res);
         continue;
       }

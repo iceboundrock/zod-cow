@@ -258,14 +258,21 @@ async 谓词过去被门控拒绝，带它的容器变成 runtime island，每�
 async，子程序本身就是 async 函数，并遵循 stock 的调度：`runChecks` 按声明顺序同步调用每个 check，只把 await 串起来，
 所以每个谓词（同步或 async）都在第一个 `await` 之前被调用，长度 / 大小检查保持原位，结果最后由 `settleChecks` 按顺序结算
 （`Promise` 被 await，其他结果原样读取，一个 `false` 不会中止后面结果的结算，rejection 在它自己的位置抛出）。在某个谓词已启动之后
-失败的长度 / 大小检查会先结算已启动的谓词再返回 `INVALID`，因此不会留下无人接住的 rejecting promise。调用位（六个容器骨架、
-union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async：
+失败的长度 / 大小检查会先结算已启动的谓词再返回 `INVALID`，因此不会留下无人接住的 rejecting promise。"每个谓词都会被调用"有一个
+例外：`runChecks` 在某个 check 返回 `Promise` 之前是同步跟踪 abort 状态的，所以一个 `abort: true` 的谓词在尚无 promise 启动时同步失败，
+会跳过后面所有没有 `when` 的 check（长度 / 大小检查带 `when`，仍会运行，且无副作用）。子程序在这一点直接返回 `INVALID` 而不再启动后面的
+谓词，因此 stock 不会调用的谓词这里也不会被调用（#76 的第三轮评审）；第一个 promise 之后 stock 在自己的链里更新状态，对循环来说已经太晚，
+于是什么都不跳过，谓词全部启动。对于不是 async 函数的谓词，是否已有 promise 启动在运行时判断，因为普通函数也可能返回 `Promise`。
+调用位（六个容器骨架、union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async：
 
 ```js
-const x0 = f0(input);                                   // async 谓词，已启动
-if (input.length < 2) { await settle([x0]); return INVALID; }
-const x1 = f1(input);                                   // 同步谓词，在 x0 结算之前调用
-if (!(await settle([x0, x1]))) return INVALID;
+const x0 = f0(input);                                   // 同步谓词
+const x1 = f1(input);                                   // 带 abort: true 的同步谓词
+if (!x1 && !(x0 instanceof Promise)) return INVALID;    // stock 在此跳过 x2；x0 仍可能返回了 Promise
+const x2 = f2(input);                                   // async 谓词，已启动
+if (input.length < 2) { await settle([x0, x1, x2]); return INVALID; }
+const x3 = f3(input);                                   // 同步谓词，在 x2 结算之前调用
+if (!(await settle([x0, x1, x2, x3]))) return INVALID;
 return true;
 ```
 

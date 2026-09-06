@@ -567,6 +567,157 @@ head("a failing length check between two predicates: the stock fallback re-runs 
   ok("the subroutine bails at .min(), the fallback runs every check once more");
 }
 
+head("an aborting sync failure before any promise: the later checks are not started");
+{
+  // stock's runChecks tracks `isAborted` synchronously until a check returns a Promise: an
+  // `abort: true` predicate that fails synchronously while no promise has started skips every later
+  // check without a `when` (a length / size check carries one and still runs, side-effect free). The
+  // subroutine returns INVALID at that point instead of starting the later predicates, so a predicate
+  // stock never calls is never called here either; the fallback then runs stock, which skips it too.
+  const log: string[] = [];
+  const S = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      throw new Error("should-not-run");
+    });
+  const C = compile(S);
+  assert.ok(!/_zod/.test(C.code ?? ""), "the container keeps its skeleton");
+  const stock = await S.safeParseAsync(["x"]);
+  assert.ok(!stock.success);
+  assert.deepEqual(log, ["A"], "stock skips B after the aborting failure");
+  log.length = 0;
+  const r = await C.safeParseAsync(["x"]);
+  assert.ok(!r.success, "a failure result, not a rejection");
+  assert.deepEqual(log, ["A", "A"], "A by the subroutine, A by the fallback, B never");
+  assert.deepEqual(r.error.issues, stock.error.issues, "issues from stock");
+  ok("abort: true + sync false → the async predicate is not started, safeParseAsync resolves");
+
+  // the same with a sync predicate and an async one after the aborting failure: neither is called
+  log.length = 0;
+  const S2 = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(() => {
+      log.push("B");
+      return true;
+    })
+    .refine(async () => {
+      log.push("C");
+      return true;
+    });
+  const C2 = compile(S2);
+  await S2.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A"]);
+  log.length = 0;
+  await C2.safeParseAsync(["x"]);
+  assert.deepEqual(log, ["A", "A"], "B and C are skipped like stock");
+  ok("every later check is skipped, sync or async");
+
+  // an optional wrapper above a container runs the same subroutine (#56)
+  log.length = 0;
+  const W = z
+    .object({ a: z.string() })
+    .optional()
+    .refine(
+      () => {
+        log.push("A");
+        return false;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const CW = compile(W);
+  assert.ok(!/_zod/.test(CW.code ?? ""), "the wrapper keeps its nested skeleton");
+  await W.safeParseAsync({ a: "x" });
+  assert.deepEqual(log, ["A"]);
+  log.length = 0;
+  await CW.safeParseAsync({ a: "x" });
+  assert.deepEqual(log, ["A", "A"], "the wrapper's subroutine skips B too");
+  ok("optional(object): the aborting failure skips the async predicate");
+
+  // an aborting predicate that passes does not abort: B runs and the clean input is shared
+  log.length = 0;
+  const P = z
+    .array(z.string())
+    .refine(
+      () => {
+        log.push("A");
+        return true;
+      },
+      { abort: true },
+    )
+    .refine(async () => {
+      log.push("B");
+      return true;
+    });
+  const CP = compile(P);
+  const input = ["x"];
+  const rp = await CP.safeParseAsync(input);
+  assert.ok(rp.success);
+  assert.strictEqual(rp.data, input);
+  assert.deepEqual(log, ["A", "B"]);
+  ok("abort: true on a passing predicate changes nothing");
+
+  // once a check has returned a Promise the abort state is updated inside stock's chain, after the
+  // loop: an aborting sync failure declared after an async predicate skips nothing, and neither does
+  // one declared after a plain function that returned a Promise (decided at runtime, not from the
+  // predicate's declaration), so the later predicate is started as stock starts it
+  for (const [label, first] of [
+    ["an async function", async () => true],
+    ["a plain function returning a Promise", () => Promise.resolve(true)],
+  ] as const) {
+    log.length = 0;
+    const D = z
+      .array(z.string())
+      .refine(() => {
+        log.push("A");
+        return first();
+      })
+      .refine(
+        () => {
+          log.push("B");
+          return false;
+        },
+        { abort: true },
+      )
+      .refine(async () => {
+        log.push("C");
+        return true;
+      });
+    const CD = compile(D);
+    const sd = await D.safeParseAsync(["x"]);
+    assert.ok(!sd.success);
+    assert.deepEqual(log, ["A", "B", "C"], `${label}: stock still starts C`);
+    log.length = 0;
+    const rd = await CD.safeParseAsync(["x"]);
+    assert.ok(!rd.success);
+    assert.deepEqual(
+      log,
+      ["A", "B", "C", "A", "B", "C"],
+      `${label}: the subroutine starts C like stock, then the fallback runs the three again`,
+    );
+    assert.deepEqual(rd.error.issues, sd.error.issues);
+  }
+  ok("after a started promise an aborting sync failure defers like stock");
+}
+
 head(
   "async array / tuple copy paths use the reads captured before the await, not the live input (#77)",
 );

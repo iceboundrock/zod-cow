@@ -276,9 +276,13 @@ checks carry one and still run, side-effect free). The subroutine returns `INVAL
 starting the later predicates, so a predicate stock never calls is never called here either (third review of #76);
 after the first promise stock updates the state inside its chain, too late for the loop, so nothing is skipped and
 the predicates are all started. Whether a promise has started is decided at runtime for the predicates that are
-not async functions, since a plain function may return a `Promise` too. The call sites (the six container
-skeletons, the union skeleton and the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton
-becomes async:
+not async functions, since a plain function may return a `Promise` too. Every predicate call, in both
+variants, is wrapped in a `try / catch` that hands a throw to `rethrowCallerError`: a `$ZodAsyncError` the
+predicate threw is recorded as the caller's before it propagates, so the async entries rethrow it instead of
+reading it as the fast path's Promise signal (§5.5 item 6; a rejection an awaited predicate settles with is
+recorded the same way in `settleChecks`). The call sites (the six container skeletons, the union skeleton and
+the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton becomes async (the wrapper is
+left out of the example):
 
 ```js
 const x0 = f0(input);                                   // sync predicate
@@ -665,6 +669,13 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
    own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
    output is then stock's copy and the callbacks called before the `Promise` run twice, the failure-path duplicate of §6.
+   A `$ZodAsyncError` a callback throws itself (a nested sync parse of an async schema does) is the caller's, not that
+   signal (fifth review of #76): the checks subroutine wraps every predicate call, `settleChecks` every awaited predicate
+   and `makeAsyncIsland` its rejection in `rethrowCallerError` (`product.ts`), which records the error in a WeakSet, and
+   the async entries rethrow a recorded one (`isPromiseSignal`), so the parse rejects after one call, as stock does. A
+   callback that stock's generated code calls (inside an official product) reports its `Promise` from stock's own
+   `throwAsync`, which this layer cannot mark, so its `$ZodAsyncError` still takes the fallback and the callback runs
+   twice; tracked in #80 with the options (an upstream marker on that throw is the cheap exact fix).
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive).
@@ -701,7 +712,8 @@ Top-level contract of an async skeleton (ctx.async = true):
   parseAsync/safeParseAsync are available, and the failure path falls back to stock safeParseAsync.
 Sync skeleton (ctx.async = false):
   parseAsync/safeParseAsync run the fast path and fall back to stock safeParseAsync on INVALID, and on the
-  $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6).
+  $ZodAsyncError the fast path throws when a plain function returned a Promise (§5.5 item 6); a $ZodAsyncError a
+  callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
 ```
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
@@ -787,7 +799,7 @@ The unsupported surface we depend on (all reachable through the public `zod/v4/c
 | `compileFn(schema, {assertOnly, debug})` | leaf/subtree products | signature change (low); behavior changes are backstopped by the differential tests |
 | `INVALID` | failure sentinel | extremely low (Symbol.for is stable) |
 | `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the async detector (v0.5) | low |
-| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton | low |
+| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton; the fast path's Promise signal the async entries catch (§5.5 item 6), a public class a callback can throw too, which is why a callback's own throw inside an official product is indistinguishable (#80) | low |
 | `regexes.number` / `util.isPlainObject` | record skeleton | low (the official internals depend on the same ones for consistency) |
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | medium: must be synced when zod changes the `when` semantics |
 | `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | medium: must be synced when zod changes the optin/optout ladder |

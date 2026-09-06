@@ -38,3 +38,25 @@ export function isAsyncFn(fn: unknown): boolean {
 export function throwAsync(): never {
   throw new $ZodAsyncError();
 }
+
+/**
+ * The `$ZodAsyncError`s a caller's callback threw, or rejected with, through this layer's own call sites: the
+ * predicates the checks subroutine calls, the promises it settles, the promise of an async island. The class is
+ * public, so a callback can throw it itself (a nested sync parse of an async schema does), and such a throw is the
+ * caller's: stock rejects with it after one call. The async entries of `compile()` rethrow a recorded error and
+ * treat only an unrecorded one as the fast path's Promise signal (fifth review of #76). A callback that stock's own
+ * generated code calls (inside an official product) is not recorded: its Promise signal comes from stock's `throwAsync`,
+ * which this layer cannot mark, so both stay the signal there (#80).
+ */
+const callerAsyncErrors = new WeakSet<object>();
+
+/** Records a `$ZodAsyncError` that came out of a caller's callback and rethrows whatever came out. */
+export function rethrowCallerError(e: unknown): never {
+  if (e instanceof $ZodAsyncError) callerAsyncErrors.add(e);
+  throw e;
+}
+
+/** The fast path's Promise signal: a `$ZodAsyncError` no callback of this layer's call sites threw. */
+export function isPromiseSignal(e: unknown): boolean {
+  return e instanceof $ZodAsyncError && !callerAsyncErrors.has(e);
+}

@@ -3,7 +3,7 @@
  * (the per-subtree degradation chain).
  */
 import { $ZodAsyncError, INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
-import { type Fn, isAsyncFn, markAsync, type Node } from "./product.js";
+import { type Fn, isAsyncFn, markAsync, type Node, rethrowCallerError } from "./product.js";
 
 /* ═══════════════════ Obtaining the official product (degradation chain) ═══════════════════ */
 
@@ -24,14 +24,17 @@ function makeIsland(schema: Node): Fn {
  * a run that came back synchronously is answered synchronously, so a sync entry of a set, map or
  * record keeps its place in stock's write order (stock's runtime writes a sync entry inside its
  * loop and an async one when its promise settles), and an async run adds exactly one `.then`
- * before the skeleton's own, the same number of microtask hops for every entry (review of #70).
+ * before the skeleton's own, the same number of microtask hops for every entry (review of #70). A rejection
+ * of that run is the caller's (a callback threw inside stock's async chain), never the fast path's Promise
+ * signal, so a `$ZodAsyncError` among them is recorded for the async entries (fifth review of #76); a throw
+ * that comes back synchronously is left as it is, as the interpreter called that callback, not this layer.
  */
 export function makeAsyncIsland(schema: Node): Fn {
   const settle = (r: { issues: unknown[]; value: unknown }): unknown =>
     r.issues.length === 0 ? r.value : INVALID;
   return markAsync((value: unknown): unknown => {
     const r = schema._zod.run({ value, issues: [] }, {});
-    return r instanceof Promise ? r.then(settle) : settle(r);
+    return r instanceof Promise ? r.then(settle, rethrowCallerError) : settle(r);
   });
 }
 

@@ -22,6 +22,7 @@ import {
   compileCowDebug,
   officialValidator,
   isAsyncProduct,
+  isPromiseSignal,
   resolveOptions,
   type Fn,
 } from "./cow4/index.js";
@@ -84,9 +85,10 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
   // `_zod.run`): no static detector sees it, and the official code throws `$ZodAsyncError` there. Stock's own
   // `z.compile()` never runs its fast path on an async parse; the async entries here hand that parse to stock's
   // async runtime instead, whose output and issues are stock's (a plain-Promise transform answers INVALID in the
-  // official product and reaches the same fallback). Any other throw is the caller's.
+  // official product and reaches the same fallback). Any other throw is the caller's, a `$ZodAsyncError` a
+  // callback threw through this layer's own call sites included (`isPromiseSignal`, fifth review of #76).
   const asyncFallbackOr = (e: unknown): typeof INVALID => {
-    if (e instanceof $ZodAsyncError) return INVALID;
+    if (isPromiseSignal(e)) return INVALID;
     throw e;
   };
 

@@ -1220,4 +1220,202 @@ head(
   ok("the async entries of a sync skeleton keep stock's issues on an ordinary failure");
 }
 
+head(
+  "a $ZodAsyncError a callback throws is the caller's, not the fast path's Promise signal (fifth review of #76)",
+);
+{
+  // The async entries hand a parse to stock's async runtime when the fast path met a Promise a plain function
+  // returned, which the official code and this layer's `throwAsync` report by throwing `$ZodAsyncError`, stock's
+  // public class. A callback can throw the same class itself (a nested sync parse of an async schema does), and
+  // that throw is the caller's: stock rejects with it after one call. Every call site of this layer that runs a
+  // callback (the checks subroutine of the containers, the wrappers and the unions) or awaits one (the settlement
+  // of an async predicate, an async island) records a `$ZodAsyncError` the callback threw or rejected with, and the
+  // async entries rethrow a recorded one instead of rerunning the parse.
+  const nested = z.string().refine(async () => true);
+  const throwers: [string, () => void][] = [
+    ["a nested sync parse of an async schema", () => nested.parse("x")],
+    [
+      "an explicit throw",
+      () => {
+        throw new $ZodAsyncError();
+      },
+    ],
+  ];
+  // Throws on the first call only, so a rerun would pass: the review's reproduction
+  const once = (log: string[], thrower: () => void) => () => {
+    log.push("c");
+    if (log.length === 1) thrower();
+    return true;
+  };
+  type Case = {
+    name: string;
+    make: (fn: () => boolean) => z.ZodType;
+    input: () => unknown;
+    async: boolean;
+  };
+  const cases: Case[] = [
+    {
+      name: "array refine",
+      make: (fn) => z.array(z.string()).refine(fn),
+      input: () => ["x"],
+      async: false,
+    },
+    {
+      name: "record refine",
+      make: (fn) => z.record(z.string(), z.number()).refine(fn),
+      input: () => ({ a: 1 }),
+      async: false,
+    },
+    {
+      name: "refine on optional(object)",
+      make: (fn) => z.object({ a: z.string() }).optional().refine(fn),
+      input: () => ({ a: "x" }),
+      async: false,
+    },
+    {
+      name: "refine on a union's container option",
+      make: (fn) => z.union([z.array(z.string()).refine(fn), z.number()]),
+      input: () => ["x"],
+      async: false,
+    },
+    {
+      name: "sync container refine inside an async skeleton",
+      make: (fn) =>
+        z.object({ a: z.string().refine(async () => true), b: z.array(z.string()).refine(fn) }),
+      input: () => ({ a: "x", b: ["y"] }),
+      async: true,
+    },
+    {
+      name: "a plain predicate before an async one in the same subroutine",
+      make: (fn) =>
+        z
+          .array(z.string())
+          .refine(fn)
+          .refine(async () => true),
+      input: () => ["x"],
+      async: true,
+    },
+    {
+      name: "an async predicate rejecting",
+      make: (fn) => z.array(z.string()).refine(async () => fn()),
+      input: () => ["x"],
+      async: true,
+    },
+    {
+      name: "an async island rejecting (lazy over an async refine)",
+      make: (fn) => z.object({ a: z.lazy(() => z.string().refine(async () => fn())) }),
+      input: () => ({ a: "x" }),
+      async: true,
+    },
+  ];
+  for (const c of cases) {
+    for (const [tname, thrower] of throwers) {
+      const label = `${c.name}, ${tname}`;
+      const stockLog: string[] = [];
+      const S = c.make(once(stockLog, thrower));
+      await assert.rejects(S.safeParseAsync(c.input()), $ZodAsyncError, `${label}: stock rejects`);
+      assert.equal(stockLog.length, 1, `${label}: stock calls the callback once`);
+
+      const log: string[] = [];
+      const C = compile(c.make(once(log, thrower)));
+      assert.equal(C.async, c.async, `${label}: async flag`);
+      assert.equal(C.stock, false, `${label}: not degraded`);
+      await assert.rejects(
+        C.safeParseAsync(c.input()),
+        $ZodAsyncError,
+        `${label}: safeParseAsync rejects with the callback's error`,
+      );
+      assert.equal(log.length, 1, `${label}: the callback ran once, no rerun in stock`);
+      log.length = 0;
+      await assert.rejects(C.parseAsync(c.input()), $ZodAsyncError, `${label}: parseAsync too`);
+      assert.equal(log.length, 1, `${label}: parseAsync ran the callback once`);
+      if (!c.async) {
+        // The sync entries throw the callback's error like stock's sync API, unchanged
+        log.length = 0;
+        assert.throws(() => C.parse(c.input()), $ZodAsyncError, `${label}: parse throws it`);
+        assert.equal(log.length, 1);
+      }
+    }
+    ok(c.name);
+  }
+
+  // The thrown object itself comes back, not a fresh error
+  {
+    const mine = new $ZodAsyncError();
+    const C = compile(
+      z.array(z.string()).refine(() => {
+        throw mine;
+      }),
+    );
+    await assert.rejects(
+      C.safeParseAsync(["x"]),
+      (e) => e === mine,
+      "the callback's own error object",
+    );
+    ok("the caller's error object is the one rejected with");
+  }
+
+  // The Promise signal still falls back: a plain function returning a Promise in the same positions
+  {
+    const C = compile(z.array(z.string()).refine(() => Promise.resolve(true)));
+    const r = await C.safeParseAsync(["x"]);
+    assert.ok(
+      r.success,
+      "a plain Promise from the checks subroutine still reaches stock's async runtime",
+    );
+    const M = compile(
+      z.object({
+        a: z.string().refine(async () => true),
+        b: z.array(z.string()).refine(() => Promise.resolve(true)),
+      }),
+    );
+    const rM = await M.safeParseAsync({ a: "x", b: ["y"] });
+    assert.ok(rM.success, "the same inside an async skeleton");
+    ok("the fast path's own Promise signal still reaches stock's async runtime");
+  }
+
+  // Residual: a callback that stock's generated code calls (a leaf refine, a custom check or a superRefine inside
+  // an official product) reports its Promise signal with the same class from a throw site this layer cannot mark,
+  // so a `$ZodAsyncError` such a callback throws is handed to stock's async runtime like the signal: a callback that
+  // throws on every call rejects with the same error after running twice (the documented failure-path duplicate),
+  // one that throws on the first call only passes on the rerun where stock rejects. Pinned here; tracked in #80.
+  {
+    const always = (log: string[]) => () => {
+      log.push("c");
+      nested.parse("x");
+      return true;
+    };
+    const leafCases: [string, (fn: () => boolean) => z.ZodType, unknown][] = [
+      [
+        "leaf refine under an object key",
+        (fn) => z.object({ a: z.string().refine(fn) }),
+        { a: "x" },
+      ],
+      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
+    ];
+    for (const [name, make, input] of leafCases) {
+      const stockLog: string[] = [];
+      await assert.rejects(make(always(stockLog)).safeParseAsync(input), $ZodAsyncError);
+      assert.equal(stockLog.length, 1);
+      const log: string[] = [];
+      const C = compile(make(always(log)));
+      assert.ok(!C.async && !C.stock);
+      await assert.rejects(C.safeParseAsync(input), $ZodAsyncError, `${name}: the same rejection`);
+      assert.equal(
+        log.length,
+        2,
+        `${name}: the fast path and stock's async runtime each ran the callback`,
+      );
+      const onceLog: string[] = [];
+      const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+      const r = await CO.safeParseAsync(input);
+      assert.ok(r.success, `${name}: a first-call-only throw passes on the rerun (known, #80)`);
+      assert.equal(onceLog.length, 2);
+    }
+    ok(
+      "inside an official product the callback's $ZodAsyncError still takes the fallback (pinned, #80)",
+    );
+  }
+}
+
 console.log("\nAll tuple + async smoke assertions passed ✓");

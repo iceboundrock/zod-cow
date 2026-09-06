@@ -14,7 +14,14 @@ import { emitCoWTuple } from "./emit-tuple.js";
 import { emitCoWUnion } from "./emit-union.js";
 import { makeAsyncIsland, officialFn } from "./official.js";
 import { DEFAULT_OPTIONS } from "./options.js";
-import { type Fn, isAsyncFn, isAsyncProduct, type Node, throwAsync } from "./product.js";
+import {
+  type Fn,
+  isAsyncFn,
+  isAsyncProduct,
+  type Node,
+  rethrowCallerError,
+  throwAsync,
+} from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ═══════════════════ Skeleton codegen ═══════════════════ */
@@ -90,7 +97,17 @@ export function childProduct(child: Node, seen: Set<Node>, parent: CodeCtx): Chi
  */
 async function settleChecks(results: unknown[]): Promise<boolean> {
   let ok = true;
-  for (const r of results) if (!(r instanceof Promise ? await r : r)) ok = false;
+  for (const r of results) {
+    let v = r;
+    if (r instanceof Promise) {
+      try {
+        v = await r;
+      } catch (e) {
+        rethrowCallerError(e); // a rejection is the predicate's, never the fast path's Promise signal
+      }
+    }
+    if (!v) ok = false;
+  }
   return ok;
 }
 
@@ -110,7 +127,9 @@ async function settleChecks(results: unknown[]): Promise<boolean> {
  * predicates (third review of #76); after the first promise the state is updated inside stock's chain,
  * too late for the loop, so nothing is skipped and the predicates are all started as before. Whether a
  * promise has started is decided at runtime for the predicates that are not async functions, since a
- * plain function may return a Promise too.
+ * plain function may return a Promise too. Every predicate call is wrapped so that a `$ZodAsyncError` the
+ * predicate throws is recorded as the caller's (`rethrowCallerError`): the async entries rethrow it, where an
+ * unrecorded one (this subroutine's own `throwAsync` at a Promise) hands the parse to stock's async runtime.
  * Returning null means a check the skeleton cannot handle is present (the caller should already have blocked it via checksAreCowSafe).
  */
 export function containerChecksFn(schema: Node): Fn | null {
@@ -125,6 +144,7 @@ export function containerChecksFn(schema: Node): Fn | null {
   });
   ctx.async = anyAsync;
   const settleC = anyAsync ? ctx.addConst(settleChecks) : null;
+  const rethrowC = ctx.addConst(rethrowCallerError);
   const started: string[] = []; // async variant: the results of the predicates called so far
   let promiseStarted = false; // async variant: an async-function predicate was called, so a promise has certainly started
   const fail = (): string =>
@@ -136,7 +156,7 @@ export function containerChecksFn(schema: Node): Fn | null {
     if (d.check === "custom" && d.fn) {
       const fnC = ctx.addConst(d.fn);
       const res = ctx.var();
-      ctx.write(`const ${res} = ${fnC}(input);`);
+      ctx.write(`let ${res}; try { ${res} = ${fnC}(input); } catch (e) { ${rethrowC}(e); }`);
       if (anyAsync) {
         const asyncFn = isAsyncFn(d.fn);
         if (d.abort && !asyncFn && !promiseStarted) {

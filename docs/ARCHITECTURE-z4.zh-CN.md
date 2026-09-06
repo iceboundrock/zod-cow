@@ -263,7 +263,9 @@ async，子程序本身就是 async 函数，并遵循 stock 的调度：`runChe
 会跳过后面所有没有 `when` 的 check（长度 / 大小检查带 `when`，仍会运行，且无副作用）。子程序在这一点直接返回 `INVALID` 而不再启动后面的
 谓词，因此 stock 不会调用的谓词这里也不会被调用（#76 的第三轮评审）；第一个 promise 之后 stock 在自己的链里更新状态，对循环来说已经太晚，
 于是什么都不跳过，谓词全部启动。对于不是 async 函数的谓词，是否已有 promise 启动在运行时判断，因为普通函数也可能返回 `Promise`。
-调用位（六个容器骨架、union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async：
+两种变体里的每次谓词调用都包在 `try / catch` 里，把抛出交给 `rethrowCallerError`：谓词抛出的 `$ZodAsyncError` 在继续传播之前被记录为
+调用方的，async 入口于是原样重抛它，而不是把它读成快路径的 Promise 信号（§5.5 第 6 条；等待中的谓词以 rejection 结算时，`settleChecks`
+以同样方式记录）。调用位（六个容器骨架、union 骨架与 `emitBoxedContainer` 的包装层）发射 `await`，骨架变为 async（示例里省略了包装）：
 
 ```js
 const x0 = f0(input);                                   // 同步谓词
@@ -575,6 +577,12 @@ return out;
    `parseAsync` / `safeParseAsync` 在两种骨架下都接住它，并像到达 async 入口的每个 INVALID 一样把这次 parse 交给
    stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
    在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。
+   回调自己抛出的 `$ZodAsyncError`（对 async schema 做嵌套同步 parse 就会这样）属于调用方，不是那个信号（#76 第五轮
+   review）：checks 子程序把每次谓词调用、`settleChecks` 把每个等待的谓词、`makeAsyncIsland` 把它的 rejection 都包在
+   `rethrowCallerError`（`product.ts`）里，它把该错误记入一个 WeakSet，async 入口对记录过的错误原样重抛（`isPromiseSignal`），
+   于是 parse 像 stock 一样在调用一次后拒绝。由 stock 生成代码调用的回调（官方产物内部）遇到 `Promise` 时从 stock 自己的
+   `throwAsync` 报告，本层无法标记它，所以那里抛出的 `$ZodAsyncError` 仍走回退、回调跑两次；#80 跟踪几种选项（上游给
+   该抛出点加标记是最便宜的精确修法）。
 
 关键语义保留：同步 island（`makeIsland`）遇到 Promise 时抛 `$ZodAsyncError`（官方
 compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支拒绝，必须让 throw 存活）。
@@ -611,7 +619,8 @@ async 骨架（ctx.async = true）的顶层契约：
   parseAsync/safeParseAsync 可用，失败路径回退 stock safeParseAsync。
 同步骨架（ctx.async = false）：
   parseAsync/safeParseAsync 先跑快路径，遇到 INVALID 时回退到 stock safeParseAsync，
-  遇到普通函数返回 Promise 时快路径抛出的 $ZodAsyncError 也走同一回退（§5.5 第 6 条）。
+  遇到普通函数返回 Promise 时快路径抛出的 $ZodAsyncError 也走同一回退（§5.5 第 6 条）；回调经由本层自己的
+  调用位抛出的 $ZodAsyncError 会被记录并原样重抛（isPromiseSignal）。
 ```
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
@@ -695,7 +704,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 | `compileFn(schema, {assertOnly, debug})` | 叶子/子树产物 | 签名变化（低）；行为变化由差分兜底 |
 | `INVALID` | 失败哨兵 | 极低（Symbol.for 稳定） |
 | `ZodCompileUnsupportedError/AsyncError` | 降级判定 + async 探测器（v0.5） | 低 |
-| `$ZodAsyncError` | 同步 island 遇 Promise 的官方语义抛错；sync API 对 async 骨架 | 低 |
+| `$ZodAsyncError` | 同步 island 遇 Promise 的官方语义抛错；sync API 对 async 骨架；async 入口接住的快路径 Promise 信号（§5.5 第 6 条），这是个回调也能抛的公开类，所以官方产物内部回调自己的抛出无法区分（#80） | 低 |
 | `regexes.number` / `util.isPlainObject` | record 骨架 | 低（官方内部一致性依赖同款） |
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` 等语义谓词（照抄实现，非 import） | 纯度分析 | 中：zod 改 when 语义时需同步 |
 | `getTupleOptStart` / `dropsWhenAbsent`（照抄实现，非 import） | tuple 尾槽截断语义（v0.5） | 中：zod 改 optin/optout 梯子时需同步 |

@@ -38,8 +38,12 @@ export function isPure(schema: Node): boolean {
     // (second review of #68).
     case "optional":
     case "nullable": {
-      const gate = unwrapsToContainer(def.innerType) ? wrapperChecksAreCowSafe : leafChecksArePure;
-      return gate(schema) && isPure(def.innerType);
+      if (!unwrapsToContainer(def.innerType))
+        return leafChecksArePure(schema) && isPure(def.innerType);
+      // Above a container the verdict holds only where the chain gets a skeleton, so an exact-optional
+      // layer is impure here for the same reason `cowSafeContainerForChild` declines it (#74)
+      if (isExactOptional(schema)) return false;
+      return wrapperChecksAreCowSafe(schema) && isPure(def.innerType);
     }
     // Containers: this layer's skeleton takes over (strip/strict/loose can all return the original reference).
     // Precondition: the schema's own checks can be handled safely by the skeleton (see checksAreCowSafe).
@@ -67,14 +71,20 @@ export function isPure(schema: Node): boolean {
       if (def.rest && !isPure(def.rest)) return false;
       return true;
     }
-    // Union: the whole union is one official product, so an option gets no skeleton of its own. A container
-    // option would therefore be validated by assertOnly and returned by reference, keeping the undeclared
-    // keys of a strip object (or of an object nested in an array / tuple option) that stock's rebuild drops
-    // (#47). Any option that is, or unwraps through optional / nullable to, a container makes the union
-    // impure: it takes the official parser plus the reference comparison, which rebuilds like stock.
-    // discriminatedUnion shares this def.type.
-    case "union":
-      return def.options.every((o: Node) => !unwrapsToContainer(o) && isPure(o));
+    // Union: the union's own checks first (a `.overwrite` or a superRefine on the union rewrites the
+    // winning value exactly as on a leaf, and the validator would hand the input back; found while
+    // building the skeleton of #58), then the options. A union whose options are all leaves is one
+    // official product; one with a container option (directly, through optional / nullable, or in a
+    // nested union) gets the union skeleton (#58), which tries each option's CoW product in order, so
+    // its verdict follows the skeleton's gate like the wrapper case above: a union the skeleton
+    // declines (`z.xor`, a discriminated union stock's codegen declines, a check other than a refine
+    // predicate) takes the official parser plus the reference comparison, which rebuilds the
+    // matching container like stock (#47). discriminatedUnion shares this def.type.
+    case "union": {
+      const hasContainer = def.options.some(unwrapsToContainer);
+      if (!(hasContainer ? unionSkeletonOk(schema) : leafChecksArePure(schema))) return false;
+      return def.options.every((o: Node) => isPure(o));
+    }
     // freeze side effects / value producers / black boxes: always impure
     // readonly (Object.freeze), default/prefault/catch/coerce, transform/pipe,
     // tuple/record/map/set (the official product unconditionally builds a new container), intersection (mergeValues),
@@ -84,7 +94,10 @@ export function isPure(schema: Node): boolean {
   }
 }
 
-/** Whether the node is a container, or an optional / nullable chain ending in one (any checks along the way ignored) */
+/**
+ * Whether the node is a container, or an optional / nullable chain ending in one, or a union with such
+ * an option at any depth of nested unions (any checks along the way ignored)
+ */
 function unwrapsToContainer(node: Node): boolean {
   let cur: Node = node;
   for (;;) {
@@ -93,6 +106,7 @@ function unwrapsToContainer(node: Node): boolean {
       cur = cur._zod.def.innerType;
       continue;
     }
+    if (t === "union") return cur._zod.def.options.some(unwrapsToContainer);
     return (
       t === "object" ||
       t === "array" ||
@@ -195,25 +209,81 @@ function wrapperChecksAreCowSafe(schema: Node): boolean {
 }
 
 /**
+ * Whether a union can take the union skeleton (`emitCoWUnion`, #58), the same conditions under which
+ * stock's codegen compiles the union rather than handing it to the runtime, plus the check gate of a
+ * wrapper: the union's own checks are `.refine` predicates only (`containerChecksFn` runs them on the
+ * winning value); a plain union is not `z.xor` (`inclusive === false`: exactly one option must match,
+ * which a first-hit chain cannot decide); a discriminated union has no `unionFallback`, every option
+ * carries static discriminator values of a type `literalEquality` can compare, and no value is claimed
+ * twice. A declined union takes the official parser, whose product is stock's runtime island for the
+ * same cases. Whether the skeleton is worth emitting (an option that unwraps to a container) is the
+ * caller's question.
+ */
+export function unionSkeletonOk(schema: Node): boolean {
+  const def = schema._zod.def;
+  if (!wrapperChecksAreCowSafe(schema)) return false;
+  if (def.discriminator) {
+    if (def.unionFallback) return false;
+    const claimed = new Set<unknown>();
+    for (const option of def.options) {
+      const values: Set<unknown> | undefined = option._zod.propValues?.[def.discriminator];
+      if (!values || values.size === 0) return false;
+      for (const v of values) {
+        if (claimed.has(v) || !isLiteralDiscriminatorValue(v)) return false;
+        claimed.add(v);
+      }
+    }
+    return true;
+  }
+  return def.inclusive !== false;
+}
+
+/** Stock's `isExactOptional` (compile.js): the trait `z.exactOptional` adds on top of `def.type === "optional"` */
+function isExactOptional(node: Node): boolean {
+  return node._zod.traits?.has("$ZodExactOptional") === true;
+}
+
+/** The value types stock's `literalEquality` compares (a literal or enum discriminator can hold nothing else, kept as a guard) */
+function isLiteralDiscriminatorValue(v: unknown): boolean {
+  const t = typeof v;
+  return (
+    v === null ||
+    t === "string" ||
+    t === "number" ||
+    t === "boolean" ||
+    t === "undefined" ||
+    t === "bigint" ||
+    t === "symbol"
+  );
+}
+
+/**
  * Pierce the optional/nullable wrapper chain to decide whether it finally lands on a container CoW can take over
- * (object/array/record/map/set), with the whole chain and the container's own checks all safe.
+ * (object/array/tuple/record/map/set, or a union with such an option, #58), with the whole chain and the container's own checks all safe.
  * This is the only entry point for the key-position/element-position/top-level decision to "use a CoW sub-skeleton" --
  * testing def.type bare would misroute optional(object) to the official assertOnly and lose the strip semantics
  * (demonstrated by differential seed=104/133/137). A wrapper layer may carry `.refine` predicates, which the
- * skeleton runs (#56); any other check on a wrapper sends the chain to the official parser.
+ * skeleton runs (#56); any other check on a wrapper sends the chain to the official parser. So does an
+ * exact-optional layer (`z.exactOptional`, the `$ZodExactOptional` trait on `def.type === "optional"`):
+ * `emitBoxedContainer` shortcuts every optional layer on `undefined`, while stock's `generateOptionalCheck`
+ * compiles the inner directly for that trait so the container or union below rejects `undefined`. The
+ * official parser keeps stock's answer on both paths; restoring the CoW path for it is #74.
  */
 export function cowSafeContainerForChild(child: Node): boolean {
   let cur: Node = child;
   for (;;) {
     const t: string = cur._zod.def.type;
     if (t === "optional" || t === "nullable") {
-      if (!wrapperChecksAreCowSafe(cur)) return false;
+      if (isExactOptional(cur) || !wrapperChecksAreCowSafe(cur)) return false;
       cur = cur._zod.def.innerType;
       continue;
     }
     if (t === "object" || t === "array") return checksAreCowSafe(cur);
     if (t === "record") return recordKeyShapeOk(cur) && checksAreCowSafe(cur);
     if (t === "map" || t === "set" || t === "tuple") return checksAreCowSafe(cur);
+    // A union with a container option (at any depth of nested unions) gets the union skeleton, which
+    // routes that option through this same decision (#58); a leaf-only union stays one official product
+    if (t === "union") return cur._zod.def.options.some(unwrapsToContainer) && unionSkeletonOk(cur);
     return false;
   }
 }

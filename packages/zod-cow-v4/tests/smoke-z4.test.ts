@@ -712,7 +712,7 @@ import { compile } from "../src/index.js";
   console.log('  nested loose object: default copies, "ignore" shares ✓');
 }
 
-/* ── 14. a union with a container option is impure: it takes the official parser and strips like stock (#47) ── */
+/* ── 14. a union with a container option strips like stock (#47; since #58 through the union skeleton, group 21) ── */
 {
   console.log("\n── union with a container option (#47) ──");
   const U = z.union([z.object({ a: z.string() }), z.number()]);
@@ -724,9 +724,11 @@ import { compile } from "../src/index.js";
   assert.notEqual(out, input);
   assert.equal(C.parse(3), 3);
   // White-box pin on the current codegen shape: a top-level assertOnly validator emits `return input;`, the
-  // official parser path returns its own local (`return x0;`). Update the pin if the emitted shape changes.
+  // union skeleton returns its own local (`return x0;`) and builds the object option as a nested skeleton
+  // (the `return input;` of that skeleton sits under its own header, #46). Update the pin if the emitted shape changes.
+  const topLevel = C.code!.split("// ── nested skeleton #1 ──")[0]!;
   assert.ok(
-    !C.code!.includes("return input;"),
+    !topLevel.includes("return input;"),
     "the union is not handed to the assertOnly validator",
   );
   console.log("  strip-object option: undeclared key dropped like stock ✓");
@@ -1588,6 +1590,230 @@ import { compile } from "../src/index.js";
   }
   assert.ok(!compile(z.tuple([z.string(), z.number().optional()])).code!.includes("await"));
   console.log("  the async layout awaits one Promise.all; the sync layout awaits nothing ✓");
+}
+
+/* ── 21. union skeleton: each option's CoW product tried in order, the clean input shared (#58) ── */
+{
+  console.log("\n── union skeleton (#58) ──");
+  const A = z.object({ a: z.string() });
+  const B = z.object({ b: z.number().default(7) });
+  const U = z.union([A, B]);
+  const C = compile(U);
+  assert.ok(!C.stock);
+
+  // Clean input: the matching option's skeleton returns the input by reference
+  const aIn = { a: "x" };
+  assert.equal(C.parse(aIn), aIn);
+  const bIn = { b: 1 };
+  assert.equal(C.parse(bIn), bIn);
+  // A later option that matches: the first option rejected it, the second shares
+  assert.deepEqual(C.parse(bIn), U.parse(bIn));
+  console.log("  clean input shared by the first and by a later option ✓");
+
+  // Dirty: the default fires inside the second option, the copy is stock's output
+  const dIn = {};
+  const dOut = C.parse(dIn);
+  assert.deepEqual(dOut, { b: 7 });
+  assert.deepEqual(dOut, U.parse(dIn));
+  assert.notEqual(dOut, dIn);
+  console.log("  a fired default copies like stock ✓");
+
+  // Strip semantics of every option are kept (the #47 guarantee)
+  const eIn = { a: "x", extra: 1 };
+  assert.deepEqual(C.parse(eIn), { a: "x" });
+  assert.deepEqual(C.parse(eIn), U.parse(eIn));
+  const sym = Symbol("extra");
+  const S = z.union([z.strictObject({ a: z.string() }), z.looseObject({ n: z.number() })]);
+  const sIn = { a: "x", [sym]: 1 };
+  const sOut = compile(S).parse(sIn) as object;
+  assert.ok(!(sym in sOut));
+  assert.deepEqual(sOut, S.parse(sIn));
+  const lIn = { n: 1, extra: "kept" };
+  assert.equal(compile(S).parse(lIn), lIn);
+  assert.deepEqual(S.parse(lIn), lIn);
+  console.log("  strip, strict and loose options behave like stock ✓");
+
+  // Nested: the union's key shares when clean and the parent shares with it; a dirty option copies
+  // the path to the root and leaves the sibling shared
+  const N = z.object({ u: U, keep: z.object({ n: z.number() }) });
+  const nIn = { u: { a: "x" }, keep: { n: 1 } };
+  assert.equal(compile(N).parse(nIn), nIn);
+  const nDirty = { u: {}, keep: { n: 1 } };
+  const nOut = compile(N).parse(nDirty);
+  assert.deepEqual(nOut, N.parse(nDirty));
+  assert.notEqual(nOut, nDirty);
+  assert.equal(nOut.keep, nDirty.keep);
+  console.log("  nested: parent shares when clean, copies only the dirty path ✓");
+
+  // Leaf and container options mixed: a matching leaf shares, a container option strips
+  const M = z.union([z.string(), A, z.number().min(0)]);
+  assert.equal(compile(M).parse("s"), "s");
+  assert.equal(compile(M).parse(aIn), aIn);
+  assert.deepEqual(compile(M).parse(eIn), { a: "x" });
+  assert.equal(compile(M).safeParse(-1).success, false);
+  console.log("  mixed leaf and container options ✓");
+
+  // Discriminated union: dispatch on the discriminator, the matching option shares
+  const D = z.discriminatedUnion("k", [
+    z.object({ k: z.literal("a"), v: z.string() }),
+    z.object({ k: z.enum(["b", "c"]), n: z.number().default(0) }),
+  ]);
+  const CD = compile(D);
+  const kaIn = { k: "a", v: "x" };
+  assert.equal(CD.parse(kaIn), kaIn);
+  const kcIn = { k: "c", n: 1 };
+  assert.equal(CD.parse(kcIn), kcIn);
+  assert.deepEqual(CD.parse({ k: "b" }), { k: "b", n: 0 });
+  assert.deepEqual(CD.parse({ k: "b", extra: 1 }), { k: "b", n: 0 });
+  assert.equal(CD.safeParse({ k: "z" }).success, false);
+  assert.equal(CD.safeParse("a").success, false);
+  assert.equal(CD.safeParse(null).success, false);
+  console.log("  discriminated union dispatches and shares ✓");
+
+  // Under a wrapper and inside an array
+  const W = z.object({ u: U.optional() });
+  const wIn = { u: { a: "x" } };
+  assert.equal(compile(W).parse(wIn), wIn);
+  assert.equal(compile(W).parse({}).u, undefined);
+  const arr = [{ a: "x" }, { b: 2 }];
+  assert.equal(compile(z.array(U)).parse(arr), arr);
+  const arrDirty = [{ a: "x" }, {}];
+  const arrOut = compile(z.array(U)).parse(arrDirty);
+  assert.deepEqual(arrOut, [{ a: "x" }, { b: 7 }]);
+  assert.equal(arrOut[0], arrDirty[0]);
+  // A union option that is itself a union of objects
+  const UU = z.union([z.union([A, B]), z.string()]);
+  assert.equal(compile(UU).parse(aIn), aIn);
+  assert.deepEqual(compile(UU).parse(eIn), { a: "x" });
+  console.log("  optional(union), array(union) and union(union) reach the skeleton ✓");
+
+  // optional over a union with a defaulted option: stock's optional hands `undefined` to a
+  // defaulted inner so the default fires, and answers `undefined` when the inner rejects it
+  // (found by the fuzzer at seed 145, case 12 on the first skeleton)
+  const DU = z.object({ f: z.union([z.boolean().default(true), A]).optional() }).passthrough();
+  assert.deepEqual(compile(DU).parse({ x: 1 }), { f: true, x: 1 });
+  assert.deepEqual(compile(DU).parse({ x: 1 }), DU.parse({ x: 1 }));
+  const duIn = { f: { a: "x" } };
+  assert.equal(compile(DU).parse(duIn), duIn);
+  const DR = z
+    .union([z.boolean().default(true), A])
+    .optional()
+    .refine((v) => v !== false);
+  assert.equal(compile(DR).parse(undefined), true);
+  assert.equal(compile(DR).safeParse(false).success, false);
+  const DN = z
+    .union([z.string().default("d"), A])
+    .optional()
+    .nullable();
+  assert.equal(compile(DN).parse(undefined), "d");
+  assert.equal(compile(DN).parse(null), null);
+  assert.deepEqual(
+    [compile(DN).parse(undefined), compile(DN).parse(null)],
+    [DN.parse(undefined), DN.parse(null)],
+  );
+  const DO = z.object({ f: z.union([z.string().refine((v) => v !== "x"), A]).optional() });
+  assert.deepEqual(compile(DO).parse({}), DO.parse({}));
+  console.log("  optional over a union with a defaulted option fires the default like stock ✓");
+
+  // The union's own checks run on the winning output, and rewrite like stock
+  const R = z.union([A, z.number()]).refine((v) => typeof v === "number" || v.a !== "no");
+  assert.equal(compile(R).parse(aIn), aIn);
+  assert.equal(compile(R).safeParse({ a: "no" }).success, false);
+  assert.equal(compile(R).safeParse({ a: "no" }).success, R.safeParse({ a: "no" }).success);
+  const O = z
+    .union([z.string(), z.number()])
+    .overwrite((v) => (typeof v === "string" ? `${v}!` : v));
+  assert.equal(compile(O).parse("a"), O.parse("a"));
+  assert.equal(compile(O).parse("a"), "a!");
+  const OC = z.union([A, z.string()]).overwrite((v) => (typeof v === "string" ? `${v}!` : v));
+  assert.equal(compile(OC).parse("a"), "a!");
+  assert.deepEqual(compile(OC).parse(eIn), { a: "x" });
+  const SR = z.union([A, z.string()]).superRefine((v, ctx) => {
+    if (typeof v === "string") ctx.addIssue({ code: "custom", message: "no strings" });
+  });
+  assert.equal(compile(SR).safeParse("a").success, false);
+  assert.deepEqual(compile(SR).parse(aIn), { a: "x" });
+  console.log("  the union's own refine, overwrite and superRefine behave like stock ✓");
+
+  // Out of the skeleton: z.xor, an async option and a leaf-only union
+  const X = z.xor([A, z.object({ a: z.string(), b: z.number() })]);
+  assert.deepEqual(compile(X).parse({ a: "x", extra: 1 }), { a: "x" });
+  assert.equal(
+    compile(X).safeParse({ a: "x", b: 1 }).success,
+    X.safeParse({ a: "x", b: 1 }).success,
+  );
+  const Y = z.union([A, z.string().refine(async () => true)]);
+  const CY = compile(Y);
+  assert.ok(CY.async);
+  assert.equal(await CY.parseAsync("s"), "s");
+  assert.deepEqual(await CY.parseAsync(eIn), { a: "x" });
+  const P = z.object({ v: z.union([z.string().optional(), z.literal(1)]) });
+  const pIn = { v: 1 };
+  assert.equal(compile(P).parse(pIn), pIn);
+  console.log(
+    "  xor and an async option take the official product, a leaf-only union the validator ✓",
+  );
+
+  // The dump lists one nested skeleton per container option
+  assert.equal((C.code!.match(/nested skeleton #/g) ?? []).length, 2);
+  assert.equal((compile(M).code!.match(/nested skeleton #/g) ?? []).length, 1);
+  assert.ok(!compile(P).code!.includes("nested skeleton"));
+  console.log("  code dump: one nested skeleton per container option ✓");
+}
+
+/* ── 22. exactOptional above a container takes the official parser (review of #73, #74) ── */
+{
+  console.log("\n── exactOptional above a container (#74) ──");
+  // `$ZodExactOptional` shares `def.type === "optional"` with `$ZodOptional` but stock never
+  // shortcuts it: `undefined` reaches the inner schema and a container or union rejects it. The
+  // skeleton's wrapper chain shortcuts every optional layer, so the gate sends an exact-optional
+  // layer above a container (directly, under a further wrapper, or above a union with a container
+  // option) to the official parser, which keeps stock's answer on both paths until #74 restores
+  // the CoW path for it.
+  const O = z.object({ a: z.string() });
+  const shapes = [
+    z.exactOptional(z.union([O, z.number()])),
+    z.exactOptional(O),
+    z.exactOptional(z.union([O, z.number()])).nullable(),
+    z.nullable(z.exactOptional(z.array(z.number()))),
+    z.exactOptional(z.union([z.exactOptional(O), z.number()])),
+  ];
+  for (const S of shapes) {
+    const C = compile(S);
+    assert.ok(!C.stock);
+    assert.equal(S.safeParse(undefined).success, false);
+    assert.equal(C.safeParse(undefined).success, false);
+    assert.ok(!C.code!.includes("=== undefined) return"));
+  }
+  console.log("  undefined rejected like stock at the top level ✓");
+  // Strip semantics and the union's leaf options are kept on that route
+  const CU = compile(shapes[0]!);
+  assert.deepEqual(CU.parse({ a: "x", extra: 1 }), { a: "x" });
+  assert.equal(CU.parse(3), 3);
+  assert.equal(compile(shapes[2]!).parse(null), null);
+  assert.deepEqual(compile(shapes[1]!).parse({ a: "x", extra: 1 }), { a: "x" });
+  console.log("  strip and the leaf options kept on the official parser ✓");
+  // A key position: a present `undefined` is rejected like stock, absence and a value agree
+  const K = z.object({ k: z.exactOptional(z.union([O, z.number()])), d: z.exactOptional(O) });
+  const CK = compile(K);
+  for (const v of [
+    {},
+    { k: undefined },
+    { d: undefined },
+    { k: { a: "x" } },
+    { k: 1, d: { a: "y" } },
+  ]) {
+    assert.equal(CK.safeParse(v).success, K.safeParse(v).success, JSON.stringify(v));
+  }
+  assert.deepEqual(CK.parse({ k: { a: "x", extra: 1 } }), { k: { a: "x" } });
+  console.log("  key position: a present undefined rejected like stock ✓");
+  // exactOptional over a leaf stays on the validator, which answers like stock
+  const L = z.object({ s: z.exactOptional(z.string()) });
+  const lIn = { s: "x" };
+  assert.equal(compile(L).parse(lIn), lIn);
+  assert.equal(compile(L).safeParse({ s: undefined }).success, false);
+  assert.equal(compile(z.exactOptional(z.string())).safeParse(undefined).success, false);
+  console.log("  exactOptional over a leaf unchanged ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

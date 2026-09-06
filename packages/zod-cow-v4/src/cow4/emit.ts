@@ -11,6 +11,7 @@ import { emitCoWObject } from "./emit-object.js";
 import { emitCoWRecord } from "./emit-record.js";
 import { emitCoWSet } from "./emit-set.js";
 import { emitCoWTuple } from "./emit-tuple.js";
+import { emitCoWUnion } from "./emit-union.js";
 import { makeAsyncIsland, officialFn } from "./official.js";
 import { DEFAULT_OPTIONS } from "./options.js";
 import { type Fn, isAsyncFn, isAsyncProduct, type Node, throwAsync } from "./product.js";
@@ -156,7 +157,7 @@ export function containerChildFn(child: Node, seen: Set<Node>, parent: CodeCtx):
   }
 }
 
-/** Dispatch to the skeleton of a bare container (the chain of `emitBoxedContainer` already unwrapped) */
+/** Dispatch to the skeleton of a bare container or union (the chain of `emitBoxedContainer` already unwrapped) */
 function emitContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
   const t: string = schema._zod.def.type;
   if (t === "object") return emitCoWObject(ctx, schema, accessor, seen);
@@ -164,7 +165,8 @@ function emitContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
   if (t === "tuple") return emitCoWTuple(ctx, schema, accessor, seen);
   if (t === "record") return emitCoWRecord(ctx, schema, accessor, seen);
   if (t === "map") return emitCoWMap(ctx, schema, accessor, seen);
-  return emitCoWSet(ctx, schema, accessor, seen);
+  if (t === "set") return emitCoWSet(ctx, schema, accessor, seen);
+  return emitCoWUnion(ctx, schema, accessor, seen);
 }
 
 /**
@@ -178,10 +180,16 @@ function emitContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
  * output runs every layer's checks inner to outer. A chain with such checks builds the container as a nested
  * skeleton called once: an inline skeleton returns the clean input from inside its own branch, so nothing
  * emitted after it would run on that path. A chain without checks emits the inline skeleton as before.
+ *
+ * An `optional` layer whose inner is `defaulted` (`_zod.optin`; a union with a defaulted option, since
+ * #58 the one such inner a chain can hold) does not shortcut: stock's `generateOptionalCheck` hands
+ * `undefined` to the inner so the default can fire, and answers `undefined` when the inner rejects it.
+ * Such a layer ends the flat chain: its inner is built as a nested product called once on both paths.
  */
 function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
   const layers: { shortcut: "null" | "undefined"; checks: string | null }[] = [];
   let cur: Node = schema;
+  let defaultedInner: Node | null = null;
   for (;;) {
     const def = cur._zod.def;
     if (def.type !== "nullable" && def.type !== "optional") break;
@@ -191,6 +199,10 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
       checks: checksFn ? ctx.addConst(checksFn) : null,
     });
     cur = def.innerType;
+    if (def.type === "optional" && cur._zod.optin === "defaulted") {
+      defaultedInner = cur;
+      break;
+    }
   }
   // The checks of layer i and of every layer above it, inner first (stock's order)
   const emitChecksUpTo = (i: number, value: string): void => {
@@ -201,7 +213,8 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
   };
   const hasChecksUpTo = (i: number): boolean => layers.slice(0, i + 1).some((l) => l.checks);
 
-  for (let i = 0; i < layers.length; i++) {
+  const shortcutLayers = defaultedInner ? layers.length - 1 : layers.length;
+  for (let i = 0; i < shortcutLayers; i++) {
     const { shortcut } = layers[i]!;
     if (!hasChecksUpTo(i)) {
       ctx.write(`if (${accessor} === ${shortcut}) return ${accessor};`);
@@ -215,14 +228,31 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
     ctx.write(`}`);
   }
 
-  if (!hasChecksUpTo(layers.length - 1)) return emitContainer(ctx, cur, accessor, seen);
+  if (!defaultedInner && !hasChecksUpTo(layers.length - 1)) {
+    return emitContainer(ctx, cur, accessor, seen);
+  }
 
   const fn = containerChildFn(cur, seen, ctx);
   const f = ctx.addConst(fn);
   const isAsync = isAsyncProduct(fn);
   if (isAsync) ctx.async = true;
+  const awaitKw = isAsync ? "await " : "";
+  if (defaultedInner) {
+    // Stock's defaulted branch of generateOptionalCheck: the inner runs on `undefined`, a rejection
+    // answers `undefined` (the layer's skip value) and the checks of this layer and above run on it
+    ctx.write(`if (${accessor} === undefined) {`);
+    ctx.indented(() => {
+      const branch = ctx.var();
+      const value = ctx.var();
+      ctx.write(`const ${branch} = ${awaitKw}${f}(${accessor});`);
+      ctx.write(`const ${value} = ${branch} === INVALID ? undefined : ${branch};`);
+      emitChecksUpTo(layers.length - 1, value);
+      ctx.write(`return ${value};`);
+    });
+    ctx.write(`}`);
+  }
   const out = ctx.var();
-  ctx.write(`const ${out} = ${isAsync ? "await " : ""}${f}(${accessor});`);
+  ctx.write(`const ${out} = ${awaitKw}${f}(${accessor});`);
   ctx.write(`if (${out} === INVALID) return INVALID;`);
   emitChecksUpTo(layers.length - 1, out);
   return out;
@@ -242,7 +272,7 @@ export function emitNode(
   const def = schema._zod.def;
   const t: string = def.type;
   if (needsValue) {
-    // container (including an optional/nullable wrapper chain) → CoW skeleton
+    // container (including an optional/nullable wrapper chain) or a union with a container option → CoW skeleton
     if (
       (t === "object" ||
         t === "array" ||
@@ -250,6 +280,7 @@ export function emitNode(
         t === "record" ||
         t === "map" ||
         t === "set" ||
+        t === "union" ||
         t === "optional" ||
         t === "nullable") &&
       cowSafeContainerForChild(schema)

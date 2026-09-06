@@ -264,7 +264,7 @@ return out;
 | optional/nullable | 包装层自身 checks 通过 `leafChecksArePure`（容器之上则是骨架所用的门控 `wrapperChecksAreCowSafe`）且 inner 纯 | 值透传；包装层上的 overwrite、superRefine 或 async refine 像叶子上一样改写值或改变时序（#57），而在容器之上 validator 还会保留 stock 会剥掉的未声明键（#56）；经 `.check()` 附加到包装层的长度 / 大小检查在叶子上是纯谓词，却不是骨架会运行的 check，所以在容器之上也必须过不了这道门控，否则整条链会落到 validator（#68 第二轮评审） |
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
-| union | 全分支纯，且没有分支是容器或经 optional / nullable 剥壳后是容器 | 分支透传；容器分支需要 union 位置给不出的骨架，见陷阱四（#47） |
+| union | union 自身 checks 通过 `leafChecksArePure`（有容器分支时：`unionSkeletonOk`，即 union 骨架用的闸门）且全分支纯 | 纯叶子 union 是一个官方产物，分支透传；带容器分支（直接、经 optional / nullable、或在嵌套 union 内）的 union 拿到 union 骨架（#58），其分支就是骨架位置，见陷阱四 |
 | readonly | false | `Object.freeze` 副作用（冻输入的风险） |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | 值产生器/黑盒/新容器 |
 
@@ -309,7 +309,7 @@ validator，保留了 stock 会剥掉的未声明键（#68 第二轮评审发现
 现在三个被包装的子节点里有一个在包装层之上再叠一个 check（同步或 async refine、overwrite），refine 谓词也拒绝恰好
 三个条目的容器；在未修复的引擎上，每一遍各找出 20 000 case 中的 5 个。
 
-### 陷阱四：union 分支不是骨架位置（#44 评审中发现，生成器加入 union 后由差分复现，#47）
+### 陷阱四：union 分支不是骨架位置（#44 评审中发现，生成器加入 union 后由差分复现，#47；由 union 骨架解决，#58）
 
 白名单判容器为纯的前提是"本层骨架接管"，这在顶层和键 / 元素 / 值位置成立
 （`cowSafeContainerForChild` / `containerChildFn` 把容器路由进子骨架）。而 union 整体是一个官方产物，
@@ -318,10 +318,31 @@ validator，保留了 stock 会剥掉的未声明键（#68 第二轮评审发现
 `extra`，而 stock 会重建对象并丢掉它（顶层与嵌套皆然；strict 分支会保留未声明的自有 symbol 键，
 `array(object)`、`optional(object)` 分支与 discriminatedUnion 表现相同）。修复：只要有一个分支是容器
 （object / array / tuple / record / map / set）或经 optional / nullable 剥壳后是容器，`isPure(union)` 即为
-`false`；该 union 走官方 parser + 引用比较，按 stock 的方式重建命中的容器。代价是带容器分支的 union
-失去 CoW 路径（现在总会拷贝）；按顺序尝试各分支 CoW 产物的 union 骨架是长期修复。差分生成器自此修复起
-生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion）；下文引用的早期运行
-虽然列表里写着 "union"，实际一个也没生成。
+`false`；该 union 走官方 parser + 引用比较，按 stock 的方式重建命中的容器。代价曾是带容器分支的 union
+失去 CoW 路径（总会拷贝）。差分生成器自此修复起生成 union（2 到 3 个随机分支，四分之一为两个 object
+分支的 discriminatedUnion）；下文引用的早期运行虽然列表里写着 "union"，实际一个也没生成。
+
+union 骨架（`emit-union.ts`，#58）把 union 分支变成骨架位置，消掉了这个代价。带容器分支（直接、经
+optional / nullable、或在嵌套 union 内；`unwrapsToContainer` 会穿过 union）的 union 在 `unionSkeletonOk`
+成立时被 `cowSafeContainerForChild` 接纳：不是 `z.xor`（`inclusive === false`，要求恰好一个分支命中，
+首命中链判断不了）；discriminatedUnion 没有 `unionFallback`、每个分支都有可比较类型的静态判别值且没有
+值被声明两次（正是 stock 自己的 codegen 拒绝的情形）；union 自身的 checks 只有 `.refine` 谓词，即包装层
+用的闸门。`emitCoWUnion` 照着 stock 的 `generateUnionCheck` 写：每个分支从 `childProduct` 拿一个产物
+（容器分支拿自己的 CoW 子骨架，纯叶子拿 validator，非纯叶子拿 parser），按顺序尝试（`let x = try0;
+if (x === INVALID) x = try1; …`），discriminatedUnion 经 `?.` 读一次判别键后用 stock 的 `literalEquality`
+形式分派，union 自身的 refine 在命中值上运行。干净输入由命中分支的骨架按原引用交回，父级的引用比较看
+不到脏；脏分支返回它的拷贝，只有到根的路径被拷贝。纯叶子 union 仍是一个官方产物（纯则 validator）。
+产物为 async 的分支保留原路线，整个 union 作为官方产物（async 岛）：stock 的 async runtime 会启动所有
+分支并取第一个成功的，顺序 await 链能复现输出但复现不了后续分支的副作用。被拒的 union 照旧走官方 parser。
+
+骨架带出两个缺口。`isPure(union)` 从不看 union 自身的 checks，于是 `z.union([z.string(), z.number()]).overwrite(f)`
+（或这种 union 上的 superRefine）被判纯而走 validator，返回输入而 stock 返回改写后的值，即 #57 在 union 上
+的翻版；现在先让 union 的 checks 过叶子闸门（纯叶子 union）或骨架闸门（有容器分支），再判分支。第一版骨架
+在每个 pass 各失败一个 fuzz case（seed 145，case 12）：缺键位置上的 `optional(union([boolean.default(true), array(…)]))`，
+`emitBoxedContainer` 在 optional 层对 `undefined` 走了捷径，而 stock 的 `generateOptionalCheck` 会把 `undefined`
+交给 `optin` 为 `defaulted` 的内层让 default 触发，内层拒绝时答 `undefined`。此前没有链能终止在这样的内层
+（`default` 从不剥壳；带 defaulted 分支的 union 自身就是 `defaulted`）。现在链在这样的层终止，把内层建成嵌套
+产物在两条路径上各调一次，该层及其上各层的 checks 在分支值上运行（冒烟第 21 组两者都钉住）。
 
 > 方法论：前三个陷阱没有一个是靠读代码发现的，全部由随机 schema 差分测试
 > 抓出（`REPRO=seed:case` 一键复现；第四个在评审中发现，之所以逃过 fuzz 只是因为生成器不生成 union，于是生成器补上了它）。纯度分析的完备性只能靠 fuzz 验证：
@@ -471,7 +492,8 @@ return out;
 - `emitBoxedContainer` 尾部扩到六容器 → `nullable(record)` / `optional(map)` / `optional(tuple)` 直接可用；
 - `checksAreCowSafe`/`containerChecksFn` 增加 map/set 的 size 系 check；
 - 值位置统一走 `childProduct()`（容器→cow 子骨架 / 纯→validator / 非纯→parser / async→async 岛），
-  与 object 键位、array 元素位共用同一条选择逻辑。
+  与 object 键位、array 元素位共用同一条选择逻辑；
+- 自 #58 起带容器分支的 union 对上述各处都算容器：`cowSafeContainerForChild` 经 `unionSkeletonOk` 接纳它，`emitNode` / `emitBoxedContainer` 把它分派给 `emitCoWUnion`，每个分支再各自走一遍 `childProduct()`（见 §4 陷阱四）。
 
 ### 5.4 tuple 骨架（v0.5 新增）
 
@@ -591,7 +613,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（20 组行为断言，第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser，经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
+- `tests/smoke-z4.test.ts`（21 组行为断言，第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 async refine 或 superRefine 走官方 parser，经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
   （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
   （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支）全部通过。
 - `tests/differential-z4.test.ts`：50000 case（seeds=500×100，随机嵌套
@@ -605,6 +627,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 - 自 #47 起生成器生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion），上面的列表此前虚有其名；在未修复的引擎上新生成器在默认 pass 失败 15 / 20 000 case、`"ignore"` pass 失败 11 个，全部是陷阱四形态的输出不一致，修复后为 0。默认规模下成功 case 的顶层引用共享率为 85.6%（默认）与 86.2%（`"ignore"`），同一生成器在未修复引擎上为 85.9% 与 86.6%（该规则放弃的容器分支 union 的 CoW 路径），旧生成器下为 88.8% / 89.4%。
 - 自 #56 起三个被包装的子节点里有一个在包装层之上再叠一个 check（同步或 async refine，或把字符串转大写的 overwrite，#57），refine 谓词除字符串 "forbidden" 外也拒绝恰好三个条目的容器；在未修复的引擎上每一遍各找出 20 000 case 中的 5 个（容器之上的包装层 refine 从未运行，或叶子之上的包装层 overwrite 被判为纯），修复后为 0。默认规模下成功 case 的共享率为 85.4%（默认）/ 86.1%（`"ignore"`），旧生成器在两个引擎上均为 85.1% / 86.0%。
 - 自 #61 起，五分之一的 enum 键 record 在字符串或数字键之外声明共享的 symbol 键，作为 enum entries 形式的 symbol 值（`z.enum({ K0: "k0", S: sym })`），四十分之一只通过 `z.literal(sym)` 声明这一个 symbol，与 #51 的额外未声明 symbol 并存，因此 record 自有 symbol 探测的提升 `Set` 形态（`emitOwnSymbolProbe` 中把每个自有 symbol 与已知键 `Set` 比较、而非检查长度的分支）及其在 `"ignore"` 下的缺席都进入差分检查，与 object 自 #33 起的情况一致（那里十分之一的 shape 声明 symbol 键）。输入把已声明的 symbol 写成可枚举数据属性，从不写成不可枚举的：输入定义为不可枚举的已声明键在干净路径上按原样返回（#48，smoke 第 16 组固定），且 `REPRO` dump 现在会打印输入的 symbol 键条目，此前 `JSON.stringify` 会丢掉它们。默认规模下成功 case 的共享率为 81.7%（默认）/ 82.4%（`"ignore"`），旧生成器下为 81.4% / 81.9%。随机流的偏移还在每一遍中暴露出一个 #71 的 case（seed 108、case 55：成员各带两个 async 子节点的 tuple 的 set，stock 按结算顺序加入成员，而 tuple 骨架的就地 await 让带两个 async 子节点的成员比只带一个的晚一轮结算），与 symbol 无关，在同一个 PR 中修复。
+- 自 #58 起带容器分支的 union 拿到 union 骨架而非官方 parser；生成器未变，默认规模的流读到成功 case 中 82.5%（默认）/ 83.3%（`"ignore"`），此前 #47 的 parser 回退为 81.7% / 82.4%，降级 0 次，所有 case 与 stock 一致；50 000 case（seeds 500 × 100）为 82.1% / 82.8%，结果相同。第一版骨架在每个 pass 各失败 seed 145、case 12（陷阱四里描述的 defaulted-optional 形态），合并前修复。
 - 自 #71 起 object、enum 键 record、array 与 tuple 骨架在第一个 await 之前调用每个子节点，并用一次 `Promise.all` 结算 async 的那些；未修复的引擎在 #61 的默认规模随机流下每一遍失败 20 000 case 中的 1 个（上面那个 tuple 的 set），修复后为 0，共享率不变，仍为成功 case 的 81.7% / 82.4%，因为该布局不改变任何输出值。
 - 已知不对齐项（刻意保留）：async rest 槽 + nullable null 输入时 stock runtime 产生
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
@@ -665,5 +688,6 @@ The engine lives in `src/cow4/` as a set of modules cut along the seams describe
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple` |
 | `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
+| `emit-union.ts` | §4 陷阱四 | `emitCoWUnion`（#58） |
 
 `emit.ts` and the six `emit-*.ts` modules import each other: `emitBoxedContainer` dispatches to the skeletons, and the skeletons recurse into child containers through `containerChildFn` / `childProduct`. The cycle is safe because every binding involved is a hoisted function declaration and none of these modules executes anything at load time. Do not add top-level code that calls across the cycle.

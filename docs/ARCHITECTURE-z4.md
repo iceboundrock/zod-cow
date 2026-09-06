@@ -689,7 +689,9 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    product, its transform helpers answering INVALID for a `Promise` on purpose, so the parse entries reach stock's throw
    through their stock fallback and `validate` consults stock's sync parse before an INVALID becomes null on a tree
    holding a plain transform, `subtreeHasPlainTransform` in `official.ts` naming such a tree at compile time, a
-   `z.codec` decode function, stored on the `pipe` def itself, counting as one, #79). The
+   `z.codec` decode function, stored on the `pipe` def itself, counting as one, #79; a `lazy` is not descended, and a
+   plain-`Promise` transform inside one reaches `validate` as a `TypeError`, the official validator's lazy check
+   reading `.issues` off the thenable, where the parse entries throw stock's class through this layer's island, #90). The
    sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
    kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
    own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
@@ -755,7 +757,8 @@ Sync skeleton (ctx.async = false):
   callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
   validate runs the official validator (or the skeleton, #69) and answers null on INVALID; on a tree holding a plain
   transform (subtreeHasPlainTransform) it consults stock's sync parse first, since the official transform helpers
-  answer INVALID for a Promise where stock throws $ZodAsyncError (#79).
+  answer INVALID for a Promise where stock throws $ZodAsyncError (#79); inside a lazy the official validator's lazy
+  check throws a TypeError on the thenable instead, where the parse entries throw stock's class (#90).
 ```
 
 A check attached to an optional / nullable layer through `.check()` (`z.string().optional().check(z.minLength(3))`) is a

@@ -588,7 +588,8 @@ return out;
    transform 返回的 `Promise` 在官方产物里答 INVALID：官方的 transform helper 对 `Promise` 有意答 INVALID，所以 parse 入口
    经由 stock 回退才到达 stock 的那个 throw，而 `validate` 在持有普通 transform 的树上先咨询 stock 的同步 parse，再把
    INVALID 变成 null，`official.ts` 的 `subtreeHasPlainTransform` 在编译期识别这样的树，存放在 `pipe` def 自身上的 `z.codec`
-   decode 函数也算在内，#79）。同步 API 让这个 throw 出去，与 stock 一致；
+   decode 函数也算在内，#79；`lazy` 不下探，其内部返回 `Promise` 的普通 transform 以 `TypeError` 到达 `validate`，
+   因为官方 validator 的 lazy check 从 thenable 上读 `.issues`，而 parse 入口经本层的岛抛 stock 的类，#90）。同步 API 让这个 throw 出去，与 stock 一致；
    `parseAsync` / `safeParseAsync` 在两种骨架下都接住它，并像到达 async 入口的每个 INVALID 一样把这次 parse 交给
    stock `safeParseAsync`，也就是 stock 自己的 `z.compile()` 一开始就把所有 async parse 送去的地方（它包装的 run
    在 `ctx.async` 下绕过编译产物）。于是输出是 stock 的副本，`Promise` 之前已调用过的回调跑两次，即 §6 的失败路径重复。
@@ -649,7 +650,8 @@ async 骨架（ctx.async = true）的顶层契约：
   调用位抛出的 $ZodAsyncError 会被记录并原样重抛（isPromiseSignal）。
   validate 跑官方 validator（或骨架，#69），遇到 INVALID 答 null；在持有普通 transform 的树上
   （subtreeHasPlainTransform）先咨询 stock 的同步 parse，因为官方 transform helper 对 Promise 答 INVALID，
-  而 stock 抛 $ZodAsyncError（#79）。
+  而 stock 抛 $ZodAsyncError（#79）；在 lazy 里面则是官方 validator 的 lazy check 对 thenable 抛 TypeError，
+  而 parse 入口抛 stock 的类（#90）。
 ```
 
 经 `.check()` 附加在 optional / nullable 层上的 check（`z.string().optional().check(z.minLength(3))`）是岛的第四个成因（#69）。

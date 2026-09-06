@@ -146,9 +146,10 @@ function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
  * `INVALID` for a `Promise` (`generateTransformCheck` and the pipe helper of zod 4.5.4 `compile.js`), which every other entry of `compile()`
  * hands to stock, while `validate` would read as a rejection. `validate` consults stock's sync parse before
  * answering null for such a tree (#79). An async-function transform makes the tree async, so its sync entries throw
- * before any product runs. A `lazy` is not descended: the official validator runs it in the runtime, and the
- * skeleton through an island, both of which throw on the `Promise`. A shape getter that throws is contained as in
- * `subtreeHasAsync`; the parse meets it again.
+ * before any product runs. A `lazy` is not descended, since the official transform helper is never reached inside
+ * one: the official validator runs a `lazy` in the runtime and its lazy check reads `.issues` off the thenable, a
+ * `TypeError` rather than stock's class (the residual #90 tracks), and the skeleton runs it through an island, which
+ * throws `$ZodAsyncError`. A shape getter that throws is contained as in `subtreeHasAsync`; the parse meets it again.
  */
 export function subtreeHasPlainTransform(schema: Node): boolean {
   try {

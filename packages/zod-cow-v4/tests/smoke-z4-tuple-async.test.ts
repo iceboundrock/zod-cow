@@ -1206,6 +1206,7 @@ head(
   // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's
   // class, `validate` included: the official assertOnly product answers INVALID for a Promise from a transform, so a
   // tree holding a plain transform consults stock's sync parse before answering null, and the throw surfaces (#79).
+  // A transform inside a `lazy` is the residual: `validate` throws a `TypeError` there (#90), not pinned here.
   type Case = {
     name: string;
     make: (ok: boolean) => z.ZodType;

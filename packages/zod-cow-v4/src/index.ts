@@ -11,7 +11,8 @@
  *     .validate(data)   pure validation: official whole-tree assertOnly product; returns the input
  *                       reference when it passes, null when it fails; a tree holding a plain transform consults
  *                       stock's sync parse before answering null, so a Promise the transform returned throws
- *                       $ZodAsyncError like the other sync entries (#79)
+ *                       $ZodAsyncError like the other sync entries (#79); inside a lazy that Promise reaches
+ *                       validate as a TypeError from the official lazy check instead (#90)
  *     .code             generated CoW skeleton source (for debugging)
  *     .stock            stock degradation flag (true = this layer gave up, everything goes through stock)
  *     .async            true = the skeleton holds an async subtree, so the sync API throws
@@ -49,7 +50,7 @@ export interface Compiled<T extends z.ZodType> {
   safeParseAsync(
     data: unknown,
   ): Promise<{ success: true; data: z.output<T> } | { success: false; error: z.ZodError }>;
-  /** Pure validation: on success returns the original input reference (typed `unknown`; unlike the zod3 line there is no DeepReadonly view), null on failure. Throws `$ZodAsyncError` when a plain function returned a `Promise`, as the other sync entries do */
+  /** Pure validation: on success returns the original input reference (typed `unknown`; unlike the zod3 line there is no DeepReadonly view), null on failure. Throws `$ZodAsyncError` when a plain function returned a `Promise`, as the other sync entries do, except inside a `lazy`, where the official validator's lazy check throws a `TypeError` (#90) */
   validate(data: unknown): unknown;
 }
 

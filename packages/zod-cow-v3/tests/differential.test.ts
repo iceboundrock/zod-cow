@@ -2,14 +2,22 @@
  * Differential fuzz test — random schema + data, comparing the compiled layer against stock zod:
  *   1. Success/failure parity
  *   2. On success, output values are deepStrictEqual (key-set semantics aligned: absent optional keys, present-undefined, etc.)
- *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place
+ *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place,
+ *      and never freeze the input (readonly freezes a copy, #27)
+ *   4. On failure, the issue lists are identical: same order, and per issue every property stock
+ *      carries (code, path, message, `fatal`, the check params, a union's nested errors)
  * Extra statistic: top-level reference sharing rate (CoW hit rate).
  *
  * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro.
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
-import { compile } from "../src/index.js";
+
+// `--no-codegen` runs the same cases through the closure skeletons (the fallback used where
+// `new Function` is unavailable); the flag must be set before the compiler module loads
+const noCodegen = process.argv.includes("--no-codegen");
+if (noCodegen) process.env.ZC_V3_CODEGEN = "0";
+const { compile } = await import("../src/index.js");
 
 /* ─────────────────────────── deterministic RNG ─────────────────────────── */
 
@@ -41,6 +49,41 @@ function makeRng(seed: number): RNG {
 
 const ABSENT = Symbol("absent");
 
+/**
+ * The default values the current case's schema owns (every `.default(dv)` wrapper records its
+ * value here; reset per case). Stock hands a default to the inner schema, whose containers and
+ * dates build fresh output, so a parsed default never aliases the schema's value except through a
+ * pass-through leaf (`unknown.default(obj)` returns `obj` itself in stock); the runner requires
+ * the compiled output to alias the defaults exactly where stock's does.
+ */
+let caseDefaults: unknown[] = [];
+
+/** Every object reachable from `v` (objects, arrays, Dates, Map keys and values, Set members) */
+function reachable(v: unknown, out = new Set<object>()): Set<object> {
+  if (v === null || (typeof v !== "object" && typeof v !== "function") || out.has(v)) return out;
+  out.add(v);
+  if (v instanceof Map) {
+    for (const [k, x] of v) {
+      reachable(k, out);
+      reachable(x, out);
+    }
+  } else if (v instanceof Set) {
+    for (const x of v) reachable(x, out);
+  } else {
+    for (const k of Reflect.ownKeys(v)) reachable((v as any)[k], out);
+  }
+  return out;
+}
+
+/** Whether `output` shares an object with the case's default values that the input itself did not carry */
+function aliasesDefaults(output: unknown, input: unknown): boolean {
+  if (caseDefaults.length === 0) return false;
+  const owned = reachable(caseDefaults);
+  for (const o of reachable(input)) owned.delete(o);
+  for (const o of reachable(output)) if (owned.has(o)) return true;
+  return false;
+}
+
 const STRINGS = [
   "",
   "a",
@@ -68,15 +111,66 @@ const DATES = [
   null,
 ] as const;
 
+/**
+ * The output comparison sees Map and Set contents in iteration order: stock rebuilds both from
+ * the parsed entries in input order, and the order is observable, so a Map or Set is compared as
+ * the ordered list of its entries or members (the harness comparator, like Node's
+ * `isDeepStrictEqual`, treats them as unordered and can also mismatch two Sets whose object
+ * members are mutually deep-equal, such as two Dates of the same time).
+ */
+function orderedView(v: unknown, seen = new Map<object, unknown>()): unknown {
+  if (typeof v !== "object" || v === null) return v;
+  if (v instanceof Date) return v;
+  const hit = seen.get(v);
+  if (hit !== undefined) return hit;
+  if (v instanceof Map) {
+    const out = { $map: [] as unknown[] };
+    seen.set(v, out);
+    for (const [k, x] of v) out.$map.push([orderedView(k, seen), orderedView(x, seen)]);
+    return out;
+  }
+  if (v instanceof Set) {
+    const out = { $set: [] as unknown[] };
+    seen.set(v, out);
+    for (const x of v) out.$set.push(orderedView(x, seen));
+    return out;
+  }
+  if (Array.isArray(v)) {
+    const out: unknown[] = new Array(v.length); // holes stay holes
+    seen.set(v, out);
+    for (const k of Object.keys(v)) (out as any)[k] = orderedView((v as any)[k], seen);
+    return out;
+  }
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return v; // class instance: as it is
+  const out = Object.create(proto);
+  seen.set(v, out);
+  for (const k of Object.keys(v)) {
+    Object.defineProperty(out, k, {
+      value: orderedView((v as any)[k], seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
+
 function repr(v: unknown): string {
   try {
     return (
-      JSON.stringify(v, (_k, x) => {
-        if (typeof x === "bigint") return `${x}n`;
-        if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
-        if (typeof x === "symbol") return String(x);
+      // The replacer reads the raw value off its holder: JSON.stringify applies `toJSON` (a Date
+      // becomes its ISO string, an invalid Date `null`) before handing the value to the replacer
+      JSON.stringify({ v }, function (this: any, k, x) {
+        const raw = this[k];
+        if (typeof raw === "bigint") return `${raw}n`;
+        if (raw instanceof Date)
+          return Number.isNaN(raw.getTime()) ? "Date(NaN)" : raw.toISOString();
+        if (raw instanceof Map) return `Map(${repr([...raw])})`;
+        if (raw instanceof Set) return `Set(${repr([...raw])})`;
+        if (typeof raw === "symbol") return String(raw);
         return x;
-      }) ?? String(v)
+      })?.slice(5, -1) ?? String(v)
     );
   } catch {
     return String(v);
@@ -113,6 +207,19 @@ function bString(rng: RNG): Built {
     s = s.email();
     desc += ".email()";
   }
+  if (rng.chance(0.06)) {
+    const n = rng.pick([1, 3, 5] as const);
+    s = s.length(n);
+    desc += `.length(${n})`;
+  }
+  if (rng.chance(0.06)) {
+    s = s.includes("b");
+    desc += '.includes("b")';
+  }
+  if (rng.chance(0.05)) {
+    s = s.startsWith("a", "must start with a");
+    desc += '.startsWith("a", msg)';
+  }
   if (rng.chance(0.1)) {
     s = s.trim();
     desc += ".trim()";
@@ -137,8 +244,13 @@ function bNumber(rng: RNG): Built {
   }
   if (rng.chance(0.3)) {
     const n = rng.pick([1, 2, 5, 10] as const);
-    s = s.min(n);
-    desc += `.min(${n})`;
+    if (rng.chance(0.3)) {
+      s = s.min(n, { message: `at least ${n}` });
+      desc += `.min(${n}, msg)`;
+    } else {
+      s = s.min(n);
+      desc += `.min(${n})`;
+    }
   }
   if (rng.chance(0.3)) {
     const n = rng.pick([3, 8, 50, 1000] as const);
@@ -156,8 +268,10 @@ function bNumber(rng: RNG): Built {
   };
 }
 
+const ANYTHING = [1, "a", null, true, { a: 1 }, [1, 2], undefined] as const;
+
 function bLeaf(rng: RNG): Built {
-  const which = rng.int(7);
+  const which = rng.int(10);
   switch (which) {
     case 0:
       return bString(rng);
@@ -183,8 +297,46 @@ function bLeaf(rng: RNG): Built {
     }
     case 5:
       return { schema: z.bigint(), desc: "bigint", gen: (r) => r.pick(BIGINTS) };
+    case 6:
+      return {
+        schema: z.date(),
+        desc: "date",
+        // A fresh Date per case: a readonly over a date freezes the instance in place (stock too)
+        gen: (r) => {
+          const v = r.pick(DATES);
+          return v instanceof Date ? new Date(v.getTime()) : v;
+        },
+      };
+    case 7: {
+      const E = { A: "a", B: "b", C: 3 } as const;
+      return {
+        schema: z.nativeEnum(E),
+        desc: "nativeEnum(A|B|C=3)",
+        gen: (r) =>
+          r.chance(0.25) ? r.pick(["z", 4, null, true] as const) : r.pick(["a", "b", 3] as const),
+      };
+    }
+    case 8:
+      // A pass-through leaf that accepts a container too: stock returns the input itself, so a
+      // readonly above it (directly or through a union / transform / catch) freezes in place
+      return {
+        schema: z.unknown(),
+        desc: "unknown",
+        gen: (r) => {
+          const v = r.pick(ANYTHING);
+          return v !== null && typeof v === "object" ? structuredClone(v) : v;
+        },
+      };
     default:
-      return { schema: z.date(), desc: "date", gen: (r) => r.pick(DATES) };
+      // create params: a required_error / invalid_type_error map on a plain string
+      return {
+        schema: z.string({
+          required_error: "name required",
+          invalid_type_error: "name must be text",
+        }),
+        desc: "string({required_error, invalid_type_error})",
+        gen: (r) => (r.chance(0.3) ? r.pick(NON_STRINGS) : r.pick(STRINGS)),
+      };
   }
 }
 
@@ -198,7 +350,7 @@ function validValueFor(b: Built, rng: RNG): unknown {
 }
 
 function bWrap(rng: RNG, inner: Built): Built {
-  const which = rng.int(5);
+  const which = rng.int(7);
   if (which === 0) {
     return {
       schema: inner.schema.optional(),
@@ -219,6 +371,7 @@ function bWrap(rng: RNG, inner: Built): Built {
     if (dv === undefined && !inner.schema.safeParse(undefined).success) {
       return inner;
     }
+    caseDefaults.push(dv);
     return {
       schema: inner.schema.default(dv as never),
       desc: `${inner.desc}.default(${repr(dv)})`,
@@ -229,6 +382,21 @@ function bWrap(rng: RNG, inner: Built): Built {
     return {
       schema: inner.schema.refine((v: unknown) => v !== "forbidden", "value is forbidden"),
       desc: `${inner.desc}.refine(≠forbidden)`,
+      gen: inner.gen,
+    };
+  }
+  if (which === 5) {
+    const cv = validValueFor(inner, rng);
+    return {
+      schema: inner.schema.catch(cv as never),
+      desc: `${inner.desc}.catch(${repr(cv)})`,
+      gen: inner.gen,
+    };
+  }
+  if (which === 6) {
+    return {
+      schema: inner.schema.readonly(),
+      desc: `${inner.desc}.readonly()`,
       gen: inner.gen,
     };
   }
@@ -297,6 +465,9 @@ function bArray(rng: RNG, depth: number): Built {
         const v = inner.gen(r);
         if (v !== ABSENT) out.push(v);
       }
+      // A sparse input now and then: a hole reads as undefined but stock's output owns the index
+      if (out.length > 0 && r.chance(0.08)) delete out[r.int(out.length)];
+      if (r.chance(0.04)) out.length += 1;
       return out;
     },
   };
@@ -304,9 +475,12 @@ function bArray(rng: RNG, depth: number): Built {
 
 function bRecord(rng: RNG, depth: number): Built {
   const inner = bChild(rng, depth);
+  // A key transform that collides with a later key: stock rebuilds in order, the later entry wins
+  const renames = rng.chance(0.2);
+  const keySchema = renames ? z.string().transform((k) => (k === "a" ? "b" : k)) : z.string();
   return {
-    schema: z.record(z.string(), inner.schema),
-    desc: `record(string, ${inner.desc})`,
+    schema: z.record(keySchema, inner.schema),
+    desc: `record(${renames ? "string.transform(a→b)" : "string"}, ${inner.desc})`,
     gen: (r) => {
       const out: Record<string, unknown> = {};
       const keys = ["a", "b", "c", "d"];
@@ -315,18 +489,145 @@ function bRecord(rng: RNG, depth: number): Built {
         const v = inner.gen(r);
         if (v !== ABSENT) out[keys[i]!] = v;
       }
+      // An own "__proto__" data property (what JSON.parse produces): stock's assembly drops it
+      if (r.chance(0.08)) {
+        const v = inner.gen(r);
+        Object.defineProperty(out, "__proto__", {
+          value: v === ABSENT ? undefined : v,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+      }
       return out;
     },
   };
 }
 
-function bUnion(rng: RNG, _depth: number): Built {
+function bTuple(rng: RNG, depth: number): Built {
+  const a = bChild(rng, depth);
+  const b = bChild(rng, depth);
+  return {
+    schema: z.tuple([a.schema, b.schema]),
+    desc: `tuple(${a.desc}, ${b.desc})`,
+    gen: (r) => {
+      const roll = r.next();
+      const va = a.gen(r);
+      const vb = b.gen(r);
+      const items = [va === ABSENT ? undefined : va, vb === ABSENT ? undefined : vb];
+      if (roll < 0.1) return items.slice(0, 1);
+      if (roll < 0.2) return [...items, 1];
+      if (roll < 0.25) return r.pick(["x", 1, null, {}] as const);
+      if (roll < 0.3) {
+        // A hole in one slot, or a hole in the slot stock truncates away
+        if (r.chance(0.3)) items.push(2);
+        delete items[r.int(2)];
+      }
+      return items;
+    },
+  };
+}
+
+function bMap(rng: RNG, depth: number): Built {
+  const inner = bChild(rng, depth);
+  const renames = rng.chance(0.2);
+  const keySchema = renames
+    ? z
+        .string()
+        .min(1)
+        .transform((k) => (k === "k0" ? "k1" : k))
+    : z.string().min(1);
+  return {
+    schema: z.map(keySchema, inner.schema),
+    desc: `map(string.min(1)${renames ? ".transform(k0→k1)" : ""}, ${inner.desc})`,
+    gen: (r) => {
+      if (r.chance(0.1)) return r.pick([{}, [], "x"] as const);
+      const m = new Map<unknown, unknown>();
+      const n = r.int(4);
+      for (let i = 0; i < n; i++) {
+        const v = inner.gen(r);
+        m.set(r.chance(0.1) ? "" : r.chance(0.1) ? i : `k${i}`, v === ABSENT ? undefined : v);
+      }
+      return m;
+    },
+  };
+}
+
+function bSet(rng: RNG, depth: number): Built {
+  if (rng.chance(0.15)) {
+    // A member transform that collides with another member: stock adds in order, the later wins
+    const schema = z.set(z.number().transform((n) => (n === 1 ? 2 : n)));
+    return {
+      schema,
+      desc: "set(number.transform(1→2))",
+      gen: (r) => {
+        const out = new Set<unknown>();
+        const n = r.int(5);
+        for (let i = 0; i < n; i++) out.add(r.pick(NUMBERS));
+        return out;
+      },
+    };
+  }
+  const inner = bChild(rng, depth);
+  let schema = z.set(inner.schema);
+  let desc = `set(${inner.desc})`;
+  if (rng.chance(0.3)) {
+    schema = schema.max(2);
+    desc += ".max(2)";
+  }
+  return {
+    schema,
+    desc,
+    gen: (r) => {
+      if (r.chance(0.1)) return r.pick([[], {}, 1] as const);
+      const out = new Set<unknown>();
+      const n = r.int(4);
+      for (let i = 0; i < n; i++) {
+        const v = inner.gen(r);
+        out.add(v === ABSENT ? undefined : v);
+      }
+      return out;
+    },
+  };
+}
+
+function bDiscriminated(rng: RNG, depth: number): Built {
+  const a = bChild(rng, depth);
+  const b = bChild(rng, depth);
+  const A = z.object({ kind: z.literal("a"), v: a.schema });
+  const B = z.object({ kind: z.literal("b"), w: b.schema });
+  return {
+    schema: z.discriminatedUnion("kind", [A, B]),
+    desc: `discriminatedUnion(kind, {a, v: ${a.desc}}, {b, w: ${b.desc}})`,
+    gen: (r) => {
+      const roll = r.next();
+      if (roll < 0.1) return { kind: "c" };
+      if (roll < 0.15) return r.pick([null, 1, "a"] as const);
+      const out: Record<string, unknown> = {};
+      if (roll < 0.575) {
+        out.kind = "a";
+        const v = a.gen(r);
+        if (v !== ABSENT) out.v = v;
+      } else {
+        out.kind = "b";
+        const v = b.gen(r);
+        if (v !== ABSENT) out.w = v;
+      }
+      if (r.chance(0.2)) out.extra = 1;
+      return out;
+    },
+  };
+}
+
+function bUnion(rng: RNG, depth: number): Built {
   const n = 2 + rng.int(2);
   const branches: Built[] = [];
   const kinds: string[] = [];
   const used = new Set<string>();
   while (branches.length < n) {
-    const b = bLeaf(rng);
+    // An option is a leaf or, below the top level, any generated schema (a container, a nested
+    // union, a wrapper such as readonly / catch / transform), one option per kind
+    const b = depth > 0 && rng.chance(0.4) ? bChild(rng, depth) : bLeaf(rng);
     const tag = b.desc.split(/[.(]/)[0]!;
     if (used.has(tag)) continue;
     used.add(tag);
@@ -350,11 +651,15 @@ function bChild(rng: RNG, depth: number): Built {
 function bAny(rng: RNG, depth: number): Built {
   const roll = rng.next();
   if (depth <= 0) return bLeaf(rng);
-  if (roll < 0.45) return bLeaf(rng);
-  if (roll < 0.65) return bObject(rng, depth);
-  if (roll < 0.77) return bArray(rng, depth);
-  if (roll < 0.85) return bRecord(rng, depth);
-  if (roll < 0.93) return bUnion(rng, depth);
+  if (roll < 0.4) return bLeaf(rng);
+  if (roll < 0.58) return bObject(rng, depth);
+  if (roll < 0.68) return bArray(rng, depth);
+  if (roll < 0.74) return bRecord(rng, depth);
+  if (roll < 0.8) return bUnion(rng, depth);
+  if (roll < 0.85) return bTuple(rng, depth);
+  if (roll < 0.89) return bMap(rng, depth);
+  if (roll < 0.93) return bSet(rng, depth);
+  if (roll < 0.96) return bDiscriminated(rng, depth);
   return bWrap(rng, bLeaf(rng));
 }
 
@@ -367,11 +672,35 @@ let bothOk = 0;
 let bothFail = 0;
 let refShared = 0;
 let refSharedSuccess = 0;
+let issueMismatches = 0;
 const failures: string[] = [];
+
+/**
+ * Canonical view of an issue list, in collection order: code, path and message per issue, plus
+ * every other property the issue carries (`fatal`, the check params; a union's nested errors are
+ * compared by their own issue views). Two lists compare equal only when they hold the same issues
+ * in the same order, so the order of collection is part of what the fuzzer checks.
+ */
+function issueView(issues: readonly any[]): string {
+  const one = (i: any): string => {
+    const params: Record<string, unknown> = {};
+    for (const k of Object.keys(i).sort()) {
+      if (k === "code" || k === "path" || k === "message") continue;
+      if (k === "unionErrors") {
+        params[k] = i[k].map((e: any) => issueView(e.issues));
+        continue;
+      }
+      params[k] = i[k];
+    }
+    return `${i.code}@${repr(i.path)} ${repr(i.message)} ${repr(params)}`;
+  };
+  return issues.map(one).join(" ; ");
+}
 
 for (let seed = 1; seed <= SEEDS; seed++) {
   const rng = makeRng(seed);
   for (let i = 0; i < CASES_PER_SEED; i++) {
+    caseDefaults = [];
     const built = bAny(rng, 3);
     let input = built.gen(rng);
     if (input === ABSENT) input = undefined; // the top-level wrapper may be absent
@@ -387,11 +716,14 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     }
 
     const snapshot = structuredClone(input);
+    // Stock parses its own clone: a readonly over a pass-through leaf freezes the input in place on
+    // both sides (stock behavior), so frozenness is compared between the two inputs afterwards
+    const stockInput = structuredClone(input);
 
     let stock: z.SafeParseReturnType<unknown, unknown> | null = null;
     let stockThrew: Error | null = null;
     try {
-      stock = built.schema.safeParse(input as never);
+      stock = built.schema.safeParse(stockInput as never);
     } catch (e) {
       stockThrew = e as Error;
     }
@@ -431,11 +763,45 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       continue;
     }
 
+    // Never freeze the caller's input where stock does not (readonly freezes a copy for containers, #27)
+    if (
+      input !== null &&
+      typeof input === "object" &&
+      Object.isFrozen(input) !== Object.isFrozen(stockInput as object)
+    ) {
+      failures.push(
+        `INPUT FROZENNESS MISMATCH stock=${Object.isFrozen(stockInput as object)} ours=${Object.isFrozen(input)} → ${caseId}`,
+      );
+      continue;
+    }
+
     if (stock!.success) {
       bothOk++;
-      if (!assertDeepEqual(ours!.data, stock!.data)) {
+      const so = stock!.data;
+      const oo = ours!.data;
+      if (
+        so !== null &&
+        typeof so === "object" &&
+        Object.isFrozen(so) !== Object.isFrozen(oo as object)
+      ) {
+        failures.push(
+          `FROZENNESS MISMATCH stock=${Object.isFrozen(so)} ours=${Object.isFrozen(oo as object)} → ${caseId}`,
+        );
+        continue;
+      }
+      if (!assertDeepEqual(orderedView(ours!.data), orderedView(stock!.data))) {
         failures.push(
           `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}`,
+        );
+        continue;
+      }
+      // A parsed default aliases the schema's default value exactly where stock's output does
+      // (through a pass-through leaf only; a container default is rebuilt at every level)
+      const stockAliases = aliasesDefaults(so, stockInput);
+      const oursAliases = aliasesDefaults(oo, input);
+      if (stockAliases !== oursAliases) {
+        failures.push(
+          `DEFAULT ALIASING MISMATCH stock=${stockAliases} ours=${oursAliases} → ${caseId}`,
         );
         continue;
       }
@@ -443,11 +809,19 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       if (ours!.data === input) refShared++;
     } else {
       bothFail++;
+      const sv = issueView((stock as any).error.issues);
+      const ov = issueView((ours!.error as any).issues);
+      if (sv !== ov) {
+        issueMismatches++;
+        failures.push(`ISSUE MISMATCH\n      stock: ${sv}\n      ours:  ${ov}\n      ${caseId}`);
+      }
     }
   }
 }
 
-console.log(`differential: ${total} cases | success=${bothOk} fail=${bothFail}`);
+console.log(
+  `differential (${noCodegen ? "closure skeletons, --no-codegen" : "generated skeletons"}): ${total} cases | success=${bothOk} fail=${bothFail} | issue lists compared on every failing case (${issueMismatches} mismatches)`,
+);
 if (refSharedSuccess > 0) {
   console.log(
     `CoW top-level reference sharing: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +

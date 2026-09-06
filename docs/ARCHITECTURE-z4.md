@@ -661,6 +661,12 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
    the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
+   The same walk decides the island of a subtree whose stock compile failed for a non-async reason (#75): a symbol literal,
+   coercion, `z.xor` or a `catch` callback throws `ZodCompileUnsupportedError` before stock's codegen reaches the checks, so that
+   error says nothing about async, and the fallback of `officialFn` used to take the sync island. The island then met the
+   Promise at parse time: `.async` reported false, and since #76 the async entries caught the throw and reran the parse in
+   stock's async runtime, so every callback ran twice and the CoW reference was lost. With `subtreeHasAsync` consulted the
+   subtree is an async island, the skeleton awaits it, and a tuple, array or object around it returns the clean input.
    Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
    (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
    runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
@@ -707,7 +713,8 @@ compile(schema)
   │     │     │     ├─ pure leaf → officialFn (assertOnly product)
   │     │     │     │     └─ generation failed → officialFn(parser) → island
   │     │     │     ├─ impure subtree → officialFn (parser product)
-  │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise)
+  │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise),
+  │     │     │     │     │     or makeAsyncIsland when subtreeHasAsync says the subtree holds an async check (#75)
   │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
   │     │     │     ├─ container subtree → subFn recursion (a seen set prevents circular references)
   │     │     │     │     └─ the sub-skeleton is itself async → kind:"async", the parent position emits await ★v0.5

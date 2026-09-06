@@ -1534,4 +1534,106 @@ head(
   }
 }
 
+head(
+  "a subtree stock's compileFn refuses for a non-async reason takes the async island when its checks are async (#75)",
+);
+{
+  // `officialFn` used to read `ZodCompileAsyncError` as the only async signal: a subtree whose stock compile
+  // failed with any other error (a symbol literal, a `catch` callback, coercion, `z.xor`) fell to the sync island
+  // without asking whether it holds an async check. The sync island then met the Promise at parse time; since
+  // #76 the async entries catch that throw and rerun the parse in stock's async runtime, so the answer was right
+  // but `.async` reported false, the predicate ran twice and the CoW reference was lost. The fallback now asks
+  // `subtreeHasAsync`, the same answer the `lazy` case already takes.
+  const sym = Symbol("k");
+  // [name, schema builder, clean value, a value the leaf does not accept]. A symbol literal has no failing
+  // fixture: stock's own error map stringifies the expected symbol and throws on every mismatch.
+  type Shape = [string, (log: number[]) => z.ZodType, unknown, unknown?];
+  const shapes: Shape[] = [
+    [
+      "symbol literal with an async refine",
+      (log) =>
+        z.literal(sym as never).refine(async () => {
+          log.push(1);
+          return true;
+        }),
+      sym,
+    ],
+    [
+      "a catch callback over an async refine",
+      (log) =>
+        z
+          .string()
+          .refine(async () => {
+            log.push(1);
+            return true;
+          })
+          .catch((c) => String(c.error.issues.length)),
+      "ab",
+      42,
+    ],
+  ];
+  type Pos = [string, (leaf: z.ZodType) => z.ZodType, (v: unknown) => unknown];
+  const positions: Pos[] = [
+    ["top level", (leaf) => leaf, (v) => v],
+    ["tuple slot", (leaf) => z.tuple([leaf, z.string()]), (v) => [v, "s"]],
+    ["array element", (leaf) => z.array(leaf), (v) => [v]],
+    ["object key", (leaf) => z.object({ a: leaf }), (v) => ({ a: v })],
+  ];
+  for (const [shapeName, mk, value, badValue] of shapes) {
+    for (const [posName, wrap, place] of positions) {
+      const name = `${shapeName} at ${posName}`;
+      const log: number[] = [];
+      const S = wrap(mk(log));
+      const C = compile(S);
+      assert.ok(!C.stock, `${name}: compiled`);
+      assert.ok(C.async, `${name}: judged an async product`);
+      const input = place(value);
+      const stock = await S.safeParseAsync(input);
+      assert.ok(stock.success, `${name}: stock accepts`);
+      log.length = 0;
+      const r = await C.safeParseAsync(input);
+      assert.ok(r.success, `${name}: accepted`);
+      assert.equal(log.length, 1, `${name}: the predicate ran once (no stock rerun)`);
+      if (posName !== "top level") {
+        assert.equal(r.data, input, `${name}: clean input returns the input reference`);
+      }
+      assert.throws(
+        () => C.safeParse(input),
+        $ZodAsyncError,
+        `${name}: the sync API throws like stock`,
+      );
+      assert.throws(() => S.safeParse(input as never), $ZodAsyncError);
+      if (badValue === undefined) continue;
+      // a rejected leaf answers like stock: here the catch callback turns the failure into its value
+      const bad = place(badValue);
+      const rBad = await C.safeParseAsync(bad);
+      const stockBad = await S.safeParseAsync(bad);
+      assert.equal(
+        rBad.success,
+        stockBad.success,
+        `${name}: same verdict as stock on a rejected leaf`,
+      );
+      if (rBad.success && stockBad.success) assert.deepEqual(rBad.data, stockBad.data);
+      else if (!rBad.success && !stockBad.success)
+        assert.deepEqual(rBad.error.issues, stockBad.error.issues);
+    }
+  }
+  ok("the four positions of both shapes answer once, share the reference and report async");
+
+  // The issue's own shape: a loose record with a symbol-literal key and an async refine. The record skeleton
+  // has covered a declared symbol key since then, so the refine runs in the checks subroutine of #76 and no
+  // island is involved; pinned so a change to that skeleton's gate cannot reopen the symptom.
+  const rec = z.looseRecord(z.literal(sym as never), z.string()).refine(async () => true);
+  const T = z.tuple([rec, z.string()]);
+  const TC = compile(T);
+  assert.ok(TC.async && !TC.stock);
+  const tIn = [{ [sym]: "ab" }, "s"];
+  const tR = await TC.safeParseAsync(tIn);
+  assert.ok(tR.success && tR.data === tIn);
+  assert.ok(compile(rec).async);
+  ok(
+    "the issue's loose record with a symbol-literal key and an async refine stays on the CoW path",
+  );
+}
+
 console.log("\nAll tuple + async smoke assertions passed ✓");

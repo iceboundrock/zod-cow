@@ -570,6 +570,11 @@ return out;
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
    Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、
    pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
+   同一次遍历也决定 stock 编译因非 async 原因失败的子树走哪种岛（#75）：symbol 字面量、coerce、`z.xor` 或带回调的 `catch`
+   在 stock codegen 走到 checks 之前就抛 `ZodCompileUnsupportedError`，这个错误说明不了 async 与否，而 `officialFn` 的兜底以前
+   一律取同步岛。这个岛在 parse 时才遇到 Promise：`.async` 报 false，且自 #76 起 async 入口接住那次抛出后把整次 parse 交给
+   stock 的 async runtime 重跑，于是每个回调跑两遍、CoW 引用也丢了。改为先问 `subtreeHasAsync` 之后，该子树是 async 岛，
+   骨架对它 await，外面的 tuple / array / object 对干净输入照样返回原引用。
    自 #76 第六轮 review 起，裸 `lazy` 不论子树是否 async 都走本层的岛（`officialFn`：`makeAsyncIsland` 或 `makeIsland`）：
    stock 自己对它的产物也是 runtime island（`generateLazyCheck` 在空 context 下运行 getter 的 `_zod.run`，并直接读返回值的
    `.issues`，所以普通函数返回的 thenable 在那里以 `TypeError` 告终），因此不损失任何编译快路径，而这次运行由本层接管。
@@ -611,7 +616,8 @@ compile(schema)
   │     │     │     ├─ 纯净叶子 → officialFn（assertOnly 产物）
   │     │     │     │     └─ 生成失败 → officialFn(parser) → island
   │     │     │     ├─ 非纯子树 → officialFn(parser 产物)
-  │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError）
+  │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError），
+  │     │     │     │     │     子树含 async check（subtreeHasAsync 判定）时改取 makeAsyncIsland（#75）
   │     │     │     │     └─ ZodCompileAsyncError → makeAsyncIsland（await 通道）★v0.5
   │     │     │     ├─ 容器子树 → subFn 递归（seen 防循环引用）
   │     │     │     │     └─ 子骨架自身 async → kind:"async"，父位发射 await ★v0.5

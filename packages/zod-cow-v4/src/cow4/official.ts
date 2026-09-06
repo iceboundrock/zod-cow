@@ -72,9 +72,11 @@ export function makeAsyncIsland(schema: Node): Fn {
 }
 
 /**
- * Static async detection for lazy(async·…): the official generateLazyCheck is a runtime island,
- * compileFn does not throw ZodCompileAsyncError for it, and the async leaks out silently as a Promise --
- * it has to be spotted at compile time and routed to an async island. For async in every other type the official compileFn throws on its own, so this function is not needed.
+ * Static async detection for the subtrees that become this layer's islands, where the official
+ * `ZodCompileAsyncError` never arrives: a `lazy` (the official generateLazyCheck is a runtime island, so the
+ * async of its subtree raises no compile-time error and would leak out silently as a Promise), and a subtree
+ * whose stock compile fails for a non-async reason before its checks are reached (a symbol literal, coercion,
+ * `z.xor`, a `catch` callback, #75). For every other subtree the official compileFn throws on its own.
  */
 function subtreeHasAsync(schema: Node, seen: Set<Node> = new Set()): boolean {
   if (seen.has(schema)) return false; // recursive subtree (lazy self-reference) -- asyncness is decided by the first expansion
@@ -140,7 +142,11 @@ export function officialFn(schema: Node, pure: boolean): Fn {
     return compileFn(schema) as Fn;
   } catch (e) {
     if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema);
-    return makeIsland(schema);
+    // Any other failure (a symbol literal, coercion, `z.xor`, a `catch` callback) was thrown before stock's
+    // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
+    // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
+    // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
+    return subtreeHasAsync(schema) ? makeAsyncIsland(schema) : makeIsland(schema);
   }
 }
 

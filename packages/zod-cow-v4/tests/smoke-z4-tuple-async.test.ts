@@ -1155,12 +1155,132 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     assert.ok(Object.hasOwn(cow, 1) && cow.length === 2, "the skeleton materializes it too");
     ok("a rest hole over an inherited undefined is materialized, like stock");
   }
-  // Code pin: a rest tuple's sync skeleton copies the rest by hand once (#87: `slice` pays a fixed builtin cost);
-  // a fixed tuple allocates nothing on its clean path
+  // An input whose `slice` is not the native one (review of #88): stock's runtime calls `input.slice(items.length)`
+  // and assembles its output from what came back, so the hand copy runs only when `input.slice` is the native
+  // function; otherwise the skeleton makes the same call and forces the copy, since a validator-shaped rest
+  // compares nothing against the live input and the clean path would return the input (as #86's slice did)
+  {
+    const overridden = () => {
+      const a: unknown[] = ["h", "a", "b"];
+      (a as { slice: unknown }).slice = () => ["CUSTOM"];
+      return a;
+    };
+    const emptied = () => {
+      const a: unknown[] = ["h", "a", "b"];
+      (a as { slice: unknown }).slice = () => [];
+      return a;
+    };
+    class Sliced extends Array<unknown> {
+      override slice(): unknown[] {
+        return ["SUB"];
+      }
+    }
+    const subclassed = () => {
+      const a = new Sliced();
+      a.push("h", "a");
+      return a;
+    };
+    const cases: [string, z.ZodType, () => unknown[]][] = [
+      ["an own slice under a validator rest", z.tuple([z.string()], z.string()), overridden],
+      [
+        "an own slice under a transform rest",
+        z.tuple(
+          [z.string()],
+          z.string().transform((v) => `${v}!`),
+        ),
+        overridden,
+      ],
+      ["an own slice that returns nothing", z.tuple([z.string()], z.string()), emptied],
+      ["a subclass override", z.tuple([z.string()], z.string()), subclassed],
+      // A short input under an optional tail: stock runs the slice's elements and its truncation drops them
+      [
+        "an own slice on a short input under an optional tail",
+        z.tuple([z.string(), z.string().optional()], z.string()),
+        () => {
+          const a: unknown[] = ["h"];
+          (a as { slice: unknown }).slice = () => ["R"];
+          return a;
+        },
+      ],
+    ];
+    for (const [label, S, make] of cases) {
+      const C = compile(S);
+      assert.ok(!C.async && !C.stock && !/_zod/.test(C.code ?? ""), `${label}: sync skeleton`);
+      const stock = S.parse(make()) as unknown[];
+      const input = make();
+      const cow = C.parse(input) as unknown[];
+      assert.deepEqual(cow, stock, label);
+      assert.equal(cow.length, stock.length, `${label}: length`);
+      assert.notEqual(
+        cow,
+        input,
+        `${label}: the output is assembled from the slice, not the input`,
+      );
+      assert.ok(
+        Array.isArray(cow) && Object.getPrototypeOf(cow) === Array.prototype,
+        `${label}: a plain array`,
+      );
+    }
+    // The dropped elements are still validated, like stock's
+    {
+      const S = z.tuple([z.string(), z.string().optional()], z.string());
+      const bad: unknown[] = ["h"];
+      (bad as { slice: unknown }).slice = () => [1];
+      assert.equal(S.safeParse(bad).success, false, "stock validates the dropped elements");
+      assert.equal(compile(S).safeParse(bad).success, false, "the skeleton validates them too");
+    }
+    ok("an input whose slice is not the native one is sliced by that slice, like stock");
+  }
+  // The hand copy reads `length` once, like `slice` (review of #88): a Proxy whose `length` grows on the read after
+  // the fixed slot ran shows the copy's read count in the output. Stock's slice reads it once, so the second value
+  // is seen only by `handleTupleResults`, which decides presence with it; a copy that read it twice would size
+  // itself from the second value and hand an extra `undefined` to the rest
+  {
+    let phase = 0;
+    const S = z.tuple(
+      [
+        z.string().transform((v) => {
+          phase = 1;
+          return v;
+        }),
+      ],
+      z
+        .string()
+        .optional()
+        .transform((v) => (v === undefined ? "U" : `${v}!`)),
+    );
+    const C = compile(S);
+    assert.ok(!C.async && !C.stock && !/_zod/.test(C.code ?? ""));
+    const make = () =>
+      new Proxy(["h", "a", "b"], {
+        get(target, key, receiver) {
+          if (key === "length") {
+            if (phase === 1) {
+              phase = 2;
+              return 3;
+            }
+            if (phase === 2) return 4;
+          }
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    phase = 0;
+    const stock = S.parse(make()) as unknown[];
+    assert.deepEqual(stock, ["h", "a!", "b!"], "stock sizes the rest from its one length read");
+    phase = 0;
+    const cow = C.parse(make()) as unknown[];
+    assert.deepEqual(cow, stock, "the hand copy sizes the rest from its one length read");
+    ok("the hand copy reads the length once, like slice");
+  }
+  // Code pin: a rest tuple's sync skeleton copies the rest by hand once (#87: `slice` pays a fixed builtin cost)
+  // behind a guard on the native `slice`, whose other side is the one `.slice(` call; a fixed tuple allocates
+  // nothing on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
-    /new Array\(/.test(restCode) && !/\.slice\(/.test(restCode),
-    "the sync rest layout copies by hand",
+    /new Array\(/.test(restCode) &&
+      /\.slice === c\d+\)/.test(restCode) &&
+      restCode.match(/\.slice\(/g)?.length === 1,
+    "the sync rest layout copies by hand behind the native-slice guard",
   );
   const fixedCode = compile(z.tuple([z.string(), z.number().optional()])).code ?? "";
   assert.ok(!/new Array\(|\.slice\(/.test(fixedCode), "a tuple without a rest takes no copy");

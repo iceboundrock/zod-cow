@@ -660,7 +660,12 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    rest element (a tuple without one still allocates nothing). The sync layout builds it by hand (#87): `new Array(n)`
    with the length read once, an empty copy when the input is shorter than the fixed slots, and a slot written only
    when its value is defined or the index is own, so a hole stays a hole and the hole test stays `Object.hasOwn` on
-   the copy. `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
+   the copy. The copy runs only when the input's `slice` is the native one (one property read and compare): stock's
+   runtime calls `input.slice(items.length)`, so an input carrying another `slice` (an own `slice`, a subclass
+   override, a replaced `Array.prototype.slice`) takes that call, the copy is forced so the output is assembled
+   from what it returned, and the elements a truncated prefix drops in stock's `handleTupleResults` are validated
+   and dropped too (review of #88; the slice of #86 returned the input by reference there under a validator-shaped
+   rest, which compares nothing against the live input). `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
    the copy), the inlined loop about a third of that at a short rest; measured on #87, a clean parse of `[string,
    ...string[]]` with one rest element went from 75 ns under `slice` to 58 ns, with sixteen it is unchanged, against
    a stock parse of 160 to 250 ns. A rest hole over an inherited `undefined` comes out as an own slot like stock's,

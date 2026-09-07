@@ -8,6 +8,9 @@ import { childProduct, emitContainerChecks } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import type { Node } from "./product.js";
 
+/** The `slice` the sync layout replaces by hand (#87): an input whose `slice` is another function takes the real call */
+const NATIVE_SLICE = Array.prototype.slice;
+
 /* ── tuple skeleton: mirrors the official generateTupleCheck + fillLen truncation tracking + CoW decoration ── */
 
 /**
@@ -39,7 +42,10 @@ import type { Node } from "./product.js";
  * (its species lookup and generic entry, not the copy), where an inlined `new Array(n)` plus a copy loop costs
  * a third at a short rest. The loop reads the length once before any rest element runs, gives an empty copy
  * when the input is shorter than the fixed slots, and writes a slot only when its value is defined or the
- * index is own, so a hole stays a hole as under `slice` and the hole test below needs no change.
+ * index is own, so a hole stays a hole as under `slice` and the hole test below needs no change. It runs only
+ * when the input's `slice` is the native one (one property read and compare); an input carrying another
+ * `slice` takes the call stock's runtime makes and the copy is forced, so the output is assembled from what
+ * that `slice` returned like stock's (review of #88).
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -326,15 +332,38 @@ export function emitCoWTuple(
      (after every fixed slot ran, before any rest element runs, #78) and before the await in the async one (#77) */
   if (rest && restProduct) {
     if (!anyAsync) {
-      // Stock's `input.slice(N)` by hand (#87): the length read once, a short input an empty copy, a hole kept
-      ctx.write(
-        `const ${restReads} = new Array(${accessor}.length > ${N} ? ${accessor}.length - ${N} : 0);`,
-      );
-      ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
+      // Stock's `input.slice(N)` by hand (#87) when the input's `slice` is the native one: the length read once
+      // (one local, so an accepted Proxy sees one `length` read here like under `slice`), a short input an empty
+      // copy, a hole kept. An input whose `slice` is not the native one (an own `slice`, a subclass override, a
+      // replaced `Array.prototype.slice`) takes the call stock's runtime makes and the output is assembled from
+      // what it returned: the copy is forced from the fixed prefix, since the clean path could otherwise return
+      // the input where stock's output holds the slice's elements (review of #88)
+      const len = ctx.var();
+      ctx.write(`let ${restReads};`);
+      ctx.write(`if (${accessor}.slice === ${ctx.addConst(NATIVE_SLICE)}) {`);
       ctx.indented(() => {
-        ctx.write(`const v = ${accessor}[${N} + j];`);
+        ctx.write(`const ${len} = ${accessor}.length;`);
+        ctx.write(`${restReads} = new Array(${len} > ${N} ? ${len} - ${N} : 0);`);
+        ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
+        ctx.indented(() => {
+          ctx.write(`const v = ${accessor}[${N} + j];`);
+          ctx.write(
+            `if (v !== undefined || Object.hasOwn(${accessor}, ${N} + j)) ${restReads}[j] = v;`,
+          );
+        });
+        ctx.write(`}`);
+      });
+      ctx.write(`} else {`);
+      ctx.indented(() => {
+        ctx.write(`${restReads} = ${accessor}.slice(${N});`);
+        // A truncated prefix (an absent optional slot) drops the rest in stock's `handleTupleResults` after every
+        // rest element ran, so its elements are validated here and none reaches the loop below
         ctx.write(
-          `if (v !== undefined || Object.hasOwn(${accessor}, ${N} + j)) ${restReads}[j] = v;`,
+          `if (${fillLen} < ${N}) { for (let j = 0; j < ${restReads}.length; j++) if ((${restFn}(${restReads}[j])) === INVALID) return INVALID; ${restReads} = []; }`,
+        );
+        // out === input ⟹ fillLen === input.length (the invariant above), so [0, fillLen) is the whole fixed prefix
+        ctx.write(
+          `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${fillLen}; j++) ${out}[j] = ${accessor}[j]; }`,
         );
       });
       ctx.write(`}`);

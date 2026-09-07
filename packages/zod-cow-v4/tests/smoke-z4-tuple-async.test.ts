@@ -1697,14 +1697,17 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     // (none; both pass the skeleton's length guard, `NaN < 1` being false, as they pass stock's), -1 and null → 0
     // (the guard hands them to stock). A rest element the transform rewrites copies (the output equals stock's); no
     // rest element, or a validator rest, keeps the clean path and returns the input, on `main` alike (a Proxy
-    // under-reporting its length is the clean path's known limitation: stock's fresh output is the truncated one)
+    // under-reporting its length is the clean path's known limitation: stock's fresh output is the truncated one).
+    // A length that converts to NaN (NaN, "x") is never `===` itself, so the presence decision after the rest (fourth
+    // review of #88) reads it as moved and re-runs stock's algorithm over the held results: stock's fresh output
+    // there, where the other under-reported lengths keep the clean path
     for (const [len, asInt, transform, validator] of [
       [2.9, 2, "stock", "input"],
       ["2", 2, "stock", "input"],
       [true, 1, "input", "input"],
       [1.5, 1, "input", "input"],
-      [Number.NaN, 0, "input", "input"],
-      ["x", 0, "input", "input"],
+      [Number.NaN, 0, "stock", "stock"],
+      ["x", 0, "stock", "stock"],
       [-1, 0, "stock", "stock"],
       [null, 0, "stock", "stock"],
     ] as [unknown, number, "stock" | "input", "stock" | "input"][]) {
@@ -1760,10 +1763,11 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       const cow = compile(T).parse(counted(() => cowCalls++));
       assert.deepEqual(cow, stock);
       assert.deepEqual(stock, ["h", "a!"]);
-      // The skeleton converts it twice in all: its length guard's comparison (stock's compiled check) and the copy's
-      // one conversion, as `main`'s slice converted it once; the head's copy converted it twice. Stock's runtime
-      // converts it three times (its slice, then the two presence loops of `handleTupleResults`)
-      assert.equal(cowCalls, 2, "the copy converts an object length once, like slice");
+      // The skeleton converts it three times in all: its length guard's comparison (stock's compiled check), the
+      // copy's one conversion (as slice converts it once) and the presence decision after the rest, which compares
+      // the live length as a number with the copy's. Stock's runtime converts it three times too (its slice, then
+      // the two presence loops of `handleTupleResults`)
+      assert.equal(cowCalls, 3, "the copy converts an object length once, like slice");
       assert.ok(stockCalls >= cowCalls);
     }
     ok("the length read is coerced with ToLength, like slice");
@@ -1875,14 +1879,13 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     }
     ok("a slice getter that writes a fixed slot is not in the output, like stock");
   }
-  // Stock's `handleTupleResults` decides each fixed slot's presence from the live length after the slice ran, so a
-  // custom slice that changes the length past a fixed slot changes stock's assembly: a shrink truncates at the first
-  // optional slot the new length excludes, a growth keeps what an absent slot's run on `undefined` gave. The fixed
-  // slots decided presence before the call and a `drop` slot never ran, so the fallback compares the length after
-  // the call with the one before it and hands a parse whose fixed-slot presence changed to stock, whose run sees the
-  // input as the call left it; a change that leaves every fixed slot's presence as it was (a growth past the fixed
-  // slots) is assembled here (fourth review of #88). The head kept its earlier decisions: the review's case answered
-  // `["h", "x"]` where stock truncates to `["h"]`
+  // Stock's `handleTupleResults` decides each fixed slot's presence from the live length after the rest ran, so a
+  // custom slice that moves the length over a fixed slot changes stock's assembly: a shrink truncates at the first
+  // optional slot the new length excludes, a growth materializes what an absent slot's run on `undefined` gave. The
+  // sync rest layout holds every slot's result and runs that decision after the rest itself, from the held results
+  // (fourth review of #88; the timeline group below covers every other source of such a move). The head before it
+  // kept the decisions the slots made as they ran, answering `["h", "x"]` where stock truncates to `["h"]`, and a
+  // later head handed such a parse to stock, whose run repeated the slice on the input it had left
   {
     const S = z.tuple([z.string(), z.string().optional()], z.string());
     const C = compile(S);
@@ -1902,16 +1905,15 @@ head("the sync tuple layout slices the rest before running any rest element, lik
         return [];
       };
       const stock = S.parse(make(["h", "x", "r"], shrink));
-      assert.deepEqual(stock, ["h"], "stock re-decides presence after the slice");
+      assert.deepEqual(stock, ["h"], "stock decides presence after the slice");
       sliceCalls = 0;
-      assert.deepEqual(
-        C.parse(make(["h", "x", "r"], shrink)),
-        stock,
-        "handed to stock, which truncates",
-      );
-      assert.equal(sliceCalls, 2, "the fallback ran the slice once and stock's run once more");
+      const input = make(["h", "x", "r"], shrink);
+      const cow = C.parse(input);
+      assert.deepEqual(cow, stock, "truncated from the held results, like stock");
+      assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
+      assert.ok(cow !== input, "a fresh array");
     }
-    // Grown past the optional slot: stock keeps the `undefined` its run on the absent slot gave
+    // Grown past the optional slot: stock materializes the `undefined` its run on the absent slot gave
     {
       const grow = (a: unknown[]) => {
         a.length = 4;
@@ -1924,11 +1926,13 @@ head("the sync tuple layout slices the rest before running any rest element, lik
         "stock materializes the absent slot the growth made present",
       );
       sliceCalls = 0;
-      const cow = C.parse(make(["h"], grow));
-      assert.deepEqual(cow, stock, "handed to stock, which materializes it");
-      assert.equal(sliceCalls, 2, "the fallback ran the slice once and stock's run once more");
+      const input = make(["h"], grow);
+      const cow = C.parse(input);
+      assert.deepEqual(cow, stock, "materialized from the held result, like stock");
+      assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
+      assert.ok(cow !== input, "a fresh array");
     }
-    // Grown past the rest only: every fixed slot's presence stands, so the fallback assembles the output itself
+    // Grown past the rest only: every fixed slot's presence stands, the rest results follow them
     {
       const append = (a: unknown[]) => {
         a.push("z");
@@ -1943,41 +1947,967 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       sliceCalls = 0;
       const input = make(["h", "r"], append);
       const cow = compile(T).parse(input);
-      assert.deepEqual(cow, stock, "the fixed slots' presence is unchanged: assembled here");
+      assert.deepEqual(cow, stock, "assembled from the held results");
       assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
       assert.ok(cow !== input);
     }
-    ok("a custom slice that changes a fixed slot's presence is handed to stock");
+    ok(
+      "a custom slice that moves the length over a fixed slot: stock's presence decision, from the held results",
+    );
   }
-  // Code pin: a rest tuple's sync skeleton reads `slice` once and copies the rest by hand (#87: `slice` pays a fixed
-  // builtin cost) behind a guard on the native `slice`, on `constructor === Array` and on the default species, with
-  // the length read and converted once, floored (`ToLength`), between the `slice` test and the constructor read, in
-  // slice's order; the copy loop is `in` then a store and nothing else, and the own-ness probe sits in the rest
-  // loop's hole test; the guard's other side builds the prefix from the fixed slots' results, calls what was read
-  // (through the hoisted `Reflect.apply`, never a second `.slice`), iterates the result with `for...of` and compares
-  // the length after the call with the one before it. A fixed tuple allocates nothing on its clean path
+  // Code pin: a rest tuple's sync skeleton holds the guard's length read, reads `slice` once and, on the native one,
+  // makes slice's reads in slice's order (the length once, converted; the constructor; the species off `Array`),
+  // copies by hand (#87: `slice` pays a fixed builtin cost) with `in` then a store per index and nothing else, and
+  // runs the inline rest loop only while the array iterator and its `next` are the captured ones; every other case is
+  // a continuation over an iterable named `rest` (the copy, the native builtin finished on the facade with the reads
+  // already made, or what the custom `slice` answered, called through the hoisted `Reflect.apply`, never a second
+  // `.slice`), and the live length read after the rest is compared with every read before it. A fixed tuple reads
+  // no `slice` and allocates nothing on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
-    /const (x\d+) = input\.slice;\s*let (x\d+);\s*if \(\1 === c\d+ && \(\2 = \+input\.length, input\.constructor === Array && Array\[Symbol\.species\] === Array\)\)/.test(
-      restCode,
-    ) &&
-      /const (x\d+) = new Array\((x\d+) > 1 \? Math\.floor\(\2\) - 1 : 0\);\s*for \(let j = 0; j < \1\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \1\[j\] = input\[1 \+ j\];\s*\}/.test(
+    /const (x\d+) = input\.length;\s*if \(\1 < 1\) return INVALID;/.test(restCode) &&
+      /const (x\d+) = input\.slice;\s*let [x\d, ]+ = null, x\d+ = false;\s*if \(\1 === c\d+\) \{\s*(x\d+) = \+input\.length;\s*(x\d+) = input\.constructor;\s*if \(\3 === Array && \((x\d+) = Array\[Symbol\.species\]\) === Array\) \{/.test(
+        restCode,
+      ) &&
+      /= new Array\((x\d+) > 1 \? Math\.floor\(\1\) - 1 : 0\);\s*for \(let j = 0; j < (x\d+)\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \2\[j\] = input\[1 \+ j\];\s*\}\s*if \(Array\.prototype\[Symbol\.iterator\] === c\d+ && c\d+\.next === c\d+\) \{/.test(
         restCode,
       ) &&
       /!Object\.hasOwn\(x\d+, i - 1\) \|\| !Object\.hasOwn\(input, i\)/.test(restCode) &&
-      /if \(x\d+ === input\) \{ x\d+ = \[x\d+\]; x\d+\.length = x\d+; \}\s*const (x\d+) = input\.length;/.test(
+      /= c\d+\(input, x\d+, x\d+ === Array \? \{ \[Symbol\.species\]: x\d+ \} : x\d+, 1\);/.test(
         restCode,
       ) &&
-      /for \(const \w+ of c\d+\(x\d+, input, \[1\]\)\)/.test(restCode) &&
-      /const (x\d+) = input\.length;\s*if \(\(x\d+ < 1 \? x\d+ : 1\) !== \(\1 < 1 \? \1 : 1\)\) return INVALID;/.test(
+      /= c\d+\(x\d+, input, \[1\]\);/.test(restCode) &&
+      /const rest = x\d+;\s*for \(const e of rest\) \{/.test(restCode) &&
+      /const (x\d+) = input\.length;\s*if \(x\d+ !== null \|\| !\(\1 === x\d+ && \+\1 === x\d+\)\) \{/.test(
         restCode,
       ) &&
       !/\.slice\(/.test(restCode),
-    "the sync rest layout copies by hand behind the three-part guard",
+    "the sync rest layout: slice's reads, the hand copy, the continuations and the presence decision after the rest",
   );
   const fixedCode = compile(z.tuple([z.string(), z.number().optional()])).code ?? "";
-  assert.ok(!/new Array\(|\.slice\(/.test(fixedCode), "a tuple without a rest takes no copy");
+  assert.ok(
+    !/new Array\(|\.slice\(|input\.slice/.test(fixedCode),
+    "a tuple without a rest takes no copy and reads no slice",
+  );
   ok("the rest copy is emitted for a rest tuple only");
+}
+
+head(
+  "the sync rest layout follows stock's runtime timeline: results held, one slice, presence decided after the rest (fourth review of #88, #96)",
+);
+{
+  // Stock's `$ZodTuple` runtime, in order: it runs every fixed item and keeps each result (`itemResults`); reads
+  // `input.slice` once and calls it once (the native slice reads the length, then the constructor, then the species
+  // off it, then asks `HasProperty` and `Get` per index and builds its result through the species); iterates what
+  // came back with `for...of`, running the rest element per yield; and only then decides each fixed slot's presence
+  // from the live `input.length` (`handleTupleResults`), assembling from the results it holds. Every hook an accepted
+  // input or a global offers between two of those steps (a fixed slot's callback, a `slice` getter, a custom `slice`,
+  // a species getter or constructor, an iterator, a rest callback, a Proxy trap) can move the length or rewrite a
+  // slot; the skeleton meets each at the same point and holds the same state, so the value, the throw and the hook
+  // calls are stock's. The matrix below runs one mutation per source and target on a fresh input for both sides.
+  // (No helper here calls an array method that constructs through the species: a getter on it is under test.)
+  const snap = (v: unknown): unknown => {
+    if (!Array.isArray(v)) return v;
+    const keys = Object.keys(v);
+    const values: unknown[] = [];
+    for (const k of keys) values.push(snap(v[Number(k)]));
+    return { length: v.length, keys, values };
+  };
+  type Err = { name: string; message: string };
+  type Run = { value?: unknown; error?: Err; safeError?: Err; log: string[]; ref: boolean };
+  const errOf = (e: unknown): Err => ({
+    name: (e as Error).constructor.name,
+    message: (e as Error).message,
+  });
+  const run = (
+    parse: (v: unknown) => unknown,
+    safe: (v: unknown) => unknown,
+    make: (log: string[]) => unknown,
+  ): Run => {
+    const log: string[] = [];
+    const input = make(log);
+    try {
+      const value = parse(input);
+      return { value: snap(value), log: [...log], ref: value === input };
+    } catch (e) {
+      const r: Run = { error: errOf(e), log: [...log], ref: false };
+      try {
+        safe(make([]));
+        r.safeError = { name: "none", message: "" };
+      } catch (e2) {
+        r.safeError = errOf(e2);
+      }
+      return r;
+    }
+  };
+  type Case = {
+    label: string;
+    S: z.ZodType;
+    /** A fresh input; the hooks it carries log into `log` */
+    make: (log: string[]) => unknown;
+    /** Stock's literal value, pinned so both sides cannot agree on a wrong one */
+    expect?: unknown;
+    /** The class stock throws, from `parse` and `safeParse` alike */
+    throws?: string;
+    /** A global swapped for the two parses (the products are compiled before it), undone by the returned function */
+    setup?: (log: string[]) => () => void;
+    /** Whether the skeleton's output is the input by reference (stock's is always a fresh array) */
+    ref?: boolean;
+    /** A failing parse: the skeleton hands it to stock, whose run repeats every hook (the failure model), so the
+     *  hook calls are not compared */
+    rerun?: boolean;
+  };
+  const check = ({ label, S, make, expect, throws, setup, ref, rerun }: Case): void => {
+    const C = compile(S);
+    assert.ok(!C.stock, `${label}: on the CoW path`);
+    const undo = setup?.([]);
+    let stock: Run;
+    let cow: Run;
+    try {
+      stock = run(
+        (v) => S.parse(v),
+        (v) => S.safeParse(v),
+        make,
+      );
+      cow = run(
+        (v) => C.parse(v),
+        (v) => C.safeParse(v),
+        make,
+      );
+    } finally {
+      undo?.();
+    }
+    assert.deepEqual(cow.value, stock.value, `${label}: value`);
+    assert.deepEqual(cow.error, stock.error, `${label}: error`);
+    assert.deepEqual(cow.safeError, stock.safeError, `${label}: safeParse error`);
+    if (!rerun) assert.deepEqual(cow.log, stock.log, `${label}: hook calls, in order`);
+    if (expect !== undefined)
+      assert.deepEqual(stock.value, snap(expect), `${label}: stock's value`);
+    if (throws !== undefined) {
+      assert.equal(stock.error?.name, throws, `${label}: stock throws ${throws}`);
+      assert.equal(stock.safeError?.name, throws, `${label}: stock's safeParse throws too`);
+    }
+    if (ref !== undefined)
+      assert.equal(cow.ref, ref, `${label}: ${ref ? "the input by reference" : "a fresh array"}`);
+    ok(label);
+  };
+  const HOLE = Symbol("hole");
+  /** An array literal with `HOLE` marking a hole */
+  const arr = (...xs: unknown[]): unknown[] => {
+    const a: unknown[] = new Array(xs.length);
+    xs.forEach((x, i) => {
+      if (x !== HOLE) a[i] = x;
+    });
+    return a;
+  };
+  /** The input under parse, for a hook that lives in the schema or on a global */
+  const holder: { input: unknown[] | null } = { input: null };
+  /** A fresh copy of `values` (a spread, never `slice`), registered in `holder` */
+  const held = (values: unknown[]) => (): unknown[] => {
+    const a = [...values];
+    holder.input = a;
+    return a;
+  };
+  const opt = z.string().optional();
+  const restT = z.string().transform((v) => `${v}!`);
+  const restO = z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? "U" : `${v}!`));
+  /** `[string, string?, ...rest]`: the shape whose optional slot stock may truncate or materialize after the rest ran */
+  const SO = (rest: z.ZodType) => z.tuple([z.string(), opt], rest);
+  /** `[string, ...rest]` */
+  const S1 = (rest: z.ZodType) => z.tuple([z.string()], rest);
+  /** A transform on a fixed slot whose callback runs `effect` on the input under parse */
+  const slotCb = (effect: (a: unknown[]) => void) =>
+    z.string().transform((v) => {
+      effect(holder.input!);
+      return `${v}!`;
+    });
+  /** An own `slice` on a fresh input, its call logged */
+  const withSlice =
+    (values: unknown[], slice: (this: unknown[], log: string[]) => unknown) => (log: string[]) => {
+      const a = [...values];
+      Object.defineProperty(a, "slice", {
+        configurable: true,
+        value: function (this: unknown[]) {
+          log.push("slice");
+          return slice.call(this, log);
+        },
+      });
+      return a;
+    };
+  /** A `slice` getter on a fresh input, its read logged */
+  const withSliceGetter =
+    (values: unknown[], get: (a: unknown[], log: string[]) => unknown) => (log: string[]) => {
+      const a = [...values];
+      Object.defineProperty(a, "slice", {
+        configurable: true,
+        get() {
+          log.push("get:slice");
+          return get(a, log);
+        },
+      });
+      return a;
+    };
+  /** A getter on `Array[Symbol.species]` for the two parses, its call logged; `effect` sees the input under parse */
+  const species =
+    (effect: (a: unknown[]) => void, answer: () => unknown = () => Array) =>
+    () => {
+      const desc = Object.getOwnPropertyDescriptor(Array, Symbol.species)!;
+      Object.defineProperty(Array, Symbol.species, {
+        configurable: true,
+        get() {
+          if (holder.input) effect(holder.input);
+          return answer();
+        },
+      });
+      return () => {
+        Object.defineProperty(Array, Symbol.species, desc);
+        holder.input = null;
+      };
+    };
+  const plainSlice = Array.prototype.slice;
+
+  // 1. A fixed slot's callback (a premise violation the layout still meets at stock's point): stock runs the later
+  // slots on what the callback left and decides presence at the end; the skeleton reads each later slot live,
+  // holds every result and decides presence after the rest from the live length, so a shrink truncates and a
+  // growth materializes like stock
+  {
+    const cases: [string, z.ZodType, unknown[], unknown][] = [
+      [
+        "writes the optional slot",
+        z.tuple([slotCb((a) => (a[1] = "M")), opt], z.string()),
+        ["h", "x", "r"],
+        ["h!", "M", "r"],
+      ],
+      [
+        "writes a rest slot",
+        z.tuple([slotCb((a) => (a[2] = "M")), opt], z.string()),
+        ["h", "x", "r"],
+        ["h!", "x", "M"],
+      ],
+      [
+        "shrinks the length below the optional slot",
+        z.tuple([slotCb((a) => (a.length = 1)), opt], z.string()),
+        ["h", "x", "r"],
+        ["h!"],
+      ],
+      [
+        "grows the length past the optional slot",
+        z.tuple([slotCb((a) => (a.length = 3)), opt], opt),
+        ["h"],
+        ["h!", undefined, undefined],
+      ],
+      [
+        "shrinks the length below the rest",
+        z.tuple([slotCb((a) => (a.length = 2)), opt], restT),
+        ["h", "x", "r", "s"],
+        ["h!", "x"],
+      ],
+      // The slot after the callback's rewrites an earlier slot: stock holds the earlier result; the copy path assembles
+      // the prefix from the held results, never from the input a second time
+      [
+        "rewrites the slot before it",
+        z.tuple([z.string(), slotCb((a) => (a[0] = "M"))], z.string()),
+        ["h", "x", "r"],
+        ["h", "x!", "r"],
+      ],
+    ];
+    for (const [label, S, values, expect] of cases)
+      check({ label: `a fixed slot's callback ${label}`, S, make: held(values), expect });
+  }
+
+  // 2. A `slice` getter: runs after every fixed result is held and before the call, on both sides
+  check({
+    label:
+      "a slice getter rewrites the fixed slot and answers a custom function (fourth review of #88, P1-B)",
+    S: S1(z.string()),
+    make: withSliceGetter(["h", "a"], (a) => {
+      a[0] = "M";
+      return () => [];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a slice getter rewrites the fixed slot and answers a custom function that yields",
+    S: S1(z.string()),
+    make: withSliceGetter(["h", "a"], (a) => {
+      a[0] = "M";
+      return () => ["a"];
+    }),
+    expect: ["h", "a"],
+  });
+  check({
+    label: "a slice getter rewrites the optional slot: the held result is assembled",
+    S: SO(z.string()),
+    make: withSliceGetter(["h", "x", "r"], (a) => {
+      a[1] = "M";
+      return () => ["r"];
+    }),
+    expect: ["h", "x", "r"],
+  });
+  check({
+    label: "a slice getter shrinks the length below the optional slot",
+    S: SO(z.string()),
+    make: withSliceGetter(["h", "x", "r"], (a) => {
+      a.length = 1;
+      return () => [];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a slice getter grows the length past the optional slot",
+    S: SO(z.string()),
+    make: withSliceGetter(["h"], (a) => {
+      a.length = 4;
+      return () => [];
+    }),
+    expect: ["h", undefined],
+  });
+  // The getter answers the native slice: the copy runs on the state the getter left, as the native call would
+  check({
+    label: "a slice getter shrinks the length and answers the native slice",
+    S: SO(z.string()),
+    make: withSliceGetter(["h", "x", "r"], (a) => {
+      a.length = 1;
+      return plainSlice;
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a slice getter grows the length and answers the native slice",
+    S: SO(opt),
+    make: withSliceGetter(["h"], (a) => {
+      a.length = 3;
+      return plainSlice;
+    }),
+    expect: ["h", undefined, undefined],
+  });
+  check({
+    label:
+      "a slice getter rewrites a rest slot and answers the native slice: read after it, like slice",
+    S: S1(restT),
+    make: withSliceGetter(["h", "a"], (a) => {
+      a[1] = "M";
+      return plainSlice;
+    }),
+    expect: ["h", "M!"],
+  });
+
+  // 3. A custom `slice` body and the result it answers: called once, iterated like stock, and the length it left
+  // decides presence
+  check({
+    label:
+      "a custom slice shrinks the length below the optional slot and yields nothing (fourth review of #88, P1-C)",
+    S: SO(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this.length = 1;
+      return [];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label:
+      "a custom slice shrinks the length below the optional slot and yields an element (dropped with the truncation)",
+    S: SO(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this.length = 1;
+      return ["q"];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label:
+      "a custom slice shrinks the length below the rest with no optional slot: stock's trailing loop walks past the items",
+    S: S1(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this.length = 1;
+      return ["q"];
+    }),
+    throws: "TypeError",
+  });
+  check({
+    label: "a custom slice shrinks the length below the rest and yields nothing",
+    S: S1(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this.length = 1;
+      return [];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a custom slice grows the length past the optional slot and yields nothing",
+    S: SO(z.string()),
+    make: withSlice(["h"], function () {
+      this.length = 4;
+      return [];
+    }),
+    expect: ["h", undefined],
+  });
+  check({
+    label: "a custom slice grows the length past the optional slot and yields an element",
+    S: SO(z.string()),
+    make: withSlice(["h"], function () {
+      this.length = 4;
+      return ["q"];
+    }),
+    expect: ["h", undefined, "q"],
+  });
+  check({
+    label: "a custom slice rewrites the fixed slot and shrinks (#96 row 2)",
+    S: SO(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this[0] += "!";
+      this.length = 1;
+      return [];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a custom slice rewrites the optional slot",
+    S: SO(z.string()),
+    make: withSlice(["h", "x", "r"], function () {
+      this[1] = "M";
+      return ["r"];
+    }),
+    expect: ["h", "x", "r"],
+  });
+  check({
+    label: "a custom slice yields more than the input holds past the fixed slots",
+    S: S1(z.string()),
+    make: withSlice(["h", "a"], () => ["p", "q", "r"]),
+    throws: "TypeError",
+  });
+  check({
+    label: "a custom slice yields exactly what the input holds",
+    S: S1(restT),
+    make: withSlice(["h", "a"], () => ["p"]),
+    expect: ["h", "p!"],
+  });
+  check({
+    label: "a custom slice answers a non-iterable",
+    S: S1(z.string()),
+    make: withSlice(["h", "a"], () => 5),
+    throws: "TypeError",
+  });
+  check({
+    label: "a custom slice answers an iterable that throws before its first value",
+    S: S1(z.string()),
+    make: withSlice(["h", "a"], () => ({
+      [Symbol.iterator]() {
+        throw new RangeError("first");
+      },
+    })),
+    throws: "RangeError",
+  });
+  check({
+    label:
+      "a custom slice answers an iterator that throws after one value, which ran the rest element",
+    S: S1(
+      z.string().transform((v) => {
+        holder.input?.push(`ran:${v}`);
+        return `${v}!`;
+      }),
+    ),
+    make: withSlice(["h", "a"], (log) => {
+      holder.input = log as unknown[];
+      return {
+        [Symbol.iterator]() {
+          let n = 0;
+          return {
+            next() {
+              log.push(`next:${n}`);
+              if (n++ === 0) return { value: "p", done: false };
+              throw new RangeError("second");
+            },
+          };
+        },
+      };
+    }),
+    throws: "RangeError",
+  });
+  // The result's iterator getter and its `next` run between the call and the presence decision
+  check({
+    label: "the result's Symbol.iterator getter shrinks the length below the optional slot",
+    S: SO(z.string()),
+    make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
+      const a = this;
+      return {
+        get [Symbol.iterator]() {
+          log.push("iter");
+          a.length = 1;
+          return function* () {
+            yield "q";
+          };
+        },
+      };
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "the result's Symbol.iterator getter shrinks the length below the rest",
+    S: S1(z.string()),
+    make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
+      const a = this;
+      return {
+        get [Symbol.iterator]() {
+          log.push("iter");
+          a.length = 1;
+          return function* () {
+            yield "q";
+          };
+        },
+      };
+    }),
+    throws: "TypeError",
+  });
+  check({
+    label: "the iterator's next rewrites the fixed slot and grows the length after one value",
+    S: SO(restT),
+    make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
+      const a = this;
+      let n = 0;
+      return {
+        [Symbol.iterator]: () => ({
+          next() {
+            log.push(`next:${n}`);
+            if (n === 1) {
+              a[0] = "M";
+              a.length = 5;
+            }
+            return n < 2
+              ? { value: ["p", "q"][n++], done: false }
+              : { value: undefined, done: true };
+          },
+        }),
+      };
+    }),
+    expect: ["h", "x", "p!", "q!"],
+  });
+  check({
+    label: "an empty custom result under a truncated prefix",
+    S: SO(restT),
+    make: withSlice(["h"], () => []),
+    expect: ["h"],
+  });
+  check({
+    label:
+      "a one-element custom result under a truncated prefix: run, then dropped by the truncation",
+    S: SO(
+      z.string().transform((v) => {
+        holder.input?.push(`ran:${v}`);
+        return `${v}!`;
+      }),
+    ),
+    make: withSlice(["h"], (log) => {
+      holder.input = log as unknown[];
+      return ["q"];
+    }),
+    expect: ["h"],
+  });
+  check({
+    label:
+      "a failing element in a custom result under a truncated prefix: stock reports it, the truncation notwithstanding",
+    S: SO(z.string()),
+    make: withSlice(["h"], () => [1]),
+    rerun: true,
+  });
+  holder.input = null;
+
+  // 4. A species getter that answers `Array`: the native slice reads the length before it and the indices after
+  // it, and the copy does the same; the length it moves is met by the presence decision after the rest
+  check({
+    label:
+      "a species getter grows the length: the copy's count was fixed before it (fourth review of #88, P1-A)",
+    S: S1(restO),
+    make: held(["h", "a"]),
+    setup: species((a) => {
+      a.length = 3;
+    }),
+    expect: ["h", "a!"],
+  });
+  check({
+    label:
+      "a species getter grows the length past the optional slot: materialized after the rest (#96 row 1)",
+    S: SO(z.string()),
+    make: held(["h"]),
+    setup: species((a) => {
+      a.length = 3;
+    }),
+    expect: ["h", undefined],
+  });
+  check({
+    label: "a species getter shrinks the length below the optional slot",
+    S: SO(opt),
+    make: held(["h", "x", "r"]),
+    setup: species((a) => {
+      a.length = 1;
+    }),
+    expect: ["h"],
+  });
+  check({
+    label: "a species getter rewrites a rest slot: read after it, like slice",
+    S: S1(z.string()),
+    make: held(["h", "a"]),
+    setup: species((a) => {
+      a[1] = "M";
+    }),
+    expect: ["h", "M"],
+    ref: true,
+  });
+  check({
+    label:
+      "a species getter rewrites the fixed slot under a transform rest: the held result is assembled",
+    S: S1(restT),
+    make: held(["h", "a"]),
+    setup: species((a) => {
+      a[0] = "M";
+    }),
+    expect: ["h", "a!"],
+  });
+  check({
+    label: "a species getter installs an own slice: read already, like under slice",
+    S: S1(restT),
+    make: held(["h", "a"]),
+    setup: species((a) => {
+      Object.defineProperty(a, "slice", { value: () => ["Z"] });
+    }),
+    expect: ["h", "a!"],
+  });
+  // The getter answers something else: the native slice constructs through it, on the state it left
+  check({
+    label: "a species getter answers a constructor after growing the input",
+    S: S1(restT),
+    make: held(["h", "a"]),
+    setup: species(
+      (a) => {
+        a.length = 3;
+        a[2] = "c";
+      },
+      () =>
+        function Ctor(this: unknown, n: number) {
+          return new Array(n);
+        },
+    ),
+    expect: ["h", "a!"],
+  });
+  check({
+    label: "a species getter answers null: a plain array",
+    S: S1(restT),
+    make: held(["h", "a"]),
+    setup: species(
+      () => {},
+      () => null,
+    ),
+    expect: ["h", "a!"],
+  });
+  check({
+    label: "a species getter answers a non-constructor: slice's TypeError",
+    S: S1(restT),
+    make: held(["h", "a"]),
+    setup: species(
+      () => {},
+      () => 5,
+    ),
+    throws: "TypeError",
+  });
+  // The species constructor: runs inside the native slice on both sides, after the length was read
+  {
+    const ctor = (effect: (a: unknown[]) => void) =>
+      species(
+        () => {},
+        () =>
+          function Ctor(this: unknown, n: number) {
+            if (holder.input) effect(holder.input);
+            return new Array(n);
+          },
+      );
+    check({
+      label: "a species constructor rewrites a rest slot: read after it",
+      S: S1(z.string()),
+      make: held(["h", "a", "b"]),
+      setup: ctor((a) => {
+        a[2] = "M";
+      }),
+      expect: ["h", "a", "M"],
+    });
+    check({
+      label: "a species constructor rewrites the fixed slot: the held result is assembled",
+      S: S1(z.string()),
+      make: held(["h", "a"]),
+      setup: ctor((a) => {
+        a[0] = "M";
+      }),
+      expect: ["h", "a"],
+    });
+    check({
+      label: "a species constructor shrinks the length below the optional slot",
+      S: SO(opt),
+      make: held(["h", "x", "r"]),
+      setup: ctor((a) => {
+        a.length = 1;
+      }),
+      expect: ["h"],
+    });
+    check({
+      label: "a species constructor grows the length past the optional slot",
+      S: SO(z.string()),
+      make: held(["h"]),
+      setup: ctor((a) => {
+        a.length = 3;
+      }),
+      expect: ["h", undefined],
+    });
+  }
+
+  // 5. The input's own `constructor`: the native slice reads it after the length and the species off it
+  {
+    const withCtor =
+      (values: unknown[], get: (a: unknown[], log: string[]) => unknown) => (log: string[]) => {
+        const a = [...values];
+        Object.defineProperty(a, "constructor", {
+          configurable: true,
+          get() {
+            log.push("get:constructor");
+            return get(a, log);
+          },
+        });
+        return a;
+      };
+    check({
+      label:
+        "a constructor getter grows the length and answers Array: the count was fixed before it",
+      S: S1(restO),
+      make: withCtor(["h", "a"], (a) => {
+        a.length = 3;
+        return Array;
+      }),
+      expect: ["h", "a!"],
+    });
+    check({
+      label:
+        "a constructor getter answers a plain function: slice reads its species (none) and builds a plain array",
+      S: S1(restT),
+      make: withCtor(["h", "a"], (_a, log) => {
+        const f = () => {};
+        Object.defineProperty(f, Symbol.species, {
+          get() {
+            log.push("ctor.species");
+            return undefined;
+          },
+        });
+        return f;
+      }),
+      expect: ["h", "a!"],
+    });
+    check({
+      label:
+        "a constructor getter answers a function whose species getter rewrites the fixed slot and constructs",
+      S: S1(restT),
+      make: withCtor(["h", "a"], (a, log) => {
+        const f = () => {};
+        Object.defineProperty(f, Symbol.species, {
+          get() {
+            log.push("ctor.species");
+            a[0] = "M";
+            return function Ctor(this: unknown, n: number) {
+              log.push(`construct:${n}`);
+              return new Array(n);
+            };
+          },
+        });
+        return f;
+      }),
+      expect: ["h", "a!"],
+    });
+    check({
+      label: "an own constructor of undefined: a plain array",
+      S: S1(restT),
+      make: () => {
+        const a: unknown[] = ["h", "a"];
+        Object.defineProperty(a, "constructor", { configurable: true, value: undefined });
+        return a;
+      },
+      expect: ["h", "a!"],
+    });
+    check({
+      label: "an own constructor of null: slice's TypeError",
+      S: S1(restT),
+      make: () => {
+        const a: unknown[] = ["h", "a"];
+        Object.defineProperty(a, "constructor", { configurable: true, value: null });
+        return a;
+      },
+      throws: "TypeError",
+    });
+    check({
+      label:
+        "a subclass instance whose constructor shrinks the length: the species constructor runs inside slice",
+      S: SO(opt),
+      make: (log) => {
+        class Sub extends Array<unknown> {
+          constructor(n?: number) {
+            super(n ?? 0);
+            log.push(`sub:${n}`);
+            if (holder.input) holder.input.length = 1;
+          }
+        }
+        const a = new Sub();
+        a.push("h", "x", "r");
+        holder.input = a;
+        return a;
+      },
+      expect: ["h"],
+    });
+    holder.input = null;
+  }
+
+  // 6. A rest element's callback (a premise violation): the slice holds the rest, the fixed results are held, and
+  // the length the callback leaves decides presence
+  {
+    const restCb = z.string().transform((v) => {
+      if (v === "r") {
+        const a = holder.input!;
+        const e = (a as { effect?: (b: unknown[]) => void }).effect;
+        e?.(a);
+      }
+      return `${v}!`;
+    });
+    const withEffect = (values: unknown[], effect: (a: unknown[]) => void) => () => {
+      const a = held(values)();
+      Object.defineProperty(a, "effect", { value: effect });
+      return a;
+    };
+    check({
+      label:
+        "a rest callback shrinks the length below the rest: stock's trailing loop walks past the items",
+      S: S1(restCb),
+      make: withEffect(["h", "r", "s"], (a) => {
+        a.length = 1;
+      }),
+      throws: "TypeError",
+    });
+    check({
+      label: "a rest callback shrinks the length below the optional slot",
+      S: SO(restCb),
+      make: withEffect(["h", "x", "r"], (a) => {
+        a.length = 1;
+      }),
+      expect: ["h"],
+    });
+    check({
+      label: "a rest callback grows the length",
+      S: SO(restCb),
+      make: withEffect(["h", "x", "r"], (a) => {
+        a.length = 5;
+      }),
+      expect: ["h", "x", "r!"],
+    });
+    check({
+      label: "a rest callback writes a later rest slot: the slice held it",
+      S: SO(restCb),
+      make: withEffect(["h", "x", "r", "s"], (a) => {
+        a[3] = "M";
+      }),
+      expect: ["h", "x", "r!", "s!"],
+    });
+    holder.input = null;
+  }
+
+  // 7. Proxy traps on the input: `has` then `get` per rest index in slice's order (the `length` reads are not
+  // compared: stock's runtime reads it per presence decision, the skeleton once, §7 of the deep dive)
+  {
+    const proxied =
+      (values: unknown[], traps: (log: string[]) => ProxyHandler<unknown[]>) => (log: string[]) =>
+        new Proxy([...values], traps(log));
+    const indexLog = (log: string[]) => (kind: string, k: PropertyKey) => {
+      if (typeof k === "string" && k !== "length") log.push(`${kind}:${k}`);
+    };
+    check({
+      label: "a get trap for a rest index rewrites a later rest slot: read after it, like slice",
+      S: S1(restT),
+      make: proxied(["h", "a", "b"], (log) => {
+        const at = indexLog(log);
+        return {
+          get(t, k, r) {
+            if (k === "1") t[2] = "M";
+            at("get", k);
+            return Reflect.get(t, k, r);
+          },
+          has(t, k) {
+            at("has", k);
+            return Reflect.has(t, k);
+          },
+        };
+      }),
+      expect: ["h", "a!", "M!"],
+    });
+    check({
+      label: "a has trap that denies a rest index: a hole under both",
+      S: S1(restO),
+      make: proxied(["h", "a", "b"], (log) => {
+        const at = indexLog(log);
+        return {
+          has(t, k) {
+            at("has", k);
+            return k === "1" ? false : Reflect.has(t, k);
+          },
+        };
+      }),
+      expect: ["h", "U", "b!"],
+    });
+    check({
+      label:
+        "a length that grows once the first slot was read: the slice and the presence decision see the grown one",
+      S: SO(opt),
+      make: proxied(["h"], () => {
+        let grown = false;
+        return {
+          get(t, k, r) {
+            if (k === "0") grown = true;
+            if (k === "length") return grown ? 3 : 1;
+            return Reflect.get(t, k, r);
+          },
+        };
+      }),
+      expect: ["h", undefined, undefined],
+    });
+  }
+
+  // 8. Holes and explicit `undefined` in the rest under the copy, and the reference on the clean path
+  check({
+    label: "a rest hole comes out as an own undefined",
+    S: S1(restO),
+    make: () => arr("h", "a", HOLE, "c"),
+    expect: ["h", "a!", "U", "c!"],
+  });
+  check({
+    label: "a rest hole under a validator rest",
+    S: S1(opt),
+    make: () => arr("h", HOLE),
+    expect: ["h", undefined],
+  });
+  check({
+    label: "an explicit own undefined in the rest keeps the reference",
+    S: S1(opt),
+    make: () => ["h", undefined],
+    expect: ["h", undefined],
+    ref: true,
+  });
+  check({
+    label: "a dense rest keeps the reference",
+    S: S1(z.string()),
+    make: () => ["h", "a", "b"],
+    ref: true,
+  });
+  check({
+    label: "a short input under the optional slot keeps the reference",
+    S: SO(z.string()),
+    make: () => ["h"],
+    expect: ["h"],
+    ref: true,
+  });
 }
 
 head("async failure path falls back to stock safeParseAsync (official issues structure)");

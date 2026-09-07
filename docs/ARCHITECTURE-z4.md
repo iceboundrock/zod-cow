@@ -657,48 +657,63 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    slots ran and before any rest element runs: its rest loop walks the slice, decides a rest hole on it and rebuilds
    the rest part of the prefix from it, so a sync rest callback that overwrites a later rest slot is not observed by
    either layout, as stock does not observe it. The slice is the one allocation on the clean path of a tuple with a
-   rest element (a tuple without one still allocates nothing). The sync layout builds it by hand (#87): `new Array(n)`
-   with `slice` and the length each read once, the length converted once as slice's `LengthOfArrayLike` converts it
-   (`ToLength`: a fraction is floored, `NaN`, a negative or a non-numeric string gives an empty copy, a BigInt or a
-   Symbol the `TypeError` `ToNumber` throws, third review of #88) and read before the constructor and the species, as
-   slice reads it before `ArraySpeciesCreate`, so a species getter that changes the length changes nothing the copy
-   has not fixed already (fourth review of #88), an empty copy when the input is shorter than the fixed slots, each
-   index asked `in` before it is read (`slice` runs `HasProperty` then `Get`, so a Proxy whose `has`
-   trap denies an index gets a hole there under both, second review of #88) and written when `in` answered, as slice
-   writes it, so a hole stays a hole. The copy asks nothing else of the input: the own-ness question an `undefined`
-   value raises for the CoW decision (an inherited `undefined` under a hole is a hole, where stock's output holds an
-   own slot) is asked from the rest loop's hole test, on the copy and then on the input, only when the rest element's
-   output equals that `undefined`. That is the hole test every array position makes (`Object.hasOwn` on the input, a
-   `getOwnPropertyDescriptor` trap stock never runs, whose effects, a mutation of a later index or a throw, are
-   observed there on the array skeleton and the tuple's fixed slots alike, #95), and a transform rest that rewrites
-   `undefined` never reaches it (third review of #88). The copy runs only when the input's `slice` is the native one,
-   its constructor is `Array` and `Array[Symbol.species]` is `Array` (three property reads and compares): stock's
-   runtime calls `input.slice(items.length)` and iterates what came back with `for...of`, and the native slice builds
-   its result through `ArraySpeciesCreate`, so an input carrying another `slice` (an own `slice`, a subclass override,
-   a replaced `Array.prototype.slice`), a subclass instance or a plain array under a replaced species, whose native
-   `slice` constructs its result through that species constructor, takes that call on the function that was read,
-   the copy is forced so the output is assembled from what the call returned, its fixed prefix the results the fixed
-   slots produced, as stock assembles from `itemResults`, never the input after the `slice` read (a getter there, or
-   the call, may have written a fixed slot meanwhile; fourth review of #88), and the result is consumed as stock
-   consumes it: `for...of`, the rest element run on each yielded value in turn (a Set, a generator, any iterable), the
-   elements a truncated prefix drops in stock's `handleTupleResults` validated and dropped too, a result with more
-   elements than the input holds past the fixed slots handed to stock, whose `handleTupleResults` throws a `TypeError`
-   there, and a call that moved the length across a fixed slot handed to stock too, since `handleTupleResults` decides
-   each fixed slot's presence from the live length after the call where the skeleton decided it as the slot ran (a
-   shrink truncates at the first optional slot it uncovers, a growth keeps what an absent slot's run on `undefined`
-   gave, which a `dropsWhenAbsent` slot never ran here); stock's run then sees the input as the call left it, so a
-   mutation that is not idempotent gives it a different input (review of #88 and its second, third and fourth rounds;
-   the slice of #86 returned the input by reference there under a validator-shaped rest, which compares nothing
-   against the live input, and indexed a species-built result by `length` where stock iterates it). A Proxy sees the
-   copy make slice's reads in slice's order: `slice`, the length, the constructor, the species, then `in` and the read
-   per index. A length moved across a fixed slot after that slot ran, by a species getter, a custom `slice` or a
-   callback, is #96: the skeleton decided the slot's presence already where stock decides it after the rest ran. A
-   Proxy that under-reports its `length` keeps the clean path, on every array-shaped skeleton (#95): no element past
-   the reported length is read, as under `slice`, and stock's fresh output is the truncated one.
-   `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
-   the copy), the inlined loop about a third of that at a short rest; measured on #87, a clean parse of `[string,
-   ...string[]]` with one rest element went from 75 ns under `slice` to 58 ns, with sixteen it is unchanged, against
-   a stock parse of 160 to 250 ns. A rest hole over an inherited `undefined` comes out as an own slot like stock's,
+   rest element (a tuple without one still allocates nothing). The sync layout builds it by hand and follows stock's runtime timeline for everything around it (#87, #88). Stock's
+   `$ZodTuple` runtime runs every fixed item and keeps each result (`itemResults`), reads `input.slice` once and calls
+   it once, iterates what came back with `for...of` running the rest element per yield, and only then decides each
+   fixed slot's presence from the live `input.length` (`handleTupleResults`), assembling from the results it holds;
+   the native `slice` itself reads the length (once, `ToLength`), then the constructor, then the species off an
+   `Array` constructor (`ArraySpeciesCreate`), then asks `HasProperty` and `Get` per index and builds its result
+   through the species. The sync rest layout holds every fixed slot's result in a local (a slot an earlier
+   truncation gates out of the assembly is still run at its stock position, on `undefined`, and held; an absent slot
+   whose run on `undefined` failed holds INVALID) and rebuilds every fresh output from those locals, never from a
+   second read of the input (the async layout's rule, #77; the sync layout without a rest keeps the second read of
+   #36). It reads `slice` once. The native one it runs by hand with the same reads in the same order: the length
+   once, converted as `ToLength` converts it (a fraction floored, `NaN`, a negative or a non-numeric string an empty
+   copy, a BigInt or a Symbol the `TypeError` `ToNumber` throws, an infinite length the `RangeError` the allocation
+   throws), then the constructor, then, when the constructor is `Array`, the species (the built-in getter, or one
+   installed on `Array`: the one read that can run user code, made where the builtin makes it, once), then `in` and
+   the read per index and nothing else (`HasProperty` then `Get`, so a Proxy whose `has` trap denies an index gets a
+   hole there under both, and a slot written when `in` answered, so a hole stays a hole; the own-ness question an
+   `undefined` value raises for the CoW decision is asked from the rest loop's hole test, on the copy and then on the
+   input, only when the rest element's output equals that `undefined`: the hole test every array position makes,
+   #95). When the constructor is `Array` and the species is `Array`, the builtin's remaining steps (`ArrayCreate`, the
+   stores into it, its length, its iteration) run no user code, so the copy stands in for them and the inline rest
+   loop walks it; the array iterator and its `next`, two data properties, are compared against the ones captured at
+   module load after the copy (the per-index reads are the last user code before stock's `for...of` reads them), and
+   a replaced one sends the copy through `for...of` instead. Any other constructor (a subclass instance, an own or
+   inherited `constructor`, another realm's `Array`) or any other species hands the builtin the reads already made
+   and lets it finish: `Array.prototype.slice` is called on a facade that answers `length` and `constructor` from what
+   was read (the species that was read, when the constructor was `Array`, carried on a plain object the builtin reads
+   back without running the getter again) and forwards `HasProperty` and `Get` to the input, so the realm check, the
+   species construction, the per-index reads, the writes into the constructed result and the errors are the builtin's
+   own, made once. Any other `slice` (an own one, a subclass override, a replaced `Array.prototype.slice`) is called as
+   stock calls it, on the function that was read. Both results are consumed with `for...of` like stock's (a Set, a
+   generator, any iterable; a non-iterable throws the engine's `TypeError` on an iterable named `rest`, as stock's
+   does), the rest element run per yield and its results collected. After the rest ran, the live length is read once
+   more: when it equals every read the fixed slots and the copy decided with (the copy's read as the number it was
+   converted to) the inline assembly stands, being that algorithm for a length that holds; otherwise, and after every
+   continuation, stock's `handleTupleResults` runs over the held results: a slot the length excludes truncates the
+   output at the first optional-in slot at or past `optoutStart` (or an excluded slot whose run failed), a covered
+   slot's failure is reported (INVALID, stock's rerun), every result it passes is written, the rest results follow,
+   and the trailing loop drops trailing `undefined` results of optional-out slots the length excludes and, past
+   `items`, makes the read stock makes (`items[i]._zod`), so the engine's own `TypeError` with stock's message is
+   thrown from `parse` and `safeParse` alike. So a `slice` getter, a custom `slice`, a species getter or constructor,
+   an iterator, a rest callback or a Proxy trap that moves the length or rewrites a slot after that slot's result was
+   held gives stock's value, throw and hook calls (the timeline group of the tuple smoke runs one mutation per source
+   and target on both sides; the earlier heads of #88 handed such a parse back to stock, whose rerun met the input as
+   the hooks had left it and ran them again). What remains is the CoW contract itself: the clean path returns the
+   input, so a slot rewritten after its read is visible in that output only (§5.3); a length that converts to `NaN`
+   is never equal to itself and takes the presence decision, stock's fresh output, where the other under-reported
+   Proxy lengths keep the clean path (#95); a Proxy sees the skeleton read `length` a different number of times than
+   stock's runtime does (the guard, each gated slot, the copy and the presence decision, against stock's slice and
+   its two loops); a present slot whose product fails returns to stock at once where stock keeps going and may drop
+   the failure with a truncation the rest moved; a `slice` that is not callable throws a `TypeError` on both sides
+   with the engine's message for each call site. `Array.prototype.slice` costs a near-constant 30 ns per call (its
+   species lookup and generic entry, not the copy), the inlined loop about a third of that at a short rest; measured
+   on #88 (the #78 microbenchmark), a clean parse of `[string, ...string[]]` with one rest element went from about
+   79 ns under `slice` to 62 ns, with four from 84 to 69 ns, with sixteen from 117 to 108 ns, an object rest of four
+   from 306 to 285 ns, against a stock parse of 170 to 250 ns; the presence decision and the iterator comparison
+   cost the fast path nothing measurable over the bare copy (within 1 to 3 ns, the control row's spread). A rest hole over an inherited `undefined` comes out as an own slot like stock's,
    where `slice` read the inherited value through `HasProperty` and made it own.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).

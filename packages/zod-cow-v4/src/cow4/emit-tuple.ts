@@ -8,18 +8,53 @@ import { childProduct, emitContainerChecks } from "./emit.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import type { Node } from "./product.js";
 
-/** The `slice` the sync layout replaces by hand (#87): an input whose `slice` is another function takes the real call */
+/** The `slice` the sync rest layout replaces by hand (#87); every other function an input answers for `slice` is called */
 const NATIVE_SLICE = Array.prototype.slice;
 /** Stock's call on the `slice` that was read, made once on the function it answered (second review of #88) */
 const NATIVE_APPLY = Reflect.apply;
+/** What stock's `for...of` over a plain array runs: the array iterator and its `next`, both data properties, so the
+ *  fast path can prove them intact without running any code (fourth review of #88) */
+const NATIVE_ARRAY_ITERATOR = Array.prototype[Symbol.iterator];
+const ARRAY_ITERATOR_PROTOTYPE = Object.getPrototypeOf([][Symbol.iterator]()) as {
+  next: unknown;
+};
+const NATIVE_ARRAY_NEXT = ARRAY_ITERATOR_PROTOTYPE.next;
+/** The reads stock's `handleTupleResults` makes on `items` at parse time (`items[i]._zod.optin`, `.optout`): past the
+ *  items the same read throws the engine's own `TypeError`, as stock's does (fourth review of #88) */
+const optinOptional = (items: Node[], i: number): boolean => items[i]!._zod.optin === "optional";
+const optoutOptional = (items: Node[], i: number): boolean => items[i]!._zod.optout === "optional";
+
+/**
+ * The continuation of the native `slice` on an input the hand copy declines (a constructor other than `Array`, a
+ * species other than `Array`; fourth review of #88). The skeleton has already made the reads the native slice makes
+ * first (`length`, then `constructor`, then the species off an `Array` constructor), each once, at its point; the
+ * native builtin then finishes on a facade that answers those reads from what was read and forwards every other
+ * question (`HasProperty`, `Get` per index) to the input, so the species construction, the per-index reads, the
+ * writes into the constructed result and the errors are the builtin's own, made once. `ctor` is the constructor that
+ * was read, or, when it was `Array`, a plain object carrying the species that was read, which the builtin reads back
+ * without running the getter again.
+ */
+function nativeSliceFrom(input: unknown[], length: number, ctor: unknown, start: number): unknown {
+  const facade = new Proxy([] as unknown[], {
+    get: (_target, key) =>
+      key === "length"
+        ? length
+        : key === "constructor"
+          ? ctor
+          : (input as unknown as Record<PropertyKey, unknown>)[key],
+    has: (_target, key) => key in input,
+  });
+  return NATIVE_APPLY(NATIVE_SLICE, facade, [start]);
+}
 
 /* ── tuple skeleton: mirrors the official generateTupleCheck + fillLen truncation tracking + CoW decoration ── */
 
 /**
  * The tuple CoW skeleton -- line for line with the official generateTupleCheck; the only difference is rewriting
  * the "unconditional new container" (const out = []) into reference comparison for dirtiness + a prefix rebuild at
- * the first change (in the sync layout the clean slots before it read from the input a second time, #36; the async
- * layout rebuilds them from its captured reads, #77; every later slot written from the loop's single read, review of #70):
+ * the first change (in the sync layout without a rest the clean slots before it read from the input a second time,
+ * #36; the async layout and the sync rest layout rebuild them from what they hold, #77 and the fourth review of #88;
+ * every later slot written from the loop's single read, review of #70):
  *
  *   Length guard (same as the official one, optinStart/optoutStart computed at compile time)
  *   Segment 1 [0, optoutStart): the official unconditional branch out[i] = child(input[i])
@@ -34,27 +69,43 @@ const NATIVE_APPLY = Reflect.apply;
  * was no truncation/fill. Once copied, every visited slot is written.
  * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
  *
- * The rest slice (#78): stock's runtime takes `const rest = input.slice(items.length)` after it started every
- * fixed slot and before it runs any rest element, so a sync rest callback that mutates a later rest slot is
- * not observed by stock, while a fixed slot's callback that mutates a rest slot before the slice is. Both
- * layouts take the same slice at the same point and walk it: the rest loop reads its elements off the slice,
- * a rest hole is `Object.hasOwn` on the slice, and the prefix rebuild takes the rest part from it. It is the
- * one allocation on the clean path of a tuple with a rest element (a tuple without one allocates nothing).
- * The sync layout builds the slice by hand (#87): `Array.prototype.slice` costs a near-constant 30 ns per call
- * (its species lookup and generic entry, not the copy), where an inlined `new Array(n)` plus a copy loop costs
- * a third at a short rest. The loop reads the length once before any rest element runs, converts it as
- * `slice` does (`ToLength`) and reads it before the constructor and the species, as slice reads it before
- * `ArraySpeciesCreate` (fourth review of #88), gives an empty copy when the input is shorter than the fixed
- * slots, asks `in` before each read, as `slice` runs `HasProperty` then `Get`, and writes a slot when `in`
- * answered, as `slice` writes it, so a hole stays a hole; the own-ness probe an `undefined` value raises for the CoW decision moved
- * from the copy loop into the rest loop's hole test, where a rest element whose output differs never raises it
- * (third review of #88). It runs only when the input's `slice` (read once) is the native one, its constructor
- * is `Array` and `Array[Symbol.species]` is `Array`; any other input takes the call stock's runtime makes on
- * the function that was read, the copy is forced with the fixed slots' results as its prefix, and the result is
- * consumed with `for...of`, the rest element run per yielded value, so the output is assembled from what the call
- * returned like stock's; a call that moved the length across a fixed slot is handed to stock, which decides a
- * fixed slot's presence after the rest ran where the skeleton decided it as the slot ran (#96; review of #88 and
- * its second, third and fourth rounds).
+ * The sync rest layout follows stock's runtime timeline (fourth review of #88, #96). Stock's `$ZodTuple` runtime
+ * runs every fixed item and keeps each result, reads `input.slice` once and calls it once (the native slice reads
+ * the length, then the constructor, then the species off it, then asks `HasProperty` and `Get` per index and builds
+ * its result through the species), iterates what came back with `for...of` running the rest element per yield, and
+ * only then decides each fixed slot's presence from the live `input.length` (`handleTupleResults`), assembling from
+ * the results it holds. The layout does the same, in the same order, and everything user code can reach between two
+ * of those steps (a fixed slot's callback, a `slice` getter, a custom `slice`, a species getter or constructor, an
+ * iterator, a rest callback, a Proxy trap) meets the same state on both sides:
+ *
+ *   - every fixed slot's result is held in a local, and every fresh output is assembled from those locals, never
+ *     from a second read of the input (the async layout's rule, #77);
+ *   - `slice` is read once; the native one is run by hand (#87: `Array.prototype.slice` costs a near-constant 30 ns
+ *     per call, its species lookup and generic entry, where `new Array(n)` plus a copy loop costs a third at a short
+ *     rest) with the same reads in the same order, the length once, converted as `ToLength` converts it, then the
+ *     constructor, then the species when the constructor is `Array` (the one property read that can run user code,
+ *     made at the point the native slice makes it), then `in` and the read per index and nothing else. When the
+ *     constructor is `Array` and the species is `Array` the builtin's remaining steps (`ArrayCreate`, the stores
+ *     into it, its length, its iteration) run no user code, so the copy stands in for them; a replaced array
+ *     iterator or `next` (two data properties compared against the captured ones) sends the copy through `for...of`
+ *     instead. Any other constructor or species hands the builtin the reads already made and lets it finish
+ *     (`nativeSliceFrom`), and any other `slice` is called as stock calls it; both results are consumed with
+ *     `for...of`, the rest element run per yield;
+ *   - after the rest ran, the live length is read once more and, when it or the result's source differs from what
+ *     the fixed slots decided with, stock's `handleTupleResults` is run over the held results: a slot the new
+ *     length excludes truncates the output at the first optional-in slot at or past `optoutStart`, a slot it now
+ *     covers is materialized from its held result (a slot the skeleton never ran because an earlier one truncated
+ *     is run at its stock position anyway, on `undefined`, and held), a rest result the length excludes reaches
+ *     the trailing loop that walks `items` past its end and throws the `TypeError` stock throws there. A length
+ *     nothing moved takes none of that: the inline assembly is that algorithm already.
+ *
+ * What remains: the output is the input by reference when nothing forced a copy, so user code that rewrites a slot
+ * whose result is already held is visible in that output only (the CoW premise, §5.3 of the deep dive); the number
+ * of `length` reads on a Proxy differs from stock's, and a length that converts to `NaN` is never equal to itself,
+ * so it takes the presence decision and stock's fresh output where the other under-reported lengths keep the clean
+ * path (#95); a present slot whose product fails returns to stock at once where stock keeps going and may drop the
+ * failure with a truncation the rest moved; a `slice` that is not callable throws a `TypeError` on both sides with
+ * the engine's message for each call site.
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -67,7 +118,7 @@ const NATIVE_APPLY = Reflect.apply;
  * from the input after it except its length (#77): stock reads `input[i]` and `input.slice(items.length)`
  * before any promise settles but decides presence from the live length in `handleTupleResults`, so
  * the prefix rebuild and the hole test use the captured reads and the slice while the presence
- * guards stay on `input.length`.
+ * guards stay on `input.length`. Its `slice` is the real call, indexed by length (#94).
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -83,11 +134,25 @@ export function emitCoWTuple(
   const childSeen = new Set(seen);
   childSeen.add(schema);
 
+  // The product for each fixed slot (generated once at compile time; key/element/value positions all go through childProduct)
+  const itemProducts = items.map((it) => childProduct(it, childSeen, ctx));
+  const restProduct = rest ? childProduct(rest, childSeen, ctx) : null;
+  const restFn = restProduct ? ctx.addConst(restProduct.fn) : "";
+  const anyAsync = itemProducts.some((p) => p.kind === "async") || restProduct?.kind === "async";
+  if (anyAsync) ctx.async = true;
+  /** The sync rest layout: results held, presence decided after the rest (see the header) */
+  const syncRest = !!rest && !anyAsync;
+
   ctx.write(`if (!Array.isArray(${accessor})) return INVALID;`);
   const optinStart = getTupleOptStart(items, "optin");
   const optoutStart = getTupleOptStart(items, "optout");
+  /** Sync rest layout: the guard's length read, one of the reads the presence decision after the rest is checked against */
+  const guardLen = syncRest ? ctx.var() : "";
   // Length guard (same as the official one): [optinStart, N] without rest, >= optinStart with rest
-  if (rest) {
+  if (syncRest) {
+    ctx.write(`const ${guardLen} = ${accessor}.length;`);
+    ctx.write(`if (${guardLen} < ${optinStart}) return INVALID;`);
+  } else if (rest) {
     ctx.write(`if (${accessor}.length < ${optinStart}) return INVALID;`);
   } else {
     ctx.write(
@@ -95,29 +160,33 @@ export function emitCoWTuple(
     );
   }
 
-  // The product for each fixed slot (generated once at compile time; key/element/value positions all go through childProduct)
-  const itemProducts = items.map((it) => childProduct(it, childSeen, ctx));
-  const restProduct = rest ? childProduct(rest, childSeen, ctx) : null;
-  const restFn = restProduct ? ctx.addConst(restProduct.fn) : "";
-  const anyAsync = itemProducts.some((p) => p.kind === "async") || restProduct?.kind === "async";
-  if (anyAsync) ctx.async = true;
-
   const out = ctx.var();
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
-  /** Sync rest layout: the local holding fixed slot i's result, the value stock's `handleTupleResults` assembles from
-   *  (`itemResults`), so the custom-slice fallback can build the fixed prefix without reading the input after the call
-   *  (fourth review of #88); an absent validator slot's stays `undefined`, a truncated slot's is never read */
+  /** Sync rest layout: the local holding fixed slot i's result, what stock's `handleTupleResults` assembles from
+   *  (`itemResults`): the product's output, a validator slot's read, `undefined` for an absent slot that supplies
+   *  nothing, INVALID for an absent slot whose run on `undefined` failed (stock drops that failure with the
+   *  truncation, unless the rest moved the length over the slot) */
   const slotOut: string[] = [];
-  if (rest && !anyAsync && N > 0) {
-    for (let i = 0; i < N; i++) slotOut.push(ctx.var());
+  /** Sync rest layout: the local holding the length read fixed slot i decided its presence from (slots from
+   *  optinStart on; the guard's read decides for the ones before it) */
+  const slotLen: string[] = [];
+  if (syncRest && N > 0) {
+    for (let i = 0; i < N; i++) {
+      slotOut.push(ctx.var());
+      slotLen.push(i < optinStart ? guardLen : ctx.var());
+    }
     ctx.write(`let ${slotOut.join(", ")};`);
+    const gated = slotLen.filter((v) => v !== guardLen);
+    if (gated.length > 0) ctx.write(`let ${gated.join(", ")};`);
   }
   /** The fixed slot's result written into its `slotOut` local, when the layout keeps one */
   const keepSlot = (idxExpr: string, valueExpr: string): void => {
     if (idxExpr !== "i" && slotOut.length > 0)
       ctx.write(`${slotOut[Number(idxExpr)]} = ${valueExpr};`);
   };
+  /** The length fixed slot i's presence is decided from: the held read in the sync rest layout, the live one elsewhere */
+  const lenAt = (i: number): string => (syncRest ? slotLen[i]! : `${accessor}.length`);
 
   /** Async layout: the local holding the single read of fixed slot i, the one holding whether it was a hole, and the one holding its settled result */
   const slotRead: string[] = [];
@@ -184,10 +253,18 @@ export function emitCoWTuple(
     anyAsync ? slotResult[i]! : `${ctx.addConst(itemProducts[i]!.fn)}(${argExpr})`;
 
   /** The first forced change at slot `idxExpr` (a fixed slot's literal index, or `i` inside the rest loop): a fresh array
-   *  holding the clean prefix [0, idxExpr). The sync layout reads the fixed slots from the input a second time (#36) and
-   *  the rest part from the slice (#78); the async layout takes both from its captured reads (#77). Every later slot is
-   *  written from the loop's single read (review of #70) */
+   *  holding the clean prefix [0, idxExpr). The sync layout without a rest reads the fixed slots from the input a second
+   *  time (#36); the sync rest layout takes them from the held results and the rest part from the copy (fourth review of
+   *  #88); the async layout takes both from its captured reads (#77). Every later slot is written from the loop's single
+   *  read (review of #70). A clean prefix holds present, unchanged slots only (an absent slot, a hole or a truncation
+   *  copies), so what was read and held is the prefix */
   const copyAt = (idxExpr: string): string => {
+    if (syncRest) {
+      if (idxExpr !== "i") {
+        return `if (${out} === ${accessor}) ${out} = [${slotOut.slice(0, Number(idxExpr)).join(", ")}];`;
+      }
+      return `if (${out} === ${accessor}) { ${out} = [${slotOut.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
+    }
     if (!anyAsync) {
       if (idxExpr !== "i") {
         return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${idxExpr}; j++) ${out}[j] = ${accessor}[j]; }`;
@@ -196,7 +273,6 @@ export function emitCoWTuple(
       return `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${N}; j++) ${out}[j] = ${accessor}[j]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
     }
     if (idxExpr !== "i") {
-      // A clean prefix holds present, unchanged slots only (an absent slot, a hole or a truncation copies), so the captured reads are the prefix
       return `if (${out} === ${accessor}) ${out} = [${slotRead.slice(0, Number(idxExpr)).join(", ")}];`;
     }
     return `if (${out} === ${accessor}) { ${out} = [${slotRead.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
@@ -268,7 +344,7 @@ export function emitCoWTuple(
     ctx.indented(() => {
       ctx.write(`${out}.length = ${i};`);
     });
-    ctx.write(`} else if (${i} !== ${accessor}.length) {`);
+    ctx.write(`} else if (${i} !== ${lenAt(i)}) {`);
     ctx.indented(() => {
       ctx.write(copyAt(String(i)));
     });
@@ -290,7 +366,8 @@ export function emitCoWTuple(
         return;
       }
       // Absence is not knowable at compile time (input.length is a runtime value) → the present branch is guarded at runtime
-      ctx.write(`if (${i} < ${accessor}.length) {`);
+      if (syncRest) ctx.write(`${slotLen[i]} = ${accessor}.length;`);
+      ctx.write(`if (${i} < ${lenAt(i)}) {`);
       ctx.indented(() => {
         if (p.kind === "validator") emitValidatorSlot(slotCall(i, e), String(i), e);
         else emitValueSlot(slotCall(i, e), String(i), e);
@@ -312,10 +389,90 @@ export function emitCoWTuple(
   for (let i = optoutStart; i < N; i++) {
     const p = itemProducts[i]!;
     const drop = dropsWhenAbsent(items[i]!); // known at compile time → emit only the branch that applies
+    // The first tail slot always sees fillLen === optoutStart (set just above): no gate to emit
+    const gated = i > optoutStart;
+    /** The official truncation of an absent slot: `out.length = i` */
+    const emitAbsentTruncate = (): void => {
+      ctx.write(`${fillLen} = ${i};`);
+      emitTruncate(i);
+    };
+    /** The official IIFE branch on its result `t`: INVALID/undefined → truncate, a value → out[i] = t (extends the shape) */
+    const emitFill = (t: string): void => {
+      ctx.write(`if (${t} === INVALID || ${t} === undefined) {`);
+      ctx.indented(emitAbsentTruncate);
+      ctx.write(`} else {`);
+      ctx.indented(() => {
+        ctx.write(copyAt(String(i)));
+        ctx.write(`${out}[${i}] = ${t};`);
+        ctx.write(`${fillLen} = ${i + 1};`);
+      });
+      ctx.write(`}`);
+    };
     ctx.write(`{`);
     ctx.indented(() => {
-      // The first tail slot always sees fillLen === optoutStart (set just above): no gate to emit
-      const gated = i > optoutStart;
+      if (syncRest) {
+        // The sync rest layout runs every slot at its stock position, gated or not, and holds its result: stock's
+        // runtime runs every item before the rest and decides presence after it, so a slot an earlier truncation
+        // gates out of the assembly here may still be assembled by `handleTupleResults` when the rest moved the
+        // length over it (fourth review of #88). Only the assembly stays behind the official gate
+        if (slotLen[i] !== guardLen) ctx.write(`${slotLen[i]} = ${accessor}.length;`);
+        ctx.write(`if (${i} < ${slotLen[i]}) {`);
+        ctx.indented(() => {
+          const e = readSlot(i);
+          const t = p.kind === "validator" ? e : ctx.var();
+          if (p.kind === "validator") {
+            ctx.write(`if ((${slotCall(i, e)}) === INVALID) return INVALID;`);
+          } else {
+            ctx.write(`const ${t} = ${slotCall(i, e)};`);
+            ctx.write(`if (${t} === INVALID) return INVALID;`);
+          }
+          keepSlot(String(i), t);
+          ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
+          ctx.indented(() => {
+            if (p.kind === "validator") {
+              ctx.write(`if (${out} !== ${accessor}) ${out}[${i}] = ${e};`);
+              ctx.write(`else if (${isHole(e, String(i))}) {`);
+              ctx.indented(() => emitHole(String(i)));
+              ctx.write(`}`);
+            } else {
+              ctx.write(`if (${out} !== ${accessor}) ${out}[${i}] = ${t};`);
+              ctx.write(`else if (${t} !== ${e} || (${isHole(e, String(i))})) {`);
+              ctx.indented(() => {
+                ctx.write(copyAt(String(i)));
+                ctx.write(`${out}[${i}] = ${t};`);
+              });
+              ctx.write(`}`);
+            }
+            ctx.write(`${fillLen} = ${i + 1};`);
+          });
+          ctx.write(`}`);
+        });
+        ctx.write(`} else {`);
+        ctx.indented(() => {
+          if (drop) {
+            // The official dropsWhenAbsent branch: nothing runs, the held result stays `undefined` (what the item's run
+            // on `undefined` supplies), out.length = i
+            ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
+            ctx.indented(emitAbsentTruncate);
+            ctx.write(`}`);
+          } else if (p.kind === "validator") {
+            // Pure-subtree slot absent: check child(undefined) (the pure optional family always passes; INVALID guarded defensively) → output = undefined → the official truncation
+            ctx.write(`if ((${slotCall(i, "undefined")}) === INVALID) return INVALID;`);
+            ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
+            ctx.indented(emitAbsentTruncate);
+            ctx.write(`}`);
+          } else {
+            // The official IIFE branch, its result held as it came (INVALID included: stock drops that failure with the
+            // truncation, and reports it when the rest moved the length over the slot)
+            ctx.write(`${slotOut[i]} = ${slotCall(i, "undefined")};`);
+            ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
+            ctx.indented(() => emitFill(slotOut[i]!));
+            ctx.write(`}`);
+          }
+        });
+        ctx.write(`}`);
+        return;
+      }
       ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
       ctx.indented(() => {
         ctx.write(`if (${i} < ${accessor}.length) {`);
@@ -329,30 +486,16 @@ export function emitCoWTuple(
         ctx.indented(() => {
           if (drop) {
             // The official dropsWhenAbsent branch: out.length = i (truncation)
-            ctx.write(`${fillLen} = ${i};`);
-            emitTruncate(i);
+            emitAbsentTruncate();
           } else if (p.kind === "validator") {
             // Pure-subtree slot absent: check child(undefined) (the pure optional family always passes; INVALID guarded defensively) → output = undefined → the official truncation
             ctx.write(`if ((${slotCall(i, "undefined")}) === INVALID) return INVALID;`);
-            ctx.write(`${fillLen} = ${i};`);
-            emitTruncate(i);
+            emitAbsentTruncate();
           } else {
             // The official IIFE branch: branch = child(undefined); INVALID/undefined → truncate, a value → out[i] = branch (extends the shape)
             const t = ctx.var();
             ctx.write(`const ${t} = ${slotCall(i, "undefined")};`);
-            ctx.write(`if (${t} === INVALID || ${t} === undefined) {`);
-            ctx.indented(() => {
-              ctx.write(`${fillLen} = ${i};`);
-              emitTruncate(i);
-            });
-            ctx.write(`} else {`);
-            ctx.indented(() => {
-              keepSlot(String(i), t);
-              ctx.write(copyAt(String(i)));
-              ctx.write(`${out}[${i}] = ${t};`);
-              ctx.write(`${fillLen} = ${i + 1};`);
-            });
-            ctx.write(`}`);
+            emitFill(t);
           }
         });
         ctx.write(`}`);
@@ -361,6 +504,163 @@ export function emitCoWTuple(
     });
     ctx.write(`}`);
   }
+
+  /**
+   * The sync rest layout's segment 3 and the presence decision after it (the header's timeline). `slice` is read
+   * once; the native one is run by hand when the constructor is `Array` and the species is `Array`, with the reads
+   * the native slice makes, in its order, and the copy consumed by the inline rest loop when the array iterator is
+   * intact; every other case is a continuation that consumes an iterable with `for...of` like stock (the copy under
+   * a replaced iterator, the native builtin finished on the facade, or what the custom `slice` answered) and collects
+   * the rest results. Then the live length is read once and stock's `handleTupleResults` runs over the held results
+   * whenever a continuation ran or the length differs from any read the fixed slots and the copy decided with.
+   */
+  const emitSyncRest = (emitRestLoop: () => void): void => {
+    const sliceFn = ctx.var();
+    const len = ctx.var();
+    const ctor = ctx.var();
+    const species = ctx.var();
+    /** The iterable a continuation consumes; `undefined` when the inline rest loop ran on the copy */
+    const iterable = ctx.var();
+    /** Whether the inline rest loop ran (a custom `slice` may answer `undefined`, so the iterable local cannot tell) */
+    const inline = ctx.var();
+    ctx.write(`const ${sliceFn} = ${accessor}.slice;`);
+    ctx.write(
+      `let ${len}, ${ctor}, ${species}, ${iterable}, ${restReads} = null, ${inline} = false;`,
+    );
+    ctx.write(`if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)}) {`);
+    ctx.indented(() => {
+      // The native slice's reads, in its order: `LengthOfArrayLike` (one read, `ToNumber` once; `ToLength` floors a
+      // fraction and gives an empty copy for NaN, a negative or a short input, a BigInt or a Symbol throws the
+      // `TypeError` `ToNumber` throws), then `ArraySpeciesCreate` reads the constructor and, off an `Array`
+      // constructor, the species (the built-in getter, or a getter installed on `Array`: the one read that runs user
+      // code, made here where the builtin makes it, once)
+      ctx.write(`${len} = +${accessor}.length;`);
+      ctx.write(`${ctor} = ${accessor}.constructor;`);
+      ctx.write(`if (${ctor} === Array && (${species} = Array[Symbol.species]) === Array) {`);
+      ctx.indented(() => {
+        // `ArrayCreate` and the builtin's stores run no user code: the copy stands in for them. `in` then the read per
+        // index is slice's `HasProperty` then `Get` (a Proxy whose `has` denies an index gets a hole there), a slot
+        // written when `in` answered so a hole stays a hole; the own-ness question an `undefined` raises for the CoW
+        // decision is asked from the rest loop's hole test (`isHole`, #95)
+        ctx.write(`${restReads} = new Array(${len} > ${N} ? Math.floor(${len}) - ${N} : 0);`);
+        ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
+        ctx.indented(() => {
+          ctx.write(`if ((${N} + j) in ${accessor}) ${restReads}[j] = ${accessor}[${N} + j];`);
+        });
+        ctx.write(`}`);
+        // Stock's `for...of` over that array runs the array iterator and its `next`: both data properties, compared
+        // against the captured ones after the copy (the last user code before stock reads them is the per-index
+        // read); replaced, the copy is consumed with `for...of` like stock's result
+        ctx.write(
+          `if (Array.prototype[Symbol.iterator] === ${ctx.addConst(NATIVE_ARRAY_ITERATOR)} && ${ctx.addConst(ARRAY_ITERATOR_PROTOTYPE)}.next === ${ctx.addConst(NATIVE_ARRAY_NEXT)}) {`,
+        );
+        ctx.indented(() => {
+          ctx.write(`${inline} = true;`);
+          emitRestLoop();
+        });
+        ctx.write(`} else {`);
+        ctx.indented(() => {
+          ctx.write(`${iterable} = ${restReads};`);
+        });
+        ctx.write(`}`);
+      });
+      ctx.write(`} else {`);
+      ctx.indented(() => {
+        // Another constructor (a subclass instance, an own or inherited `constructor`, another realm's `Array`) or
+        // another species: the builtin finishes from the reads made above, without repeating any of them
+        ctx.write(
+          `${iterable} = ${ctx.addConst(nativeSliceFrom)}(${accessor}, ${len}, ${ctor} === Array ? { [Symbol.species]: ${species} } : ${ctor}, ${N});`,
+        );
+      });
+      ctx.write(`}`);
+    });
+    ctx.write(`} else {`);
+    ctx.indented(() => {
+      // Any other `slice` (an own one, a subclass override, a replaced `Array.prototype.slice`): the call stock's
+      // runtime makes, on the function that was read
+      ctx.write(`${iterable} = ${ctx.addConst(NATIVE_APPLY)}(${sliceFn}, ${accessor}, [${N}]);`);
+    });
+    ctx.write(`}`);
+    /** The continuation's rest results, in yield order */
+    const results = ctx.var();
+    ctx.write(`let ${results} = null;`);
+    ctx.write(`if (!${inline}) {`);
+    ctx.indented(() => {
+      ctx.write(`${results} = [];`);
+      // `rest`, block-scoped: the name stock's runtime iterates, so a non-iterable throws the engine's `TypeError`
+      // with stock's message
+      ctx.write(`const rest = ${iterable};`);
+      ctx.write(`for (const e of rest) {`);
+      ctx.indented(() => {
+        if (restProduct!.kind === "validator") {
+          ctx.write(`if ((${restFn}(e)) === INVALID) return INVALID;`);
+          ctx.write(`${results}.push(e);`);
+        } else {
+          ctx.write(`const t = ${restFn}(e);`);
+          ctx.write(`if (t === INVALID) return INVALID;`);
+          ctx.write(`${results}.push(t);`);
+        }
+      });
+      ctx.write(`}`);
+    });
+    ctx.write(`}`);
+    // Stock's `handleTupleResults`: presence from the live length, read here, after the rest ran. A length nothing
+    // moved since the guard, the fixed slots and the copy read it (the copy's read compared as the number it was
+    // converted to) leaves the inline assembly, which is that algorithm for a length that holds; otherwise it runs
+    // over the held results: the leading loop truncates at the first
+    // optional-in slot at or past `optoutStart` the length excludes (or an excluded slot whose run failed), reports a
+    // covered slot's failure, and writes every result it passes; the rest results follow; the trailing loop drops
+    // trailing `undefined` results of optional-out slots the length excludes and, past `items`, throws where stock
+    // throws (the same read on the same `items`, so the engine's own `TypeError` and message)
+    const live = ctx.var();
+    ctx.write(`const ${live} = ${accessor}.length;`);
+    const holds = [
+      ...[guardLen, ...slotLen.filter((v) => v !== guardLen)].map((v) => `${live} === ${v}`),
+      `+${live} === ${len}`,
+    ].join(" && ");
+    ctx.write(`if (${results} !== null || !(${holds})) {`);
+    ctx.indented(() => {
+      const itemsConst = ctx.addConst(items);
+      const held = ctx.var();
+      const final = ctx.var();
+      const fromOut = ctx.var();
+      ctx.write(`const ${held} = [${slotOut.join(", ")}];`);
+      ctx.write(`const ${final} = [];`);
+      ctx.write(`let i = 0;`);
+      ctx.write(`for (; i < ${N}; i++) {`);
+      ctx.indented(() => {
+        ctx.write(`const present = i < ${live};`);
+        ctx.write(
+          `if (!present && i >= ${optoutStart} && ${ctx.addConst(optinOptional)}(${itemsConst}, i)) break;`,
+        );
+        ctx.write(
+          `if (${held}[i] === INVALID) { if (!present && i >= ${optoutStart}) break; return INVALID; }`,
+        );
+        ctx.write(`${final}[i] = ${held}[i];`);
+      });
+      ctx.write(`}`);
+      ctx.write(`if (i === ${N}) {`);
+      ctx.indented(() => {
+        // The rest results: the continuation's, or the inline loop's, which wrote every one into the copy when it
+        // copied and left the copy's elements standing (each equal to its result) when it did not
+        ctx.write(`const ${fromOut} = ${out} !== ${accessor};`);
+        ctx.write(
+          `const rs = ${results} !== null ? ${results} : ${fromOut} ? ${out} : ${restReads}, off = ${results} === null && ${fromOut} ? ${N} : 0, k = ${results} !== null ? ${results}.length : ${restReads}.length;`,
+        );
+        ctx.write(`for (let j = 0; j < k; j++) ${final}[${N} + j] = rs[off + j];`);
+      });
+      ctx.write(`}`);
+      ctx.write(`for (let j = ${final}.length - 1; j >= ${live}; j--) {`);
+      ctx.indented(() => {
+        ctx.write(
+          `if (${ctx.addConst(optoutOptional)}(${itemsConst}, j) && ${final}[j] === undefined) ${final}.length = j; else break;`,
+        );
+      });
+      ctx.write(`}`);
+      ctx.write(`${out} = ${final};`);
+    });
+    ctx.write(`}`);
+  };
 
   /* Segment 3: rest [N, L) -- the official ungated per-slot write over stock's slice, taken here in the sync layout
      (after every fixed slot ran, before any rest element runs, #78) and before the await in the async one (#77) */
@@ -398,85 +698,7 @@ export function emitCoWTuple(
     if (anyAsync) {
       emitRestLoop();
     } else {
-      // Stock's `input.slice(N)` by hand (#87) when the input's `slice` is the native one, its constructor is `Array`
-      // and `Array[Symbol.species]` is `Array` (the native slice builds its result through `ArraySpeciesCreate`, which
-      // reads the species off that constructor, third review of #88): `slice` is read once, like stock's call reads it
-      // (second review of #88); the length is read once and converted once, as slice's `LengthOfArrayLike` converts
-      // it (`+`, then floored: a fraction, a negative, NaN or a string gives the count `ToLength` gives, a BigInt or a
-      // Symbol the `TypeError` `ToNumber` throws, third review of #88), and read before the constructor and the
-      // species, as slice reads its length before `ArraySpeciesCreate`, so a species getter that changes the length
-      // changes nothing the copy has not already fixed (fourth review of #88); an accepted Proxy sees one `length`
-      // read here like under `slice`; a short input gives an empty copy; each index is asked `in` before it is read,
-      // as `slice` runs `HasProperty` then `Get`, and written when `in` answered, as slice writes it (a Proxy whose
-      // `has` denies an index gets a hole there, like under `slice`, second review of #88); nothing else is asked of
-      // the input here, the own-ness question an `undefined` value raises for the CoW decision is asked from the rest
-      // loop's hole test (`isHole` above, third review of #88). Any other input takes the call stock's runtime makes
-      // and the output is assembled from what it returned (review of #88): an own `slice`, a subclass override or a
-      // replaced `Array.prototype.slice` since that is the function stock calls, a subclass instance with the native
-      // `slice` or a plain array under a replaced species since the native one constructs its result through that
-      // species constructor. The copy is forced from the fixed prefix, since the clean path could otherwise return the
-      // input where stock's output holds what the call returned, and the result is consumed as stock consumes it:
-      // `for...of`, the rest element run on each yielded value in turn (second review of #88)
-      const sliceFn = ctx.var();
-      const len = ctx.var();
-      ctx.write(`const ${sliceFn} = ${accessor}.slice;`);
-      ctx.write(`let ${len};`);
-      ctx.write(
-        `if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)} && (${len} = +${accessor}.length, ${accessor}.constructor === Array && Array[Symbol.species] === Array)) {`,
-      );
-      ctx.indented(() => {
-        ctx.write(`const ${restReads} = new Array(${len} > ${N} ? Math.floor(${len}) - ${N} : 0);`);
-        ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
-        ctx.indented(() => {
-          ctx.write(`if ((${N} + j) in ${accessor}) ${restReads}[j] = ${accessor}[${N} + j];`);
-        });
-        ctx.write(`}`);
-        emitRestLoop();
-      });
-      ctx.write(`} else {`);
-      ctx.indented(() => {
-        // The fixed prefix is the results the fixed slots produced, truncated to what they filled, as stock assembles
-        // it from `itemResults`: never the input, which the `slice` read above (a getter) or the call below may have
-        // written to (fourth review of #88); a copy a fixed slot already made holds those results already
-        ctx.write(
-          `if (${out} === ${accessor}) { ${out} = [${slotOut.join(", ")}]; ${out}.length = ${fillLen}; }`,
-        );
-        // Stock's `handleTupleResults` decides each fixed slot's presence from the live length after the call: a call
-        // that moves the length across a fixed slot changes that assembly (a shrink truncates at the first `drop` slot
-        // it uncovers, a growth keeps what an absent slot's run on `undefined` gave, which a `drop` slot never ran
-        // here), so such a parse is handed to stock, whose run sees the input as the call left it; a change that
-        // leaves every fixed slot's presence as it was is assembled here (fourth review of #88)
-        const before = ctx.var();
-        ctx.write(`const ${before} = ${accessor}.length;`);
-        const k = ctx.var();
-        ctx.write(`let ${k} = 0;`);
-        ctx.write(
-          `for (const e of ${ctx.addConst(NATIVE_APPLY)}(${sliceFn}, ${accessor}, [${N}])) {`,
-        );
-        ctx.indented(() => {
-          // A truncated prefix (an absent optional slot) drops the rest in stock's `handleTupleResults` after every
-          // rest element ran, so its elements are validated and none is written
-          if (restProduct.kind === "validator") {
-            ctx.write(`if ((${restFn}(e)) === INVALID) return INVALID;`);
-            ctx.write(`if (${fillLen} === ${N}) ${out}[${N} + ${k}] = e;`);
-          } else {
-            ctx.write(`const t = ${restFn}(e);`);
-            ctx.write(`if (t === INVALID) return INVALID;`);
-            ctx.write(`if (${fillLen} === ${N}) ${out}[${N} + ${k}] = t;`);
-          }
-          ctx.write(`${k}++;`);
-        });
-        ctx.write(`}`);
-        const after = ctx.var();
-        ctx.write(`const ${after} = ${accessor}.length;`);
-        ctx.write(
-          `if ((${before} < ${N} ? ${before} : ${N}) !== (${after} < ${N} ? ${after} : ${N})) return INVALID;`,
-        );
-        // More elements than the input holds past the fixed slots: stock's `handleTupleResults` walks `items` past
-        // its end there and throws a TypeError, so such a parse goes to stock, whose throw is the result
-        ctx.write(`if (${k} !== 0 && ${N} + ${k} > ${after}) return INVALID;`);
-      });
-      ctx.write(`}`);
+      emitSyncRest(emitRestLoop);
     }
   }
 

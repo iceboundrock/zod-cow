@@ -658,22 +658,33 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    the rest part of the prefix from it, so a sync rest callback that overwrites a later rest slot is not observed by
    either layout, as stock does not observe it. The slice is the one allocation on the clean path of a tuple with a
    rest element (a tuple without one still allocates nothing). The sync layout builds it by hand (#87): `new Array(n)`
-   with `slice` and the length each read once, an empty copy when the input is shorter than the fixed slots, each
-   index asked `in` before it is read (`slice` runs `HasProperty` then `Get`, so a Proxy whose `has` trap denies an
-   index gets a hole there under both, second review of #88), and a slot written only when its value is defined or the
-   index is own, so a hole stays a hole and the hole test stays `Object.hasOwn` on the copy. The copy runs only when
-   the input's `slice` is the native one and its constructor is `Array` (two property reads and compares): stock's
-   runtime calls `input.slice(items.length)` and iterates what came back with `for...of`, so an input carrying another
-   `slice` (an own `slice`, a subclass override, a replaced `Array.prototype.slice`) or a subclass instance, whose
-   native `slice` constructs its result through the species constructor, takes that call on the function that was
-   read, the copy is forced from the fixed prefix so the output is assembled from what the call returned, and the
-   result is consumed as stock consumes it: `for...of`, the rest element run on each yielded value in turn (a Set, a
-   generator, any iterable), the elements a truncated prefix drops in stock's `handleTupleResults` validated and
-   dropped too, and a result with more elements than the input holds past the fixed slots handed to stock, whose
-   `handleTupleResults` throws a `TypeError` there (review of #88 and its second round; the slice of #86 returned the
-   input by reference there under a validator-shaped rest, which compares nothing against the live input). What a
-   Proxy still sees differently is order only: the copy reads `constructor` before `length` where `slice` reads them
-   the other way round, and an `undefined` value costs it a `getOwnPropertyDescriptor` that `slice` does not make.
+   with `slice` and the length each read once, the length converted once as slice's `LengthOfArrayLike` converts it
+   (`ToLength`: a fraction is floored, `NaN`, a negative or a non-numeric string gives an empty copy, a BigInt or a
+   Symbol the `TypeError` `ToNumber` throws, third review of #88), an empty copy when the input is shorter than the
+   fixed slots, each index asked `in` before it is read (`slice` runs `HasProperty` then `Get`, so a Proxy whose `has`
+   trap denies an index gets a hole there under both, second review of #88) and written when `in` answered, as slice
+   writes it, so a hole stays a hole. The copy asks nothing else of the input: the own-ness question an `undefined`
+   value raises for the CoW decision (an inherited `undefined` under a hole is a hole, where stock's output holds an
+   own slot) is asked from the rest loop's hole test, on the copy and then on the input, only when the rest element's
+   output equals that `undefined`. That is the hole test every array position makes (`Object.hasOwn` on the input, a
+   `getOwnPropertyDescriptor` trap stock never runs, whose effects, a mutation of a later index or a throw, are
+   observed there on the array skeleton and the tuple's fixed slots alike, #95), and a transform rest that rewrites
+   `undefined` never reaches it (third review of #88). The copy runs only when the input's `slice` is the native one,
+   its constructor is `Array` and `Array[Symbol.species]` is `Array` (three property reads and compares): stock's
+   runtime calls `input.slice(items.length)` and iterates what came back with `for...of`, and the native slice builds
+   its result through `ArraySpeciesCreate`, so an input carrying another `slice` (an own `slice`, a subclass override,
+   a replaced `Array.prototype.slice`), a subclass instance or a plain array under a replaced species, whose native
+   `slice` constructs its result through that species constructor, takes that call on the function that was read,
+   the copy is forced from the fixed prefix so the output is assembled from what the call returned, and the result is
+   consumed as stock consumes it: `for...of`, the rest element run on each yielded value in turn (a Set, a generator,
+   any iterable), the elements a truncated prefix drops in stock's `handleTupleResults` validated and dropped too, and
+   a result with more elements than the input holds past the fixed slots handed to stock, whose `handleTupleResults`
+   throws a `TypeError` there (review of #88 and its second and third rounds; the slice of #86 returned the input by
+   reference there under a validator-shaped rest, which compares nothing against the live input, and indexed a
+   species-built result by `length` where stock iterates it). What a Proxy still sees differently in the copy is order
+   only: it reads `constructor` before `length` where `slice` reads them the other way round. A Proxy that
+   under-reports its `length` keeps the clean path, on every array-shaped skeleton (#95): no element past the reported
+   length is read, as under `slice`, and stock's fresh output is the truncated one.
    `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
    the copy), the inlined loop about a third of that at a short rest; measured on #87, a clean parse of `[string,
    ...string[]]` with one rest element went from 75 ns under `slice` to 58 ns, with sixteen it is unchanged, against

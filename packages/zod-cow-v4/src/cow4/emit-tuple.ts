@@ -42,14 +42,16 @@ const NATIVE_APPLY = Reflect.apply;
  * one allocation on the clean path of a tuple with a rest element (a tuple without one allocates nothing).
  * The sync layout builds the slice by hand (#87): `Array.prototype.slice` costs a near-constant 30 ns per call
  * (its species lookup and generic entry, not the copy), where an inlined `new Array(n)` plus a copy loop costs
- * a third at a short rest. The loop reads the length once before any rest element runs, gives an empty copy
- * when the input is shorter than the fixed slots, and writes a slot only when its value is defined or the
- * index is own, so a hole stays a hole as under `slice` and the hole test below needs no change. It asks `in`
- * before each read, as `slice` runs `HasProperty` then `Get`, and runs only when the input's `slice` (read once)
- * is the native one and its constructor is `Array`; any other input takes the call stock's runtime makes on
+ * a third at a short rest. The loop reads the length once before any rest element runs and converts it as
+ * `slice` does (`ToLength`), gives an empty copy when the input is shorter than the fixed slots, asks `in`
+ * before each read, as `slice` runs `HasProperty` then `Get`, and writes a slot when `in` answered, as `slice`
+ * writes it, so a hole stays a hole; the own-ness probe an `undefined` value raises for the CoW decision moved
+ * from the copy loop into the rest loop's hole test, where a rest element whose output differs never raises it
+ * (third review of #88). It runs only when the input's `slice` (read once) is the native one, its constructor
+ * is `Array` and `Array[Symbol.species]` is `Array`; any other input takes the call stock's runtime makes on
  * the function that was read, the copy is forced, and the result is consumed with `for...of`, the rest element
  * run per yielded value, so the output is assembled from what the call returned like stock's (review of #88
- * and its second round).
+ * and its second and third rounds).
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -185,9 +187,18 @@ export function emitCoWTuple(
   };
   /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); a
    *  rest element's is read off the slice, which kept it (#77, #78), and the async layout decided a fixed slot's before
-   *  the await */
+   *  the await. The sync layout's hand copy holds an own slot wherever `in` answered (slice's `HasProperty`), so an
+   *  `undefined` the copy owns still asks the input whether it owns the index, the probe every array position makes
+   *  on an `undefined` value, from here rather than from the copy loop, so a rest element whose output differs never
+   *  raises it (third review of #88); the async layout reads nothing from the input after its await (#77) and keeps
+   *  the slice's answer */
   const isHole = (eVar: string, idxExpr: string): string => {
-    if (idxExpr === "i") return `${eVar} === undefined && !Object.hasOwn(${restReads}, i - ${N})`;
+    if (idxExpr === "i") {
+      const onCopy = `!Object.hasOwn(${restReads}, i - ${N})`;
+      return anyAsync
+        ? `${eVar} === undefined && ${onCopy}`
+        : `${eVar} === undefined && (${onCopy} || !Object.hasOwn(${accessor}, i))`;
+    }
     if (!anyAsync) return `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
     return slotHole[Number(idxExpr)]!;
   };
@@ -368,38 +379,35 @@ export function emitCoWTuple(
     if (anyAsync) {
       emitRestLoop();
     } else {
-      // Stock's `input.slice(N)` by hand (#87) when the input's `slice` is the native one and its constructor is
-      // `Array`: `slice` is read once, like stock's call reads it (second review of #88); the length is read once
-      // (one local, so an accepted Proxy sees one `length` read here like under `slice`); a short input gives an
-      // empty copy; each index is asked `in` before it is read, as `slice` runs `HasProperty` then `Get` (a Proxy
-      // whose `has` denies an index gets a hole there, like under `slice`, second review of #88); a slot is written
-      // only when its value is defined or the index is own, so a hole stays a hole (an inherited `undefined` under
-      // a hole is one, which stock's output then materializes). Any other input takes the call stock's runtime
-      // makes and the output is assembled from what it returned (review of #88): an own `slice`, a subclass override
-      // or a replaced `Array.prototype.slice` since that is the function stock calls, a subclass instance with the
-      // native `slice` since the native one constructs its result through the instance's species constructor. The
-      // copy is forced from the fixed prefix, since the clean path could otherwise return the input where stock's
-      // output holds what the call returned, and the result is consumed as stock consumes it: `for...of`, the rest
-      // element run on each yielded value in turn (second review of #88)
+      // Stock's `input.slice(N)` by hand (#87) when the input's `slice` is the native one, its constructor is `Array`
+      // and `Array[Symbol.species]` is `Array` (the native slice builds its result through `ArraySpeciesCreate`, which
+      // reads the species off that constructor, third review of #88): `slice` is read once, like stock's call reads it
+      // (second review of #88); the length is read once and converted once, as slice's `LengthOfArrayLike` converts
+      // it (`+`, then floored: a fraction, a negative, NaN or a string gives the count `ToLength` gives, a BigInt or a
+      // Symbol the `TypeError` `ToNumber` throws, third review of #88), so an accepted Proxy sees one `length` read
+      // here like under `slice`; a short input gives an empty copy; each index is asked `in` before it is read, as
+      // `slice` runs `HasProperty` then `Get`, and written when `in` answered, as slice writes it (a Proxy whose `has`
+      // denies an index gets a hole there, like under `slice`, second review of #88); nothing else is asked of the
+      // input here, the own-ness question an `undefined` value raises for the CoW decision is asked from the rest
+      // loop's hole test (`isHole` above, third review of #88). Any other input takes the call stock's runtime makes
+      // and the output is assembled from what it returned (review of #88): an own `slice`, a subclass override or a
+      // replaced `Array.prototype.slice` since that is the function stock calls, a subclass instance with the native
+      // `slice` or a plain array under a replaced species since the native one constructs its result through that
+      // species constructor. The copy is forced from the fixed prefix, since the clean path could otherwise return the
+      // input where stock's output holds what the call returned, and the result is consumed as stock consumes it:
+      // `for...of`, the rest element run on each yielded value in turn (second review of #88)
       const sliceFn = ctx.var();
       const len = ctx.var();
       ctx.write(`const ${sliceFn} = ${accessor}.slice;`);
       ctx.write(
-        `if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)} && ${accessor}.constructor === Array) {`,
+        `if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)} && ${accessor}.constructor === Array && Array[Symbol.species] === Array) {`,
       );
       ctx.indented(() => {
-        ctx.write(`const ${len} = ${accessor}.length;`);
-        ctx.write(`const ${restReads} = new Array(${len} > ${N} ? ${len} - ${N} : 0);`);
+        ctx.write(`const ${len} = +${accessor}.length;`);
+        ctx.write(`const ${restReads} = new Array(${len} > ${N} ? Math.floor(${len}) - ${N} : 0);`);
         ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
         ctx.indented(() => {
-          ctx.write(`if ((${N} + j) in ${accessor}) {`);
-          ctx.indented(() => {
-            ctx.write(`const v = ${accessor}[${N} + j];`);
-            ctx.write(
-              `if (v !== undefined || Object.hasOwn(${accessor}, ${N} + j)) ${restReads}[j] = v;`,
-            );
-          });
-          ctx.write(`}`);
+          ctx.write(`if ((${N} + j) in ${accessor}) ${restReads}[j] = ${accessor}[${N} + j];`);
         });
         ctx.write(`}`);
         emitRestLoop();

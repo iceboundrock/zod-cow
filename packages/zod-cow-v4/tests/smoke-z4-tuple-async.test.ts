@@ -1491,20 +1491,301 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     // A plain array's constructor is Array: the hand copy runs and nothing is constructed
     ok("a subclass instance with the native slice takes the real call, like stock");
   }
+  // The native slice constructs its result through `ArraySpeciesCreate` (third review of #88): with `constructor ===
+  // Array` it still reads `Array[Symbol.species]`, so a replaced species constructor runs under stock and builds the
+  // result stock's `for...of` then consumes. The guard also asks `Array[Symbol.species] === Array`; a swapped species
+  // takes the real call, like a subclass instance does (the compiler itself is not exercised under the swap: its own
+  // `slice` calls would build through it too, so the products are compiled first)
+  {
+    const T = z.tuple(
+      [z.string()],
+      z.string().transform((v) => `${v}!`),
+    );
+    const V = z.tuple([z.string()], z.string());
+    const CT = compile(T);
+    const CV = compile(V);
+    const ctorArgs: unknown[][] = [];
+    // `splice` would construct through the swapped species too: a spread takes the log
+    const take = (): unknown[][] => {
+      const c = [...ctorArgs];
+      ctorArgs.length = 0;
+      return c;
+    };
+    const desc = Object.getOwnPropertyDescriptor(Array, Symbol.species)!;
+    const seen: {
+      label: string;
+      stock: unknown;
+      stockCtors: unknown[][];
+      cow: unknown;
+      cowCtors: unknown[][];
+      fresh: boolean;
+      plain: boolean;
+    }[] = [];
+    let underUndefined: [unknown, unknown] | null = null;
+    try {
+      Object.defineProperty(Array, Symbol.species, {
+        configurable: true,
+        get() {
+          return function Custom(...args: unknown[]) {
+            ctorArgs.push(args);
+            const o: Record<PropertyKey, unknown> = { length: 0 };
+            o[Symbol.iterator] = function* () {
+              yield "CUSTOM";
+            };
+            return o;
+          };
+        },
+      });
+      for (const [label, S, C] of [
+        ["transform rest", T, CT],
+        ["validator rest", V, CV],
+      ] as [string, z.ZodType, ReturnType<typeof compile>][]) {
+        ctorArgs.length = 0;
+        const stock = S.parse(["h", "a", "b"]);
+        const stockCtors = take();
+        const input = ["h", "a", "b"];
+        const cow = C.parse(input);
+        const cowCtors = take();
+        seen.push({
+          label,
+          stock,
+          stockCtors,
+          cow,
+          cowCtors,
+          fresh: cow !== input,
+          plain: Object.getPrototypeOf(cow) === Array.prototype,
+        });
+      }
+      // A species of `undefined` makes the native slice build a plain array (`ArrayCreate`): the real call, the same output
+      Object.defineProperty(Array, Symbol.species, { configurable: true, value: undefined });
+      underUndefined = [T.parse(["h", "a", "b"]), CT.parse(["h", "a", "b"])];
+    } finally {
+      Object.defineProperty(Array, Symbol.species, desc);
+    }
+    for (const s of seen) {
+      assert.deepEqual(
+        s.stock,
+        s.label === "transform rest" ? ["h", "CUSTOM!"] : ["h", "CUSTOM"],
+        `${s.label}: stock consumes what the species constructor built`,
+      );
+      assert.deepEqual(
+        s.stockCtors,
+        [[2]],
+        `${s.label}: stock's slice constructs through the species`,
+      );
+      assert.deepEqual(s.cow, s.stock, `${s.label}: a swapped species takes the real call`);
+      assert.deepEqual(
+        s.cowCtors,
+        s.stockCtors,
+        `${s.label}: the species constructor runs like under stock`,
+      );
+      assert.ok(s.fresh && s.plain, `${s.label}: a fresh plain array, like stock's`);
+    }
+    assert.deepEqual(
+      underUndefined![1],
+      underUndefined![0],
+      "an undefined species: the same output",
+    );
+    assert.deepEqual(underUndefined![0], ["h", "a!", "b!"]);
+    assert.deepEqual(CT.parse(["h", "a", "b"]), ["h", "a!", "b!"], "restored: the hand copy again");
+    ok("a replaced Array[Symbol.species] takes the real call, like stock");
+  }
+  // The copy is slice's `HasProperty` then `Get` per index and nothing else (third review of #88). The own-ness
+  // question an `undefined` value raises for the CoW decision (an inherited `undefined` under a hole is a hole, where
+  // stock's output holds an own slot) is asked from the rest loop, only when the rest element's output equals that
+  // `undefined`: the hole test every array position makes (`Object.hasOwn` on the input, a `getOwnPropertyDescriptor`
+  // trap stock never runs). A transform rest that maps `undefined` to a value never asks it; a validator rest asks it
+  // after the copy, where the array skeleton asks it inline, and a trap with effects is observed there on both alike
+  {
+    const T = z.tuple(
+      [z.string()],
+      z
+        .string()
+        .optional()
+        .transform((v) => (v === undefined ? "U" : `${v}!`)),
+    );
+    const V = z.tuple([z.string()], z.string().optional());
+    const A = z.array(z.string().optional());
+    const log: string[] = [];
+    const mutating = () =>
+      new Proxy(["h", undefined, "b"] as unknown[], {
+        getOwnPropertyDescriptor(t, k) {
+          log.push(`gopd:${String(k)}`);
+          if (k === "1") t[2] = "MUT";
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+      });
+    const throwing = () =>
+      new Proxy(["h", undefined, "b"] as unknown[], {
+        getOwnPropertyDescriptor(t, k) {
+          if (k === "1") throw new Error("gopd trap");
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+      });
+    {
+      const stock = T.parse(mutating());
+      assert.deepEqual(
+        stock,
+        ["h", "U", "b!"],
+        "stock reads the later index before anything else runs",
+      );
+      log.length = 0;
+      const cow = compile(T).parse(mutating());
+      assert.deepEqual(
+        cow,
+        stock,
+        "the copy holds slice's values: every index read before any probe",
+      );
+      assert.deepEqual(log, [], "a transform rest asks no descriptor");
+      assert.deepEqual(
+        compile(T).parse(throwing()),
+        stock,
+        "a throwing descriptor trap is never consulted",
+      );
+    }
+    {
+      const stock = V.parse(mutating());
+      assert.deepEqual(stock, ["h", undefined, "b"]);
+      log.length = 0;
+      const input = mutating();
+      const cow = compile(V).parse(input);
+      assert.equal(
+        cow,
+        input,
+        "clean: an own undefined the validator passed, the input by reference",
+      );
+      assert.deepEqual(
+        log,
+        ["gopd:1"],
+        "one probe, from the rest loop, for the undefined value only",
+      );
+      assert.equal(
+        input[2],
+        "MUT",
+        "the trap's effect is observed, as the array skeleton's hole test observes it",
+      );
+      log.length = 0;
+      const arr = mutating();
+      assert.equal(compile(A).parse(arr), arr, "the array skeleton: the same clean path");
+      assert.deepEqual(log, ["gopd:1"], "the array skeleton asks the same probe");
+      assert.throws(
+        () => compile(V).parse(throwing()),
+        /gopd trap/,
+        "a validator rest consults the trap",
+      );
+      assert.throws(() => compile(A).parse(throwing()), /gopd trap/, "as the array skeleton does");
+    }
+    ok("the rest copy asks own-ness only where the array skeleton asks it");
+  }
+  // The one length read is coerced as slice's `LengthOfArrayLike` coerces it (third review of #88): `ToLength`, so a
+  // Proxy answering a fraction, a negative, a string or a non-number gives the count slice gives and never a
+  // `new Array(fraction)`; a BigInt or a Symbol throws the TypeError `ToNumber` throws on both sides, an infinite
+  // length the RangeError slice's allocation throws; an object is converted once, as `ToLength` converts it once
+  {
+    const T = z.tuple(
+      [z.string()],
+      z.string().transform((v) => `${v}!`),
+    );
+    const V = z.tuple([z.string()], z.string());
+    const withLength = (len: unknown) =>
+      new Proxy(["h", "a", "b"], {
+        get(t, k, r) {
+          return k === "length" ? len : Reflect.get(t, k, r);
+        },
+      });
+    // The count ToLength gives: 2.9 and "2" → 2 (one rest element), true and 1.5 → 1 (none), NaN and "x" → 0
+    // (none; both pass the skeleton's length guard, `NaN < 1` being false, as they pass stock's), -1 and null → 0
+    // (the guard hands them to stock). A rest element the transform rewrites copies (the output equals stock's); no
+    // rest element, or a validator rest, keeps the clean path and returns the input, on `main` alike (a Proxy
+    // under-reporting its length is the clean path's known limitation: stock's fresh output is the truncated one)
+    for (const [len, asInt, transform, validator] of [
+      [2.9, 2, "stock", "input"],
+      ["2", 2, "stock", "input"],
+      [true, 1, "input", "input"],
+      [1.5, 1, "input", "input"],
+      [Number.NaN, 0, "input", "input"],
+      ["x", 0, "input", "input"],
+      [-1, 0, "stock", "stock"],
+      [null, 0, "stock", "stock"],
+    ] as [unknown, number, "stock" | "input", "stock" | "input"][]) {
+      for (const [label, S, expect] of [
+        ["transform", T, transform],
+        ["validator", V, validator],
+      ] as [string, z.ZodType, "stock" | "input"][]) {
+        const stock = S.parse(withLength(len));
+        assert.deepEqual(
+          stock,
+          S.parse(withLength(asInt)),
+          `${label}: stock sees ToLength(${String(len)})`,
+        );
+        const input = withLength(len);
+        const cow = compile(S).parse(input);
+        if (expect === "input") {
+          assert.equal(
+            cow,
+            input,
+            `${label}: length ${String(len)} takes the clean path (${asInt} rest slots, none rewritten)`,
+          );
+        } else {
+          assert.deepEqual(cow, stock, `${label}: length ${String(len)} gives stock's output`);
+          assert.notEqual(cow, input);
+        }
+      }
+    }
+    assert.throws(() => T.parse(withLength(Number.POSITIVE_INFINITY)), RangeError);
+    assert.throws(
+      () => compile(T).parse(withLength(Number.POSITIVE_INFINITY)),
+      RangeError,
+      "an infinite length: slice's RangeError",
+    );
+    for (const bad of [1n, Symbol("len")]) {
+      assert.throws(() => T.parse(withLength(bad)), TypeError);
+      assert.throws(
+        () => compile(T).parse(withLength(bad)),
+        TypeError,
+        `${typeof bad}: ToNumber's TypeError, like stock`,
+      );
+    }
+    {
+      let stockCalls = 0;
+      let cowCalls = 0;
+      const counted = (counter: () => void) =>
+        withLength({
+          valueOf() {
+            counter();
+            return 2;
+          },
+        });
+      const stock = T.parse(counted(() => stockCalls++));
+      const cow = compile(T).parse(counted(() => cowCalls++));
+      assert.deepEqual(cow, stock);
+      assert.deepEqual(stock, ["h", "a!"]);
+      // The skeleton converts it twice in all: its length guard's comparison (stock's compiled check) and the copy's
+      // one conversion, as `main`'s slice converted it once; the head's copy converted it twice. Stock's runtime
+      // converts it three times (its slice, then the two presence loops of `handleTupleResults`)
+      assert.equal(cowCalls, 2, "the copy converts an object length once, like slice");
+      assert.ok(stockCalls >= cowCalls);
+    }
+    ok("the length read is coerced with ToLength, like slice");
+  }
   // Code pin: a rest tuple's sync skeleton reads `slice` once and copies the rest by hand (#87: `slice` pays a fixed
-  // builtin cost) behind a guard on the native `slice` and on `constructor === Array`, testing `in` before each read;
-  // the guard's other side calls what was read (through the hoisted `Reflect.apply`, never a second `.slice`) and
-  // iterates the result with `for...of`. A fixed tuple allocates nothing on its clean path
+  // builtin cost) behind a guard on the native `slice`, on `constructor === Array` and on the default species; the
+  // length is converted once and floored (`ToLength`), the copy loop is `in` then a store and nothing else, and the
+  // own-ness probe sits in the rest loop's hole test; the guard's other side calls what was read (through the hoisted
+  // `Reflect.apply`, never a second `.slice`) and iterates the result with `for...of`. A fixed tuple allocates nothing
+  // on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
-    /const (x\d+) = input\.slice;\s*if \(\1 === c\d+ && input\.constructor === Array\)/.test(
+    /const (x\d+) = input\.slice;\s*if \(\1 === c\d+ && input\.constructor === Array && Array\[Symbol\.species\] === Array\)/.test(
       restCode,
     ) &&
-      /new Array\(/.test(restCode) &&
-      /if \(\(1 \+ j\) in input\)/.test(restCode) &&
+      /const (x\d+) = \+input\.length;\s*const (x\d+) = new Array\(\1 > 1 \? Math\.floor\(\1\) - 1 : 0\);\s*for \(let j = 0; j < \2\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \2\[j\] = input\[1 \+ j\];\s*\}/.test(
+        restCode,
+      ) &&
+      /!Object\.hasOwn\(x\d+, i - 1\) \|\| !Object\.hasOwn\(input, i\)/.test(restCode) &&
       /for \(const \w+ of c\d+\(x\d+, input, \[1\]\)\)/.test(restCode) &&
       !/\.slice\(/.test(restCode),
-    "the sync rest layout copies by hand behind the native-slice guard",
+    "the sync rest layout copies by hand behind the three-part guard",
   );
   const fixedCode = compile(z.tuple([z.string(), z.number().optional()])).code ?? "";
   assert.ok(!/new Array\(|\.slice\(/.test(fixedCode), "a tuple without a rest takes no copy");

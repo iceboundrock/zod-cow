@@ -29,6 +29,8 @@
  *   S9 validation failures     boolean verdicts on invalid records (failures.ts)
  *   S10 failure position       detailed errors for a failure at the first key, the last key, a
  *                              nested key and a refine (failures.ts)
+ *   S11 wide objects           16-, 32- and 64-key flat objects, clean / extra key / dirty / strict,
+ *                              around the object skeleton's inline key-comparison cap (wide.ts)
  *
  * Fairness rules (see harness.ts and gates.ts): compilation and fixture construction stay outside
  * the timed region; every candidate gets the same warmup and the same rotated, gc()-separated
@@ -87,6 +89,7 @@ import {
   zcRun,
 } from "./schemas.js";
 import { runStripParity } from "./strip.js";
+import { runWideObjects } from "./wide.js";
 
 console.log(
   `bench-v4 · ${N.toLocaleString()} records · ${ITERS.toLocaleString()} operations per hot-loop round · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
@@ -735,11 +738,12 @@ for (const ratio of [0, 0.25, 0.5, 1.0]) {
   runs.push(run);
 }
 
-/* ─────────────────────────── S8, calibration, S9, S10 ─────────────────────────── */
+/* ─────────────────────────── S8, calibration, S9, S10, S11 ─────────────────────────── */
 
 runs.push(await runStripParity());
 runs.push(...(await runCalibration()));
 runs.push(...(await runFailures()));
+runs.push(...(await runWideObjects()));
 
 /* ─────────────────────────── Summary ─────────────────────────── */
 

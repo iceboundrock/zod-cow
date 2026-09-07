@@ -24,6 +24,17 @@ on:
         required: false
         default: "1000000"
         type: string
+      node_version:
+        description: "Node.js major to run on (24 is the README environment; 22 and 26 are the other CI lanes)"
+        required: false
+        default: "24"
+        type: choice
+        options: ["22", "24", "26"]
+      bench_only:
+        description: "Comma-separated scenario-id prefixes passed as BENCH_ONLY (e.g. S11); empty runs every scenario"
+        required: false
+        default: ""
+        type: string
   schedule:
     # Mondays 03:17 UTC (off the hour to avoid the top-of-hour rush).
     - cron: "17 3 * * 1"
@@ -41,10 +52,14 @@ env:
   # tenth of it (ERROR_ITERS in the bench scripts), so their microsecond
   # operations give rounds in the same range instead of several seconds.
   BENCH_ITERS: ${{ inputs.bench_iters || '1000000' }}
+  # Scenario filter for a re-measure of one change (#34): the bench scripts skip
+  # every scenario whose id does not start with one of the prefixes. Empty on
+  # the schedule, so the weekly run stays complete.
+  BENCH_ONLY: ${{ inputs.bench_only || '' }}
 
 jobs:
   bench:
-    name: bench (node 24, BENCH_N=${{ inputs.bench_n || '50000' }}, BENCH_ITERS=${{ inputs.bench_iters || '1000000' }})
+    name: bench (node ${{ inputs.node_version || '24' }}, BENCH_N=${{ inputs.bench_n || '50000' }}, BENCH_ITERS=${{ inputs.bench_iters || '1000000' }}${{ inputs.bench_only && format(', BENCH_ONLY={0}', inputs.bench_only) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -57,8 +72,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          # 24 = README benchmark environment
-          node-version: 24
+          # 24 = README benchmark environment; a dispatch may pick another CI
+          # lane (22 / 26) to check a decision across the matrix (#34)
+          node-version: ${{ inputs.node_version || '24' }}
           cache: pnpm
 
       - name: Install dependencies
@@ -103,10 +119,10 @@ jobs:
           {
             echo "## Benchmark run"
             echo
-            echo "> Results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N}, BENCH_ITERS=${BENCH_ITERS})."
+            echo "> Results from a GitHub-hosted runner (\`ubuntu-latest\`, node $(node --version), BENCH_N=${BENCH_N}, BENCH_ITERS=${BENCH_ITERS}${BENCH_ONLY:+, BENCH_ONLY=${BENCH_ONLY}})."
             echo "> The README and docs tables quote one run of this workflow by run id (node 24, BENCH_N=50000 for the batch scenarios, BENCH_ITERS=1000000 for the single-record hot loops)."
             if [ "${BENCH_N}" = "50000" ] && [ "${BENCH_ITERS}" = "1000000" ]; then
-              echo "> This run uses the same configuration, so it can be compared against the cited run; runner noise is a few milliseconds at this record count."
+              echo "> This run uses the same configuration, so it can be compared against the cited run; runner noise is a few milliseconds at this record count.${BENCH_ONLY:+ Only the scenarios matching BENCH_ONLY=${BENCH_ONLY} ran.}"
             else
               echo "> This run uses BENCH_N=${BENCH_N} and BENCH_ITERS=${BENCH_ITERS}, so its numbers are not comparable with the cited run; it only checks that the bench scripts still work."
             fi

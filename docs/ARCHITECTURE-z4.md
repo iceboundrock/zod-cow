@@ -734,20 +734,44 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
    under an async skeleton the sync API throws `$ZodAsyncError` (the same semantics as the official code; measured, a sync parse on an async tree does throw).
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
-   the Promise would leak out silently. `subtreeHasAsync` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
+   the Promise would leak out silently. `inspectSubtree` detects it statically (recursion over the def tree, covering the fn/superRefine of checks,
    the schema a `z.property` / `z.properties` check carries (review of #84), the transform of pipe, and expansion of the lazy getter, with a seen set to prevent cycles) → an async lazy goes through an async island instead.
    The same walk decides the island of a subtree whose stock compile failed for a non-async reason (#75): a symbol literal,
    coercion, `z.xor` or a `catch` callback throws `ZodCompileUnsupportedError` before stock's codegen reaches the checks, so that
    error says nothing about async, and the fallback of `officialFn` used to take the sync island. The island then met the
    Promise at parse time: `.async` reported false, and since #76 the async entries caught the throw and reran the parse in
-   stock's async runtime, so every callback ran twice and the CoW reference was lost. With `subtreeHasAsync` consulted the
+   stock's async runtime, so every callback ran twice and the CoW reference was lost. With `inspectSubtree` consulted the
    subtree is an async island, the skeleton awaits it, and a tuple, array or object around it returns the clean input.
    The walk reads every object shape below the subtree, which stock reads only at parse time (`$ZodObject` copies the
    caller's shape on the first read of `def.shape`, so a shape getter may reference a schema still under construction)
    and which stock's compile of a refused subtree never reached, so a shape getter that throws during the walk is
    contained instead of raised from `compile()` (review of #82): the subtree takes the sync island, whose run meets the
    same throw at parse time where stock's parser does, and a getter that resolves by then meets any Promise on the #76
-   route. A `lazy` getter that throws still takes the async island (#83).
+   route.
+   A `lazy` whose getter throws at compile time is opaque (#83). Stock never calls the getter before parse time, so the
+   throw says nothing about the subtree and the getter counts as sync. The sync island alone would not do: `$ZodLazy`
+   memoizes its inner type with `util.defineLazy`, which marks the cell before calling the getter and never resets it
+   when the getter throws, so one read through `_zod.innerType` while the getter throws makes every later read answer
+   `undefined` and every parse of the schema, stock's own `safeParse` included, end in a `TypeError` (stock's own
+   `z.compile()` does this to a schema compiled in a temporal dead zone). Stock's `compileFn` makes that read first
+   thing (`isRecursiveSchema`), and so do the presence rules the skeletons decide at compile time, since the lazy's
+   `optin` / `optout` / `values` / `propValues` compute through the memo. So the walk reads the getter off `def`,
+   `officialFn` takes the island before `compileFn` is tried when the walk saw such a getter, `officialValidator`
+   answers `null` (the skeleton serves `validate`, as for #69), and `cowSafeContainerForChild` declines the skeleton of
+   a container that would read the lazy's presence, through `presenceReadable` (`purity.ts`), which follows the slots
+   stock forwards those values through (`innerType`, `in` / `out`, `options`, `left` / `right`, the getter of a lazy):
+   every shape child of an object, the tail slots of a tuple that `getTupleOptStart` scans (both keys, so a lazy in a
+   slot the scan never reaches keeps the tuple's skeleton), the inner of an `optional` layer (`emitBoxedContainer`
+   reads its `optin`), each option of a discriminated union (`unionSkeletonOk` reads `propValues`). The declined
+   container goes to `officialFn` and to the runtime island, where the read happens at parse time like stock's; an
+   array, a record, a map or a set never read a child's presence and keep their skeleton with the lazy as an island
+   child. A getter that resolves to a sync subtree by parse time (the temporal dead zone: a binding declared later in
+   the module, `compile()` called between the two declarations) then answers the sync API like stock, with the
+   reference kept wherever the skeleton survived; one that resolves to an async subtree meets the Promise on the #76
+   route; one that always throws surfaces its own error from the sync API on the first call and stock's `TypeError`
+   afterwards, the sequence stock's schema goes through, and `compile()` leaves the memo untouched. The getter is
+   called a few times at compile time (the island decision, the validator check, the gates), where stock calls it
+   once, at first parse.
    Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
    (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
    runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
@@ -801,8 +825,9 @@ compile(schema)
   │     │     │     │     └─ generation failed → officialFn(parser) → island
   │     │     │     ├─ impure subtree → officialFn (parser product)
   │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise),
-  │     │     │     │     │     or makeAsyncIsland when subtreeHasAsync says the subtree holds an async check (#75;
-  │     │     │     │     │     a shape getter that throws during that walk keeps the sync island, review of #82)
+  │     │     │     │     │     or makeAsyncIsland when inspectSubtree says the subtree holds an async check (#75;
+  │     │     │     │     │     a shape getter that throws during that walk keeps the sync island, review of #82;
+  │     │     │     │     │     a lazy whose getter throws takes the island before compileFn is tried, #83)
   │     │     │     │     ├─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
   │     │     │     │     └─ an optional / nullable layer with a non-callback check anywhere in the subtree
   │     │     │     │           (subtreeFollowsRuntime, #69) → makeIsland / makeAsyncIsland before compileFn is tried:
@@ -840,7 +865,7 @@ value as the runtime calls them and keep their routes. `wrapperFollowsRuntime` (
 judges it impure so no pure subtree holds one (the direct `assertOnly` compile of `emitNode` therefore never meets it),
 `subtreeFollowsRuntime` (`official.ts`) walks the official subtree for one (a `lazy` is not descended: stock's product
 runs it in the runtime already; the schema a `z.property` / `z.properties` check carries is, since stock's `generatePropertyCheck`
-compiles it inline and a wrapper inside it meets the same disagreement, review of #84; `childrenOf` is the enumeration both walks share) and `officialFn` takes the island for the whole subtree, `subtreeHasAsync` choosing which;
+compiles it inline and a wrapper inside it meets the same disagreement, review of #84; `childrenOf` is the enumeration both walks share) and `officialFn` takes the island for the whole subtree, the async answer of `inspectSubtree` choosing which;
 `officialValidator` declines a tree holding one, so `validate` runs the skeleton. The canary pins both divergences.
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
@@ -962,8 +987,8 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | `options.ts` | §3.1 | `CompileOptions` (public), the resolved `CowOptions`, `DEFAULT_OPTIONS`, `resolveOptions` (#43) |
 | `codectx.ts` | §3 | `CodeCtx` (carries the resolved options and the shared `sources` list of the debug dump), `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
-| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
-| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync`, `subtreeHasPlainTransform` |
+| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild`, `presenceReadable` |
+| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `lazyGetterThrows`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple`: the fixed-slot segments and the async layout |

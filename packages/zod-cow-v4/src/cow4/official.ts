@@ -73,37 +73,61 @@ export function makeAsyncIsland(schema: Node): Fn {
 }
 
 /**
- * Static async detection for the subtrees that become this layer's islands, where the official
- * `ZodCompileAsyncError` never arrives: a `lazy` (the official generateLazyCheck is a runtime island, so the
- * async of its subtree raises no compile-time error and would leak out silently as a Promise), and a subtree
- * whose stock compile fails for a non-async reason before its checks are reached (a symbol literal, coercion,
- * `z.xor`, a `catch` callback, #75). For every other subtree the official compileFn throws on its own.
+ * Static inspection of the subtrees that become this layer's islands, where the official `ZodCompileAsyncError`
+ * never arrives: a `lazy` (the official generateLazyCheck is a runtime island, so the async of its subtree raises
+ * no compile-time error and would leak out silently as a Promise), and a subtree whose stock compile fails for a
+ * non-async reason before its checks are reached (a symbol literal, coercion, `z.xor`, a `catch` callback, #75).
+ * For every other subtree the official compileFn throws on its own. One walk answers two questions:
+ *
+ * `async`: the subtree holds an async function (a check, a transform, a lazy's expansion).
+ *
+ * `lazyThrows`: the subtree holds a `lazy` whose getter throws right now (#83). Stock never calls a getter at
+ * compile time, so the throw says nothing about the subtree: the getter counts as sync, and the subtree is
+ * handed to the runtime, which calls the getter at parse time where stock's parser does. The realistic case is
+ * a temporal dead zone (a lazy reading a binding declared later in the module, `compile()` called between the
+ * two declarations). The getter is read off `def` directly, never through `_zod.innerType`: `$ZodLazy` defines
+ * that slot with `util.defineLazy`, which marks its cell before calling the getter and never resets it when the
+ * getter throws, so one read through the memo while the getter throws makes every later read answer `undefined`
+ * and every parse of the schema, stock's own included, end in a `TypeError`. Stock's `compileFn` makes that read
+ * (`isRecursiveSchema`), which is why `officialFn` and `officialValidator` never hand such a subtree to it.
  *
  * The walk reads every object shape below the subtree, which stock reads only at parse time (`$ZodObject` copies
  * the caller's shape on the first read of `def.shape`, so a shape getter may reference a schema still under
  * construction), and stock's compile of a refused subtree never reached the shape. A getter that throws here is
- * therefore contained rather than raised from `compile()`: the subtree takes the sync island, whose run meets the
- * same throw at parse time where stock's parser does, and a getter that resolves by then meets any Promise on
- * the #76 route (review of #82). A `lazy` getter that throws still takes the async island (#83).
+ * therefore contained rather than raised from `compile()`: the answers gathered before the throw stand (`async`
+ * false unless an async function was met first), the subtree takes the sync island, whose run meets the same
+ * throw at parse time where stock's parser does, and a getter that resolves by then meets any Promise on the #76
+ * route (review of #82).
  */
-function subtreeHasAsync(schema: Node): boolean {
+type Inspection = { async: boolean; lazyThrows: boolean };
+
+function inspectSubtree(schema: Node): Inspection {
+  const st: Inspection = { async: false, lazyThrows: false };
   try {
-    return walkHasAsync(schema, new Set());
+    st.async = walkSubtree(schema, new Set(), st);
   } catch {
-    return false;
+    // a shape getter threw: contained, the answers so far stand
   }
+  return st;
 }
 
-function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
+/** Whether the subtree holds a `lazy` whose getter throws at compile time (#83); see `inspectSubtree` */
+export function lazyGetterThrows(schema: Node): boolean {
+  return inspectSubtree(schema).lazyThrows;
+}
+
+function walkSubtree(schema: Node, seen: Set<Node>, st: Inspection): boolean {
   if (seen.has(schema)) return false; // recursive subtree (lazy self-reference) -- asyncness is decided by the first expansion
   seen.add(schema);
   const def = schema._zod.def;
   if (def.type === "lazy") {
+    let inner: Node | null = null;
     try {
-      if (walkHasAsync(def.getter(), seen)) return true;
+      inner = def.getter();
     } catch {
-      return true; // the getter throws → conservatively treated as async (no loss of correctness)
+      st.lazyThrows = true; // stock runs the getter at parse time only: sync until then, opaque now (#83)
     }
+    if (inner && walkSubtree(inner, seen, st)) return true;
   }
   if (isAsyncFn(def.fn) || isAsyncFn(def.transform)) return true;
   const checks: Node[] = def.checks ?? [];
@@ -111,7 +135,7 @@ function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
     const d = c._zod?.def ?? c;
     if (isAsyncFn(d.fn) || isAsyncFn(c._zod?.check)) return true;
   }
-  return childrenOf(schema).some((k) => walkHasAsync(k, seen));
+  return childrenOf(schema).some((k) => walkSubtree(k, seen, st));
 }
 
 /**
@@ -119,7 +143,7 @@ function walkHasAsync(schema: Node, seen: Set<Node>): boolean {
  * its runtime on the shortcut (`wrapperFollowsRuntime`, #69), in which case the whole official product for the
  * subtree is one of this layer's islands, whose `_zod.run` is the runtime. A `lazy` is not descended: stock's
  * compiled product runs a `lazy` in the runtime already (`generateLazyCheck`), whatever its getter returns. The
- * walk reads every object shape below the subtree; a getter that throws is contained like in `subtreeHasAsync`
+ * walk reads every object shape below the subtree; a getter that throws is contained like in `inspectSubtree`
  * (the subtree goes on to `compileFn`, which meets the same getter).
  */
 function subtreeFollowsRuntime(schema: Node): boolean {
@@ -149,7 +173,7 @@ function walkFollowsRuntime(schema: Node, seen: Set<Node>): boolean {
  * before any product runs. A `lazy` is not descended, since the official transform helper is never reached inside
  * one: the official validator runs a `lazy` in the runtime and its lazy check reads `.issues` off the thenable, a
  * `TypeError` rather than stock's class (the residual #90 tracks), and the skeleton runs it through an island, which
- * throws `$ZodAsyncError`. A shape getter that throws is contained as in `subtreeHasAsync`; the parse meets it again.
+ * throws `$ZodAsyncError`. A shape getter that throws is contained as in `inspectSubtree`; the parse meets it again.
  */
 export function subtreeHasPlainTransform(schema: Node): boolean {
   try {
@@ -218,10 +242,13 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // returned is then met by `runIsland` and `throwAsync` rather than by stock's code (sixth review of #76).
   // A wrapper carrying a check stock's compiler answers differently from its runtime on the shortcut (#69)
   // is run by the runtime too, wherever it sits inside the subtree: stock's product for the subtree would
-  // compile that wrapper, so the whole subtree takes an island.
-  if (schema._zod.def.type === "lazy" || subtreeFollowsRuntime(schema)) {
-    return subtreeHasAsync(schema) ? makeAsyncIsland(schema) : makeIsland(schema);
-  }
+  // compile that wrapper, so the whole subtree takes an island. So does a subtree holding a `lazy` whose
+  // getter throws at compile time (#83): stock's `compileFn` would read the getter through the memo that a
+  // throw poisons for every later parse (`inspectSubtree`), so it is never tried on such a subtree.
+  const { async, lazyThrows } = inspectSubtree(schema);
+  const island = (): Fn => (async ? makeAsyncIsland(schema) : makeIsland(schema));
+  if (schema._zod.def.type === "lazy" || lazyThrows || subtreeFollowsRuntime(schema))
+    return island();
   if (pure) {
     try {
       return compileFn(schema, { assertOnly: true }) as Fn;
@@ -238,16 +265,17 @@ export function officialFn(schema: Node, pure: boolean): Fn {
     // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
     // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
     // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
-    return subtreeHasAsync(schema) ? makeAsyncIsland(schema) : makeIsland(schema);
+    return island();
   }
 }
 
 /**
  * The whole-tree official assertOnly product (the validate fast path); failure → null, and so is a tree holding a
- * wrapper the runtime must answer (#69): the skeleton, whose islands run it, serves `validate` then.
+ * wrapper the runtime must answer (#69) or a `lazy` whose getter throws at compile time (#83, stock's `compileFn`
+ * would poison its memo, see `inspectSubtree`): the skeleton, whose islands run it, serves `validate` then.
  */
 export function officialValidator(schema: Node): Fn | null {
-  if (subtreeFollowsRuntime(schema)) return null;
+  if (subtreeFollowsRuntime(schema) || lazyGetterThrows(schema)) return null;
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } catch {

@@ -1,11 +1,11 @@
 /**
  * Tuple skeleton: mirrors zod's generateTupleCheck with fillLen truncation tracking
- * + CoW decoration. The sync rest layout's segment 3 and presence decision live in `emit-tuple-rest.ts`.
+ * + CoW decoration. Segment 3 of both rest layouts and the presence decision after it live in `emit-tuple-rest.ts`.
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import type { CodeCtx } from "./codectx.js";
 import { childProduct, emitContainerChecks } from "./emit.js";
-import { emitSyncRest } from "./emit-tuple-rest.js";
+import { emitAsyncRestDecision, emitAsyncRestStart, emitSyncRest } from "./emit-tuple-rest.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
 import type { Node } from "./product.js";
 
@@ -31,13 +31,13 @@ import type { Node } from "./product.js";
  * was no truncation/fill. Once copied, every visited slot is written.
  * Invariant: out === input ⟹ fillLen === input.length (the truncation/fill paths always copy first).
  *
- * The sync rest layout follows stock's runtime timeline (fourth review of #88, #96): every fixed slot's result is
- * held in a local and every fresh output is assembled from those locals, never from a second read of the input;
- * `slice` is read once, the native one run by hand with its reads in its order and its copy consumed with `for...of`
- * like stock's result; the live length is read again after the rest ran and stock's `handleTupleResults` runs over
- * the held results when it or the iteration differs from what the slots decided with. The segments below hold the
- * results and the length reads; `emitSyncRest` (`emit-tuple-rest.ts`, its header carries the timeline) emits the
- * rest and the presence decision.
+ * Both rest layouts follow stock's runtime timeline (fourth review of #88, #96; the async layout since #94): every
+ * fixed slot's result is held in a local and every fresh output is assembled from those locals, never from a second
+ * read of the input; `slice` is read once, the native one run by hand with its reads in its order and its copy
+ * consumed with `for...of` like stock's result; the live length is read again after the rest ran and stock's
+ * `handleTupleResults` runs over the held results when it or the iteration differs from what the slots decided
+ * with. The segments below hold the results and the length reads; `emit-tuple-rest.ts` (its header carries the
+ * timeline) emits the rest and the presence decision for each layout.
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -50,7 +50,12 @@ import type { Node } from "./product.js";
  * from the input after it except its length (#77): stock reads `input[i]` and `input.slice(items.length)`
  * before any promise settles but decides presence from the live length in `handleTupleResults`, so
  * the prefix rebuild and the hole test use the captured reads and the slice while the presence
- * guards stay on `input.length`. Its `slice` is the real call, indexed by length (#94).
+ * guards stay on `input.length`, read once after the await and shared with the presence decision. Its rest source
+ * is the sync layout's (#94: `slice` read once, the hand copy or a continuation, one rest product started per copy
+ * element or per yield, in stock's order), and after its rest loop the presence decision runs stock's algorithm
+ * over the held results whenever a continuation ran or the live length differs from the guard's read or the copy's:
+ * a continuation's rest results under a truncated prefix are dropped, a held result the length now covers is
+ * materialized, a rest result past the length reaches the read past `items` that throws stock's `TypeError`.
  */
 export function emitCoWTuple(
   ctx: CodeCtx,
@@ -72,20 +77,20 @@ export function emitCoWTuple(
   const restFn = restProduct ? ctx.addConst(restProduct.fn) : "";
   const anyAsync = itemProducts.some((p) => p.kind === "async") || restProduct?.kind === "async";
   if (anyAsync) ctx.async = true;
-  /** The sync rest layout: results held, presence decided after the rest (see the header) */
+  /** The sync rest layout: results held in fresh locals, each gated slot's length read held (see the header) */
   const syncRest = !!rest && !anyAsync;
+  /** Either rest layout: results held, presence decided after the rest (the async layout holds every settled result) */
+  const heldRest = !!rest;
 
   ctx.write(`if (!Array.isArray(${accessor})) return INVALID;`);
   const optinStart = getTupleOptStart(items, "optin");
   const optoutStart = getTupleOptStart(items, "optout");
-  /** Sync rest layout: the guard's length read, one of the reads the presence decision after the rest is checked against */
-  const guardLen = syncRest ? ctx.var() : "";
+  /** Rest layouts: the guard's length read, one of the reads the presence decision after the rest is checked against */
+  const guardLen = heldRest ? ctx.var() : "";
   // Length guard (same as the official one): [optinStart, N] without rest, >= optinStart with rest
-  if (syncRest) {
+  if (heldRest) {
     ctx.write(`const ${guardLen} = ${accessor}.length;`);
     ctx.write(`if (${guardLen} < ${optinStart}) return INVALID;`);
-  } else if (rest) {
-    ctx.write(`if (${accessor}.length < ${optinStart}) return INVALID;`);
   } else {
     ctx.write(
       `if (${accessor}.length < ${optinStart} || ${accessor}.length > ${N}) return INVALID;`,
@@ -95,10 +100,12 @@ export function emitCoWTuple(
   const out = ctx.var();
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
-  /** Sync rest layout: the local holding fixed slot i's result, what stock's `handleTupleResults` assembles from
+  /** Rest layouts: the local holding fixed slot i's result, what stock's `handleTupleResults` assembles from
    *  (`itemResults`): the product's output, a validator slot's read, `undefined` for an absent slot that supplies
    *  nothing, INVALID for an absent slot whose run on `undefined` failed (stock drops that failure with the
-   *  truncation, unless the rest moved the length over the slot) */
+   *  truncation, unless the rest moved the length over the slot). The sync rest layout writes fresh locals as the
+   *  slots run; the async layout's are the settled result of a value-shaped slot and the captured read of a
+   *  validator-shaped one (every slot started before the await, an absent one on `undefined`) */
   const slotOut: string[] = [];
   /** Sync rest layout: the local holding the length read fixed slot i decided its presence from (slots from
    *  optinStart on; the guard's read decides for the ones before it) */
@@ -112,22 +119,29 @@ export function emitCoWTuple(
     const gated = slotLen.filter((v) => v !== guardLen);
     if (gated.length > 0) ctx.write(`let ${gated.join(", ")};`);
   }
-  /** The fixed slot's result written into its `slotOut` local, when the layout keeps one */
+  /** The fixed slot's result written into its `slotOut` local, when the layout writes one (the async layout's are
+   *  the settled locals themselves) */
   const keepSlot = (idxExpr: string, valueExpr: string): void => {
-    if (idxExpr !== "i" && slotOut.length > 0)
+    if (syncRest && idxExpr !== "i" && slotOut.length > 0)
       ctx.write(`${slotOut[Number(idxExpr)]} = ${valueExpr};`);
   };
-  /** The length fixed slot i's presence is decided from: the held read in the sync rest layout, the live one elsewhere */
-  const lenAt = (i: number): string => (syncRest ? slotLen[i]! : `${accessor}.length`);
+  /** Async rest layout: the one live length read after the await, which every gate and the presence decision use */
+  const liveLen = anyAsync && rest ? ctx.var() : "";
+  /** The length fixed slot i's presence is decided from: the held read in the sync rest layout, the read after the
+   *  await in the async rest layout, the live one elsewhere */
+  const lenAt = (i: number): string =>
+    syncRest ? slotLen[i]! : liveLen !== "" ? liveLen : `${accessor}.length`;
 
   /** Async layout: the local holding the single read of fixed slot i and the one holding its settled result */
   const slotRead: string[] = [];
   const slotResult: string[] = [];
   /** The rest elements: stock's `input.slice(items.length)`, taken after the fixed slots ran (started, in the async
-   *  layout) and before any rest product runs, holes preserved, indexed by `i - N` (#78); the async layout's local
-   *  holding their settled results */
+   *  layout) and before any rest product runs, holes preserved, indexed by `i - N` (#78; in the async layout a
+   *  continuation's yields, #94); the async layout's local holding their settled results */
   const restReads = rest ? ctx.var() : "";
   const restResults = anyAsync && rest ? ctx.var() : "";
+  /** Async rest layout: the source's locals, for the presence decision */
+  let asyncSource: ReturnType<typeof emitAsyncRestStart> | null = null;
   if (anyAsync) {
     const started: string[] = [];
     for (let i = 0; i < N; i++) {
@@ -138,17 +152,20 @@ export function emitCoWTuple(
       slotRead.push(e);
       started.push(r);
       slotResult.push(itemProducts[i]!.kind === "async" ? ctx.var() : r);
+      // A validator-shaped slot holds its read under its verdict (stock's run answers the value it validated)
+      if (rest)
+        slotOut.push(
+          itemProducts[i]!.kind === "validator"
+            ? `${r} === INVALID ? INVALID : ${e}`
+            : slotResult[i]!,
+        );
     }
     const restStarted = rest ? ctx.var() : "";
     if (rest) {
       // Stock slices the rest before it runs any rest element, so a rest callback that mutates a later rest slot
-      // is not observed (second review of #76, #78); a fixed slot's callback that ran before the slice is, like stock
-      ctx.write(`const ${restReads} = ${accessor}.slice(${N}), ${restStarted} = [];`);
-      ctx.write(`for (let i = 0; i < ${restReads}.length; i++) {`);
-      ctx.indented(() => {
-        ctx.write(`${restStarted}.push(${restFn}(${restReads}[i]));`);
-      });
-      ctx.write(`}`);
+      // is not observed (second review of #76, #78); a fixed slot's callback that ran before the slice is, like
+      // stock. The source is the sync layout's (#94): one rest product started per copy element or per yield
+      asyncSource = emitAsyncRestStart({ ctx, accessor, N, restReads, restStarted, restFn });
     }
     const settledVars: string[] = [];
     const startedVars: string[] = [];
@@ -167,6 +184,9 @@ export function emitCoWTuple(
     if (rest && restProduct!.kind !== "async") {
       ctx.write(`const ${restResults} = ${restStarted};`);
     }
+    // Stock's `handleTupleResults` decides presence from the live length after every promise settled (#77): read
+    // once here, for every gate below and the presence decision after the rest loop (#94)
+    if (rest) ctx.write(`const ${liveLen} = ${accessor}.length;`);
   }
   /** The single read of fixed slot i: emitted here in the sync layout, captured above in the async one */
   const readSlot = (i: number): string => {
@@ -328,13 +348,14 @@ export function emitCoWTuple(
     };
     ctx.write(`{`);
     ctx.indented(() => {
-      if (syncRest) {
-        // The sync rest layout runs every slot at its stock position, gated or not, and holds its result: stock's
+      if (heldRest) {
+        // The rest layouts run every slot at its stock position, gated or not, and hold its result: stock's
         // runtime runs every item before the rest and decides presence after it, so a slot an earlier truncation
         // gates out of the assembly here may still be assembled by `handleTupleResults` when the rest moved the
-        // length over it (fourth review of #88). Only the assembly stays behind the official gate
-        if (slotLen[i] !== guardLen) ctx.write(`${slotLen[i]} = ${accessor}.length;`);
-        ctx.write(`if (${i} < ${slotLen[i]}) {`);
+        // length over it (fourth review of #88; the async layout started every slot before its await, #94). Only
+        // the assembly stays behind the official gate
+        if (syncRest && slotLen[i] !== guardLen) ctx.write(`${slotLen[i]} = ${accessor}.length;`);
+        ctx.write(`if (${i} < ${lenAt(i)}) {`);
         ctx.indented(() => {
           const e = readSlot(i);
           const t = p.kind === "validator" ? e : ctx.var();
@@ -381,8 +402,8 @@ export function emitCoWTuple(
             ctx.write(`}`);
           } else {
             // The official IIFE branch, its result held as it came (INVALID included: stock drops that failure with the
-            // truncation, and reports it when the rest moved the length over the slot)
-            ctx.write(`${slotOut[i]} = ${slotCall(i, "undefined")};`);
+            // truncation, and reports it when the rest moved the length over the slot); the async layout's is settled
+            if (syncRest) ctx.write(`${slotOut[i]} = ${slotCall(i, "undefined")};`);
             ctx.write(gated ? `if (${fillLen} === ${i}) {` : `{`);
             ctx.indented(() => emitFill(slotOut[i]!));
             ctx.write(`}`);
@@ -451,7 +472,7 @@ export function emitCoWTuple(
       }
     };
     if (anyAsync) {
-      // The async layout's loop over the settled results, indexed by the slice
+      // The async layout's loop over the settled results, indexed by the copy or the continuation's yields
       ctx.write(`for (let i = ${N}; i < ${N} + ${restReads}.length; i++) {`);
       ctx.indented(() => {
         const e = ctx.var();
@@ -459,6 +480,19 @@ export function emitCoWTuple(
         emitRestBody(e);
       });
       ctx.write(`}`);
+      emitAsyncRestDecision({
+        ctx,
+        accessor,
+        out,
+        items,
+        N,
+        optoutStart,
+        restReads,
+        live: liveLen,
+        held: slotOut,
+        guardLen,
+        source: asyncSource!,
+      });
     } else {
       emitSyncRest({
         ctx,

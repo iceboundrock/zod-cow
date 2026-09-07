@@ -7,7 +7,7 @@
  * upgrade changes the implicit contract the test goes red instead of drifting silently.
  */
 import { z } from "zod";
-import { compileFn } from "zod/v4/core";
+import { $ZodAsyncError, compileFn } from "zod/v4/core";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -49,6 +49,14 @@ export interface Probe4Flags {
    * and fails where stock's compiler skips the check on the shortcut and passes (#69, same route and signal)
    */
   compilerPassesWrapperRangeShortcut: boolean;
+  /**
+   * A `Promise` a plain function returns inside a `lazy` (`z.string().pipe(z.lazy(() => z.string().transform((v) =>
+   * Promise.resolve(v))))`): the runtime throws `$ZodAsyncError` where stock's compiled lazy check (`generateLazyCheck`)
+   * reads `.issues` off the thenable and throws a TypeError. The zod4 line routes every official subtree holding a
+   * `lazy` to its own islands, which throw stock's class (#81, #90, #91); an upstream fix turns this flag false, the
+   * signal to revisit that route
+   */
+  compilerLazyCheckThrowsOnThenable: boolean;
   zodVersion: string;
 }
 
@@ -129,6 +137,22 @@ function computeFlags(): Probe4Flags {
     /* keep */
   }
 
+  const lazyThenable = z
+    .string()
+    .pipe(z.lazy(() => z.string().transform((v) => Promise.resolve(v))));
+  let compilerLazyCheckThrowsOnThenable = false;
+  try {
+    compileFn(lazyThenable)("x");
+  } catch (e) {
+    let runtimeThrowsAsync = false;
+    try {
+      lazyThenable.safeParse("x");
+    } catch (r) {
+      runtimeThrowsAsync = r instanceof $ZodAsyncError;
+    }
+    compilerLazyCheckThrowsOnThenable = e instanceof TypeError && runtimeThrowsAsync;
+  }
+
   let zodVersion = "unknown";
   try {
     zodVersion = require("zod/package.json").version as string;
@@ -150,6 +174,7 @@ function computeFlags(): Probe4Flags {
     readonlyContainerFreezesCopy,
     compilerThrowsOnWrapperLengthShortcut,
     compilerPassesWrapperRangeShortcut,
+    compilerLazyCheckThrowsOnThenable,
     zodVersion,
   };
 }

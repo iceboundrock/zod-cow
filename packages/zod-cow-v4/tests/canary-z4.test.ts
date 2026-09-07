@@ -50,6 +50,11 @@ test(`PROBE4: stock zod4 semantics match the compiler's assumptions (zod ${PROBE
     true,
     "stock's compiler must still pass the shortcut for a wrapper range check while the runtime fails it (#69: revisit the runtime-island route when this changes)",
   );
+  assert.equal(
+    PROBE4.compilerLazyCheckThrowsOnThenable,
+    true,
+    "stock's compiled lazy check must still throw a TypeError on a thenable while the runtime throws $ZodAsyncError (#81, #90, #91: revisit the island route for a subtree holding a lazy when this changes)",
+  );
 });
 
 summary("canary-z4");

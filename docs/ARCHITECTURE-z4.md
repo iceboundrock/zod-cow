@@ -814,9 +814,24 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    called a few times at compile time (the island decision, the validator check, the gates), where stock calls it
    once, at first parse.
    Since the sixth review of #76 a bare `lazy` goes through this layer's islands whether or not its subtree is async
-   (`officialFn`: `makeAsyncIsland` or `makeIsland`): stock's own product for it is a runtime island too (`generateLazyCheck`
-   runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, so a thenable a plain
-   function returned ends in a `TypeError` there), so no compiled fast path is lost, and the run is then owned by this layer.
+   (`officialFn`: `makeAsyncIsland` or `makeIsland`), and since #81 / #90 / #91 so does every official subtree holding a
+   `lazy` anywhere (under an `optional` / `nullable` layer, in a union of leaves, on either side of a pipe, and under an
+   object key through one of those; `subtreeFollowsRuntime` stops at the lazy and answers true). Stock's own product
+   for a `lazy` is a runtime island too (`generateLazyCheck` runs the getter's `_zod.run` under an empty context), so
+   no compiled fast path is lost for the lazy itself, but its generated code reads `.issues` off whatever came back,
+   without the thenable check stock's `runtimeRun` has: a `Promise` a plain function returns inside the lazy (a
+   transform, a refine), which no static detector sees, ends in a `TypeError` there, and while the lazy sat inside a
+   larger official subtree that `TypeError` left the sync entries where stock's runtime throws `$ZodAsyncError`, and
+   the async entries had nothing to catch. In an island the run is owned by this layer: `makeIsland` throws stock's
+   class on the thenable (`throwAsync`), the Promise signal the async entries hand to stock's async runtime, and
+   `runIsland` records a callback's own `$ZodAsyncError`, so the #80 residual does not reach a lazy position either.
+   The cost is the interpreter instead of stock's codegen for the official subtree around such a lazy (a bare `lazy`
+   already paid it), and the whole-tree validator behind `validate` for every tree holding a `lazy` (below). The one
+   row left unmatched is a stock quirk: stock's runtime meets the thenable of a plain-`Promise` transform inside a
+   lazy under an object key in the generated parser of `$ZodObject`, which reads `.issues.length` off it and throws
+   a `TypeError`, where the object skeleton calls the lazy as an island and throws `$ZodAsyncError`; the smoke pins
+   both sides, and the canary pins stock's compiled lazy check (`compilerLazyCheckThrowsOnThenable`), so an upstream
+   fix is the signal to revisit the route.
 6. runtime detection (fourth review of #76): a plain function that returns a `Promise` passes every static detector (the
    official `isAsyncFunction` and `isAsyncFn` are syntactic), so the schema is a sync skeleton and the `Promise` is met at
    runtime. The checks subroutine and the official products throw `$ZodAsyncError` there (`throwAsync` in `product.ts`
@@ -824,9 +839,9 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    product, its transform helpers answering INVALID for a `Promise` on purpose, so the parse entries reach stock's throw
    through their stock fallback and `validate` consults stock's sync parse before an INVALID becomes null on a tree
    holding a plain transform, `subtreeHasPlainTransform` in `official.ts` naming such a tree at compile time, a
-   `z.codec` decode function, stored on the `pipe` def itself, counting as one, #79; a `lazy` is not descended, and a
-   plain-`Promise` transform inside one reaches `validate` as a `TypeError`, the official validator's lazy check
-   reading `.issues` off the thenable, where the parse entries throw stock's class through this layer's island, #90). The
+   `z.codec` decode function, stored on the `pipe` def itself, counting as one, #79; a `lazy` is not descended, since
+   a tree holding one has no whole-tree validator and `validate` runs the skeleton, whose lazy is this layer's island
+   and throws stock's class on the thenable like the parse entries, #90). The
    sync API lets the throw out, as stock's does; `parseAsync` / `safeParseAsync` catch it on both skeleton
    kinds and, like every INVALID reaching the async entries, hand the parse to stock `safeParseAsync`, which is where stock's
    own `z.compile()` sends every async parse up front (its wrapped run bypasses the compiled parser under `ctx.async`). The
@@ -841,10 +856,11 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    parse chain sites fire only under `async: false`, the sync island's empty context chains a Promise instead; the
    core transform node's site only under a falsy `async`, and the async island runs under `async: true`, the context
    stock's async runtime hands the subtree), so a synchronous throw of that class out of `_zod.run` is a callback's.
-   A callback that stock's generated code calls (inside an official product, a `lazy` under a wrapper or in a pipe
-   inside one included) reports its `Promise` from stock's own `throwAsync`, which this layer cannot mark, so its
+   A callback that stock's generated code calls (a leaf `.refine` / `.check` / `.superRefine` inside an official
+   product) reports its `Promise` from stock's own `throwAsync`, which this layer cannot mark, so its
    `$ZodAsyncError` still takes the fallback and the callback runs twice; tracked in #80 with the options (an upstream
-   marker on that throw is the cheap exact fix).
+   marker on that throw is the cheap exact fix). A callback inside a `lazy` is not such a callback since #81 / #90 /
+   #91: the official subtree holding the lazy is an island, whose `runIsland` records the throw.
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive). That throw
@@ -868,7 +884,7 @@ compile(schema)
   │     │     │     │     ├─ generation failed → makeIsland (black-box _zod.run, throws $ZodAsyncError on a Promise),
   │     │     │     │     │     or makeAsyncIsland when inspectSubtree says the subtree holds an async check (#75;
   │     │     │     │     │     a shape getter that throws during that walk keeps the sync island, review of #82;
-  │     │     │     │     │     a lazy whose getter throws takes the island before compileFn is tried, #83)
+  │     │     │     │     │     a subtree holding a lazy takes the island before compileFn is tried, #83, #91)
   │     │     │     │     ├─ ZodCompileAsyncError → makeAsyncIsland (await channel) ★v0.5
   │     │     │     │     └─ an optional / nullable layer with a non-callback check anywhere in the subtree
   │     │     │     │           (subtreeFollowsRuntime, #69) → makeIsland / makeAsyncIsland before compileFn is tried:
@@ -893,8 +909,8 @@ Sync skeleton (ctx.async = false):
   callback threw through this layer's own call sites is recorded and rethrown instead (isPromiseSignal).
   validate runs the official validator (or the skeleton, #69) and answers null on INVALID; on a tree holding a plain
   transform (subtreeHasPlainTransform) it consults stock's sync parse first, since the official transform helpers
-  answer INVALID for a Promise where stock throws $ZodAsyncError (#79); inside a lazy the official validator's lazy
-  check throws a TypeError on the thenable instead, where the parse entries throw stock's class (#90).
+  answer INVALID for a Promise where stock throws $ZodAsyncError (#79); a tree holding a lazy has no whole-tree
+  validator, so validate runs the skeleton, whose lazy island throws stock's class on the thenable (#90).
 ```
 
 A check attached to an optional / nullable layer through `.check()` (`z.string().optional().check(z.minLength(3))`) is a
@@ -904,14 +920,18 @@ off `undefined` / `null` and throws where the runtime's default `when` passes, a
 runtime evaluates `undefined > n` and fails. The two callback checks (`custom`, `overwrite`) are called with the layer's
 value as the runtime calls them and keep their routes. `wrapperFollowsRuntime` (`purity.ts`) names such a layer, `isPure`
 judges it impure so no pure subtree holds one (the direct `assertOnly` compile of `emitNode` therefore never meets it),
-`subtreeFollowsRuntime` (`official.ts`) walks the official subtree for one (a `lazy` is not descended: stock's product
-runs it in the runtime already; the schema a `z.property` / `z.properties` check carries is, since stock's `generatePropertyCheck`
-compiles it inline and a wrapper inside it meets the same disagreement, review of #84; `childrenOf` is the enumeration both walks share) and `officialFn` takes the island for the whole subtree, the async answer of `inspectSubtree` choosing which;
-`officialValidator` declines a tree holding one, so `validate` runs the skeleton. The canary pins both divergences.
+`subtreeFollowsRuntime` (`official.ts`) walks the official subtree for one, or for a `lazy` (#81, #90, #91: stock's
+compiled lazy check reads `.issues` off a thenable where the runtime throws `$ZodAsyncError`, §5.5 item 5; the walk stops
+at the lazy, whose expansion stock runs in the runtime anyway; the schema a `z.property` / `z.properties` check carries is
+descended, since stock's `generatePropertyCheck` compiles it inline and a wrapper inside it meets the same disagreement,
+review of #84; `childrenOf` is the enumeration both walks share) and `officialFn` takes the island for the whole subtree,
+the async answer of `inspectSubtree` choosing which; `officialValidator` declines a tree holding one, so `validate` runs
+the skeleton. The canary pins the three divergences.
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
-compiles as usual. The lazy subtree goes through the official parser product at the element position, and the official `generateLazyCheck`
-brings its own cache-parser black box that handles circular references correctly (smoke test #9: `stock: false` and the semantics are normal).
+compiles as usual. The lazy subtree goes through this layer's runtime island at the element position (`subtreeFollowsRuntime`
+answers true at the lazy, §5.5 item 5), which runs the getter's schema and handles circular references correctly
+(smoke test #9: `stock: false` and the semantics are normal).
 What really degrades the whole tree is a top-level recursive schema (a circular reference in the def tree, which the official compileFn rejects).
 
 ## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, medians over complete rotations of the candidate order)
@@ -1029,7 +1049,7 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | `codectx.ts` | §3 | `CodeCtx` (carries the resolved options and the shared `sources` list of the debug dump), `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild`, `presenceReadable` |
-| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `lazyGetterThrows`, `subtreeHasPlainTransform` |
+| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `subtreeFollowsRuntime`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple`: the fixed-slot segments and the async layout |

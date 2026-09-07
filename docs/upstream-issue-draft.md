@@ -6,7 +6,7 @@
 > Sources: `docs/ARCHITECTURE-z4.md` (architecture document), `packages/bench-v4/bench.ts` (reproducible benchmarks),
 > `packages/zod-cow-v4/tests/differential-z4.test.ts` (50 000-case differential suite).
 > Data anchor: zod 4.5.4, GitHub-hosted `ubuntu-latest` runner, node v24, `--expose-gc`, median of 3 runs, 50 000 records ([Benchmarks workflow run 33837195401](https://github.com/iceboundrock/zod-cow/actions/runs/33837195401)).
-> If upstream would rather fix the bugs first, the runtime quirk in the first "Bonus" section and the compiler / runtime disagreement in the second can be filed as separate issues.
+> If upstream would rather fix the bugs first, the runtime quirk in the first "Bonus" section, the compiler / runtime disagreement in the second and the two unguarded `.issues` reads in the third can be filed as separate issues.
 
 ---
 
@@ -144,6 +144,26 @@ Two mechanisms:
 
 With the `zod/compile` shim installed, `schema.safeParse` and `z.validate` give the compiler's answer (the `bag.validator` fast path runs first), so the public API changes behavior on these schemas once the shim is in. A value that is not the shortcut answers the same on both sides. Our layer routes such a wrapper to the interpreter and pins both rows in a version canary, so a fix on either side shows up as a red test.
 
+### Bonus 3: the compiled lazy check and the object runtime read `.issues` off a thenable
+
+A plain function that returns a `Promise` is not an `AsyncFunction`, so neither `compileFn` nor the runtime's static checks see it; both meet the `Promise` at parse time. The core transform node and the check chain then throw `$ZodAsyncError` under a sync context, which is the documented signal. Two sites make the read `runtimeRun` guards against without that guard (zod 4.5.4):
+
+```ts
+import { z } from "zod";
+import { compileFn } from "zod/v4/core";
+const L = () => z.lazy(() => z.string().transform((v) => Promise.resolve(v)));
+
+z.string().pipe(L()).safeParse("x");           // throws $ZodAsyncError (runtime)
+compileFn(z.string().pipe(L()))("x");          // throws TypeError: Cannot read properties of undefined (reading 'length')
+z.object({ a: L() }).safeParse({ a: "x" });    // throws TypeError (runtime, the generated $ZodObject parser)
+await z.object({ a: L() }).safeParseAsync({ a: "x" }); // { success: true, data: { a: "x" } }
+```
+
+- `generateLazyCheck` in `compile.js` runs the getter's schema through `_zod.run` under an empty context and reads `.issues` off the result. A thenable has no `issues`, so the read is a `TypeError` rather than the `$ZodAsyncError` the rest of the fast path throws; with the `zod/compile` shim installed, `schema.safeParse` gives this answer for a `lazy` under a wrapper or in a pipe. A `then` test on the result (throw `$ZodAsyncError`, or return `INVALID` so the shim's fallback takes over) is the one-line fix.
+- The generated parser of `$ZodObject` (`schemas.js`, the runtime's own codegen for object shapes) reads `.issues.length` off each key's result without the `instanceof Promise` test the non-generated path makes, so the runtime itself throws a `TypeError` for a `lazy` under an object key on a sync parse, while the async parse succeeds. A refine returning a `Promise` inside the same lazy throws `$ZodAsyncError` there, since the check chain catches its own thenable first.
+
+Our layer routes every official subtree holding a `lazy` to the interpreter, whose `_zod.run` throws `$ZodAsyncError` at the transform node, and pins the compiler row in a version canary; the object-runtime row is left as stock's answer.
+
 ### Compatibility & risk
 
 - The compiler is already load-bearing for `zod/compile`; promoting it formalizes what already exists and adds no surface.
@@ -158,5 +178,6 @@ With the `zod/compile` shim installed, `schema.safeParse` and `z.validate` give 
 - [x] The dependency table matches `docs/ARCHITECTURE-z4.md` §9, including `getTupleOptStart` / `dropsWhenAbsent` introduced by the tuple skeleton (v0.5)
 - [x] The minimal reproduction of the quirk in the "Bonus" section was verified in a `node` REPL of this project (ownKeys is stably "0,2,length", sync rest parses correctly)
 - [x] Every row of the table in the second bonus section was verified against zod 4.5.4 with `compileFn` from `zod/v4/core` and the interpreter's `safeParse` (`packages/zod-cow-v4/src/probe-z4-flags.ts` pins the length and range rows; smoke group 23 of `tests/smoke-z4.test.ts` holds the others).
+- [x] The four lines of the third bonus section were verified against zod 4.5.4 the same way (`compilerLazyCheckThrowsOnThenable` in `probe-z4-flags.ts` pins the compiler row; the lazy group of `tests/smoke-z4-tuple-async.test.ts` pins the object-runtime row on both sides).
 - [x] Tone: a request to promote an existing surface plus an attached bug report, not a wish list; the proposed API shape is deliberately minimal
 - [ ] Before submitting: check whether colinhacks/zod already has an issue or PR about `zod/compile`, and reference and extend it rather than opening a duplicate

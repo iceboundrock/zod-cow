@@ -1952,7 +1952,7 @@ import { compile } from "../src/index.js";
   console.log("\n── z.property / z.properties carry a schema the walks descend (review of #84) ──");
   // stock's `generatePropertyCheck` compiles the carried schema inline, so a wrapper `wrapperFollowsRuntime` names
   // inside it meets the same compiler / runtime disagreement as one under a shape key; `childrenOf` in `official.ts`
-  // hands it to `subtreeFollowsRuntime` and `subtreeHasAsync`
+  // hands it to `subtreeFollowsRuntime` and `inspectSubtree`
   const wrap = (s: z.ZodType, c: unknown) => (s as any).check(c) as z.ZodType;
   const inner = wrap(z.string().optional(), z.minLength(3));
   const range = wrap(z.number().optional(), z.gt(1));

@@ -68,8 +68,9 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
       name: "valid record with an extra key",
       input: v({ extra: 1 }),
       accept: true,
-      outputDiffers:
-        "zod strips the undeclared key into a copy, ArkType passes it through (S8 covers strip parity)",
+      outputDiffers: {
+        ark: "zod strips the undeclared key into a copy, ArkType passes it through (S8 covers strip parity)",
+      },
     },
     { name: "non-integer id (1.5)", input: v({ id: 1.5 }), accept: false },
     { name: "name is a number", input: v({ name: 1 }), accept: false },
@@ -215,13 +216,15 @@ export async function runCalibration(): Promise<ScenarioRun[]> {
       name: "valid record with an own symbol key",
       input: withSymbolKey,
       accept: true,
-      outputDiffers:
-        'zod strips the undeclared own symbol key into a copy; ownSymbolKeys: "ignore" returns the input by reference with the symbol kept (the documented divergence of the option)',
+      outputDiffers: {
+        zc: 'zod strips the undeclared own symbol key into a copy; ownSymbolKeys: "ignore" returns the input by reference with the symbol kept (the documented divergence of the option)',
+      },
     },
   ]);
-  // The declared divergence, stated and asserted per implementation (an `outputDiffers` fixture
-  // skips the output comparison, so the shape of the difference is pinned here, as S8 does):
-  // every zod parser strips the symbol, the opt-in alone keeps it, and it does so by reference.
+  // The declared divergence, stated and asserted per implementation: the gate compared the other
+  // columns to stock and exempted only the opt-in, so what is pinned here is the shape of that
+  // difference, which `deepStrictEqual` cannot see: every zod parser strips the symbol, the opt-in
+  // alone keeps it, and it does so by reference (S8 states its symbol behavior the same way).
   {
     const has = (o: unknown) => Object.getOwnPropertySymbols(o as object).length > 0;
     const outputs = laxImpls.map((i) => [i, i.output!(withSymbolKey)] as const);

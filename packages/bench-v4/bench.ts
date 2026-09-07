@@ -122,8 +122,9 @@ const runs: ScenarioRun[] = [];
         name: "valid account with an extra key",
         input: variant(sample, { extra: 1 }),
         accept: true,
-        outputDiffers:
-          "zod strips undeclared keys into a copy, ArkType passes them through by reference (S8 measures the strip case)",
+        outputDiffers: {
+          ark: "zod strips undeclared keys into a copy, ArkType passes them through by reference (S8 measures the strip case)",
+        },
       },
       { name: "missing role", input: without(sample, "role"), accept: false },
       {

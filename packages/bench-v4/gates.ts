@@ -30,8 +30,12 @@ export interface Fixture {
    */
   accept: boolean | Partial<Record<Column, boolean>>;
   divergence?: string;
-  /** Both accept, but the outputs legitimately differ (e.g. strip vs pass-through of extra keys) */
-  outputDiffers?: string;
+  /**
+   * Both accept, but the output of the listed columns legitimately differs from stock's (e.g.
+   * ArkType's pass-through of extra keys where zod strips), with the reason per column. Every
+   * column not listed must still produce stock's output.
+   */
+  outputDiffers?: Partial<Record<Exclude<Column, "stock">, string>>;
 }
 
 export async function gate(scenario: string, impls: Impl[], fixtures: Fixture[]): Promise<void> {
@@ -73,26 +77,35 @@ export async function gate(scenario: string, impls: Impl[], fixtures: Fixture[])
       continue;
     }
 
-    // Accepted by all: outputs must match the first implementation (stock zod), unless declared
+    // Accepted by all: outputs must match the first implementation (stock zod), except for the
+    // columns the fixture declares as legitimately different
     const withOutput = impls.filter((i) => i.output);
     const reference = withOutput[0];
-    if (reference && !f.outputDiffers) {
-      const expectedOut = await reference.output!(f.input);
-      for (const impl of withOutput.slice(1)) {
-        const out = await impl.output!(f.input);
-        try {
-          assert.deepStrictEqual(out, expectedOut);
-        } catch (e) {
-          throw new Error(
-            `${scenario}: fixture "${f.name}": ${impl.label} output differs from ${reference.label}: ${(e as Error).message}`,
-          );
-        }
-      }
-      console.log(`    ✓ ${f.name}: accepted by all, outputs deepStrictEqual`);
-    } else {
-      console.log(
-        `    ✓ ${f.name}: accepted by all${f.outputDiffers ? ` (outputs differ: ${f.outputDiffers})` : ""}`,
-      );
+    if (!reference) {
+      console.log(`    ✓ ${f.name}: accepted by all`);
+      continue;
     }
+    const expectedOut = await reference.output!(f.input);
+    const declared: string[] = [];
+    let compared = 0;
+    for (const impl of withOutput.slice(1)) {
+      const reason = f.outputDiffers?.[impl.column as Exclude<Column, "stock">];
+      if (reason !== undefined) {
+        declared.push(`${impl.label}: ${reason}`);
+        continue;
+      }
+      const out = await impl.output!(f.input);
+      try {
+        assert.deepStrictEqual(out, expectedOut);
+      } catch (e) {
+        throw new Error(
+          `${scenario}: fixture "${f.name}": ${impl.label} output differs from ${reference.label}: ${(e as Error).message}`,
+        );
+      }
+      compared++;
+    }
+    console.log(
+      `    ${declared.length > 0 ? "~" : "✓"} ${f.name}: accepted by all${compared > 0 ? `, ${compared} output${compared > 1 ? "s" : ""} deepStrictEqual to ${reference.label}` : ""}${declared.length > 0 ? ` (declared output divergence: ${declared.join("; ")})` : ""}`,
+    );
   }
 }

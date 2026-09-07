@@ -271,9 +271,15 @@ is not judged, since its output is discarded) and the subroutine takes the key's
 its target, one per distinct key in check order: the clean call hands it the local the skeleton holds for a
 declared key, with the `in` read stock's assembly makes where a presence rule may leave the key out
 (`dropsWhenAbsent`, `mayOutputUndefined`) and the prototype of a fresh object as the value then, so no getter
-of the input is read a second time; the copy call lets it read `out`, which is stock's assembly; an
-undeclared key is read off the target on both paths (on the clean path that is the returned input, the one
-aliasing of a clean parse). In the sync variant the carried schema's product is `officialFn(carried, true)`,
+of the input is read a second time; the copy call lets it read `out`, which is stock's assembly. An
+undeclared key is not read off the returned input on the clean path, since that input is not stock's
+assembled output (review of #98): a non-enumerable own or inherited property is one `for...in` never yields,
+so strip's probe and strict's check let the input through by reference while stock's fresh object lacks the
+key, and a getter there is one stock never reads. The clean call hands the subroutine what that assembly
+holds: in strip and strict mode the prototype of a fresh object (the clean path is reached only when
+`for...in` yields no undeclared key), in loose mode the input's value when a scan with stock's enumeration
+finds the key (the append writes it then, and reads it once, as the clean call does) and the prototype
+otherwise. In the sync variant the carried schema's product is `officialFn(carried, true)`,
 the verdict-only chain (validator, else parser, else island; a wrapper `wrapperFollowsRuntime` names or a
 `lazy` inside it takes its island as anywhere else), and a failure returns `INVALID` at once like every other
 check of the variant. In the async variant the carried schema runs through stock's `_zod.run` as the check

@@ -260,8 +260,11 @@ schema，只保留 issues 并加上该 key 的前缀（`handleCheckPropertyResul
 （`checksAreCowSafe` 在 object 上接受这一种类，要求 key 是 `__proto__` 之外的字符串；携带的 schema 本身不做判定，因为它的输出会被丢弃），
 子程序在目标之后按 check 顺序为每个不同的 key 接收一个参数，即该 key 的值：干净路径把骨架为已声明 key 持有的局部变量交给它，
 并在存在性规则可能省掉该 key 的地方（`dropsWhenAbsent`、`mayOutputUndefined`）做 stock 组装所做的那次 `in` 读取，此时值为新建对象的
-原型上的值，因此输入上的 getter 不会被第二次读取；拷贝路径让它读 `out`，也就是 stock 的组装；未声明的 key 在两条路径上都从目标读取
-（干净路径上目标就是返回的输入，即干净解析唯一的别名）。同步变体里携带 schema 的产物是 `officialFn(carried, true)`，即只给判定的链
+原型上的值，因此输入上的 getter 不会被第二次读取；拷贝路径让它读 `out`，也就是 stock 的组装。未声明的 key 在干净路径上不从返回的
+输入读取，因为该输入不是 stock 组装出的输出（#98 的评审）：不可枚举的自有或继承属性是 `for...in` 永远不会产出的键，所以 strip 的探测
+与 strict 的检查都让输入按原引用通过，而 stock 的新建对象没有这个 key，那里的 getter 也是 stock 从不读取的。干净调用交给子程序的是那次
+组装所持有的值：strip 与 strict 模式下是新建对象原型上的值（干净路径只在 `for...in` 未产出任何未声明 key 时到达），loose 模式下若
+一次按 stock 枚举方式的扫描找到了该 key，则是输入的值（此时追加会写入它，并且只读一次，干净调用亦然），否则同样是原型上的值。同步变体里携带 schema 的产物是 `officialFn(carried, true)`，即只给判定的链
 （validator，否则 parser，否则岛；其中 `wrapperFollowsRuntime` 命名的包装层或 `lazy` 与别处一样取岛），失败时像该变体的其他 check 一样
 立即返回 `INVALID`。async 变体里携带 schema 通过 stock 的 `_zod.run` 运行，与该 check 的运行方式相同（`official.ts` 的 `runCarried`）：
 payload 的 issues 能回答 `INVALID` 回答不了的问题，即这次失败是否中止链（`aborted`，拷贝进 `predicates.ts`），于是携带 schema 的类型不匹配

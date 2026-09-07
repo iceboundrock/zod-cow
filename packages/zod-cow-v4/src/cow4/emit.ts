@@ -277,11 +277,13 @@ function carriedPassed(payload: RunPayload): boolean {
 /**
  * A checks subroutine hoisted into `ctx` for its call sites (`ctx.async` is set for an async one, #13); null when
  * the schema has no checks. `expr` is the call on `target`, `await` included, with the held value of every
- * property key after it: `heldOf(key)` names the expression holding the output value of a key the caller
- * captured (the object skeleton's declared keys, #85), and any other key is read off the target, which is the
- * output the check runs on.
+ * property key (`keys`, in parameter order) after it: `heldOf(key)` names the expression holding the output
+ * value of a key the caller answers for (the object skeleton on its clean path, #85: every key, declared or
+ * not, since the input it returns is not stock's assembled output), and any other key is read off the target,
+ * which must then be that output (the copy path's `out`).
  */
 export type ChecksCall = {
+  keys: readonly string[];
   expr: (target: string, heldOf?: (key: string) => string | undefined) => string;
 };
 
@@ -294,6 +296,7 @@ export function containerChecksCall(ctx: CodeCtx, schema: Node): ChecksCall | nu
   const awaitKw = isAsync ? "await " : "";
   const { held } = product;
   return {
+    keys: held,
     expr: (target, heldOf) => {
       const args = held.map((key) => heldOf?.(key) ?? `${target}[${escKey(key)}]`);
       return `${awaitKw}${name}(${[target, ...args].join(", ")})`;

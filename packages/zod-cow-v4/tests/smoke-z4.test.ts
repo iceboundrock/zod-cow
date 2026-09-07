@@ -2190,7 +2190,7 @@ import { compile } from "../src/index.js";
     assert.equal(out, g, "a getter key is a clean key: shared");
   }
   // an undeclared key named by the check: strip drops it from the copy and the check reads `undefined` there,
-  // like stock; a clean input has no such own key, so the read off the returned input answers the same
+  // like stock; loose appends it and the check reads the input's value
   const U = prop(base, z.property("extra", z.string().optional()));
   const CU = compile(U);
   assert.equal(CU.parse(input), input);
@@ -2204,6 +2204,170 @@ import { compile } from "../src/index.js";
   assert.equal(CL.safeParse({ k: "a", extra: "x" }).success, false);
   assert.equal(L.safeParse({ k: "a", extra: "x" }).success, false);
   console.log("  a getter is read once, an undeclared key reads as stock's assembly answers ✓");
+
+  // an undeclared key the clean path keeps but stock's assembly never writes (review of #98): a non-enumerable
+  // own or inherited property is not enumerated, so strip's probe and strict's check let the input through by
+  // reference, and stock's fresh object has no such key. The check reads what stock reads: the prototype of a
+  // fresh object in strip and strict mode, and in loose mode the input's value only when stock's `for...in`
+  // append writes the key. A getter stock never reads is never read here either.
+  {
+    const modes: [string, z.ZodObject][] = [
+      ["strip", z.object({ k: z.string() })],
+      ["strict", z.strictObject({ k: z.string() })],
+      ["loose", z.looseObject({ k: z.string() })],
+    ];
+    const hidden = (value: unknown) => {
+      const o: Record<string, unknown> = { k: "a" };
+      Object.defineProperty(o, "extra", { value, enumerable: false });
+      return o;
+    };
+    const inherited = (proto: object) => Object.assign(Object.create(proto), { k: "a" });
+    for (const [mode, obj] of modes) {
+      const Required = prop(obj, z.property("extra", z.string()));
+      const CRequired = compile(Required);
+      assert.equal(CRequired.stock, false);
+      for (const [what, make] of [
+        ["a non-enumerable own data property", () => hidden("present")],
+        [
+          "a non-enumerable inherited data property",
+          () => {
+            const proto = {};
+            Object.defineProperty(proto, "extra", { value: "present", enumerable: false });
+            return inherited(proto);
+          },
+        ],
+      ] as const) {
+        const ours = CRequired.safeParse(make());
+        const stock = Required.safeParse(make());
+        assert.equal(
+          stock.success,
+          false,
+          `${mode}: stock checks its assembly, which lacks ${what}`,
+        );
+        assert.equal(
+          ours.success,
+          false,
+          `${mode}: the clean path checks the same value for ${what}`,
+        );
+        if (!ours.success && !stock.success)
+          assert.deepEqual(
+            ours.error.issues.map((i) => [i.code, i.path]),
+            stock.error.issues.map((i) => [i.code, i.path]),
+          );
+        assert.equal(CRequired.validate(make()), null);
+      }
+      // the same input passes a check that admits the absence, and is still shared
+      const Optional = prop(obj, z.property("extra", z.string().optional()));
+      const COptional = compile(Optional);
+      const shared = hidden("present");
+      assert.equal(Optional.safeParse(shared).success, true);
+      assert.equal(COptional.parse(shared), shared, `${mode}: the clean input is shared`);
+      // a non-enumerable getter is read by neither side
+      let reads = 0;
+      const withGetter = () => {
+        const o: Record<string, unknown> = { k: "a" };
+        Object.defineProperty(o, "extra", {
+          get() {
+            reads++;
+            throw new Error("read");
+          },
+          enumerable: false,
+        });
+        return o;
+      };
+      assert.equal(Optional.safeParse(withGetter()).success, true, `${mode}: stock never reads it`);
+      assert.equal(reads, 0);
+      assert.equal(
+        COptional.safeParse(withGetter()).success,
+        true,
+        `${mode}: nor does the skeleton`,
+      );
+      assert.equal(reads, 0);
+      // the check's schema is called once, with the prototype's value, on a null-prototype input (no stock rerun)
+      let calls: unknown[] = [];
+      const Proto = prop(
+        obj,
+        z.property(
+          "toString",
+          z.custom((v) => {
+            calls.push(v);
+            return typeof v === "function";
+          }),
+        ),
+      );
+      const CProto = compile(Proto);
+      const nullProto = Object.assign(Object.create(null), { k: "a" });
+      assert.equal(Proto.safeParse(nullProto).success, true);
+      assert.deepEqual(calls, [Object.prototype.toString], `${mode}: stock reads its fresh object`);
+      calls = [];
+      assert.equal(CProto.parse(nullProto), nullProto, `${mode}: shared`);
+      assert.deepEqual(
+        calls,
+        [Object.prototype.toString],
+        `${mode}: the skeleton reads the same, once`,
+      );
+      if (mode === "loose") {
+        assert.match(
+          COptional.code!,
+          /\(x\d+ \? input\["extra"\] : c\d+\["extra"\]\)/,
+          "loose: the clean call reads the input only when the key is enumerated",
+        );
+        assert.match(COptional.code!, /if \(k === "extra"\) x\d+ = true;/);
+        // an enumerated undeclared key, own or inherited, is read once, as stock's append reads it
+        for (const [what, make] of [
+          [
+            "own",
+            () => {
+              const o: Record<string, unknown> = { k: "a" };
+              Object.defineProperty(o, "extra", {
+                get() {
+                  reads++;
+                  return "present";
+                },
+                enumerable: true,
+              });
+              return o;
+            },
+          ],
+          [
+            "inherited",
+            () => {
+              const proto = {};
+              Object.defineProperty(proto, "extra", {
+                get() {
+                  reads++;
+                  return "present";
+                },
+                enumerable: true,
+              });
+              return inherited(proto);
+            },
+          ],
+        ] as const) {
+          reads = 0;
+          assert.equal(Required.safeParse(make()).success, true);
+          const stockReads = reads;
+          reads = 0;
+          const made = make();
+          assert.equal(CRequired.parse(made), made, `loose: the ${what} enumerable key is shared`);
+          assert.equal(
+            reads,
+            stockReads,
+            `loose: the ${what} getter is read ${reads}, stock ${stockReads}`,
+          );
+          assert.equal(stockReads, 1);
+        }
+      } else {
+        assert.doesNotMatch(COptional.code!, /k === "extra"/, `${mode}: no scan on the clean path`);
+        assert.match(
+          COptional.code!,
+          /\(input, c\d+\["extra"\]\)\) === INVALID/,
+          `${mode}: the prototype is read`,
+        );
+      }
+    }
+    console.log("  an undeclared key stock's assembly does not write reads as stock reads it ✓");
+  }
 
   // a declared key the presence rules leave out of stock's output: the check reads the prototype of a fresh
   // object, not the local. A null-prototype input lacking `toString` makes the two differ.

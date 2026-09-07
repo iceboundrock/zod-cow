@@ -622,11 +622,31 @@ return out;
   entries settle out of order (#70).
 
 The array and tuple copies follow the same pattern since the review of #70: the first forced change (a changed element
-or a hole) rebuilds the clean prefix into a fresh array, reading those elements from the input a second time (#36), and
-every later element is written from the single read the loop makes, so a getter or a hole after the first change is
-observed as stock observes it; `slice()` re-read every element and kept a hole where stock writes an own `undefined`
-slot. A hole is an index the input does not own (`Object.hasOwn`, so an inherited `undefined` under a hole is one too;
-an inherited value under a hole reads as that value and stays the prototype limitation of the clean path, #48).
+or an undefined one) rebuilds the clean prefix into a fresh array, reading those elements from the input a second time
+(#36), and every later element is written from the single read the loop makes, so a getter or a hole after the first
+change is observed as stock observes it; `slice()` re-read every element and kept a hole where stock writes an own
+`undefined` slot. An element that reads as `undefined` and comes back unchanged is judged dirty without asking whether
+the index is own (#95): stock's runtime reads `input[i]` (or `HasProperty` then `Get` inside `input.slice`) and never
+asks, and its output holds an own `undefined` slot there whether the input held an own `undefined`, a hole or a hole
+over an inherited `undefined`, so the copy is stock's output in every case. Until #95 the skeletons asked
+`Object.hasOwn` on such a value to keep the reference for an own `undefined`, a `getOwnPropertyDescriptor` trap stock
+never consults, so a trap with effects or a throw was observable on the clean path alone (third review of #88); there
+is no trapless own-ness test, so the probe went instead of moving. What it costs is the reference for an input holding
+an explicit `undefined` member (`z.array(z.string().optional())` on `["a", undefined]`, a tuple's optional slot given
+explicitly), the class of `z.nan()`, which `NaN !== NaN` judges dirty on every parse: the differential fuzzer at its
+default size put the loss at 0.1 point of its top-level sharing rate (32.6% to 32.5%, 82.8% to 82.5% among successful
+cases), no `bench-v4` fixture holds a present `undefined` in an array or tuple, and the probe sat inside the branch
+taken only on an `undefined` value, so the hot path is unchanged. An inherited value under a hole reads as that value
+and stays the prototype limitation of the clean path (#48). The second Proxy-only property of the same skeletons is
+documented, not probed (#95): they size their walk from `input.length` as stock does (`i < input.length`,
+`input.slice(items.length)`) and return the input by reference when every element that length covers is unchanged,
+so a Proxy under-reporting its length (a plain array's length is exact) gets stock a fresh truncated output and the
+compiled parser the input itself, whose further elements stock never saw; a length stock's `Array(length)` rejects (a
+fraction, `NaN`, a negative) throws stock's `RangeError` from the copy path only, since the clean path allocates
+nothing. Proving the length would cost a `Reflect.ownKeys` allocation or a trap call per clean array, the cost class
+`ownSymbolKeys: "ignore"` exists to remove, and what a consumer reads through the reported length is stock's output,
+so it sits with the non-enumerable undeclared key and the prototype (§3.1, README known limitations), pinned by the
+#95 smoke group next to stock's behavior.
 
 ### 5.3 Wiring
 
@@ -686,8 +706,8 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    container's own checks run after the children have settled, as stock runs `runChecks` after the parse; an async
    predicate among them makes the checks subroutine itself async on the same schedule (every predicate called before
    its first `await`, §3.2, #13). Nothing is read from the input after the `Promise.all` except the tuple's length
-   (#77): the array skeleton takes the length before its loop, captures each read and each hole (`Object.hasOwn`) in
-   the first pass and rebuilds the clean prefix from the captured reads; the tuple skeleton does the same for its fixed
+   (#77): the array skeleton takes the length before its loop, captures each read in the first pass and rebuilds the
+   clean prefix from the captured reads; the tuple skeleton does the same for its fixed
    slots, takes stock's `input.slice(items.length)` after the fixed slots started and before any rest product runs (a
    sync rest callback that mutates a later rest slot is not observed, a fixed slot's callback that ran before the slice
    is, a rest hole is decided on the slice), starts every rest element from that slice, and keeps its presence guards
@@ -714,10 +734,9 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    throws), then the constructor, then, when the constructor is `Array`, the species (the built-in getter, or one
    installed on `Array`: the one read that can run user code, made where the builtin makes it, once), then `in` and
    the read per index and nothing else (`HasProperty` then `Get`, so a Proxy whose `has` trap denies an index gets a
-   hole there under both, and a slot written when `in` answered, so a hole stays a hole; the own-ness question an
-   `undefined` value raises for the CoW decision is asked from the rest loop's hole test, on the copy and then on the
-   input, only when the rest element's output equals that `undefined`: the hole test every array position makes,
-   #95). When the constructor is `Array` and the species is `Array`, the builtin's remaining steps (`ArrayCreate`, the
+   hole there under both, and a slot written when `in` answered, so a hole stays a hole; an `undefined` the copy
+   holds, own or not, is judged dirty by the rest loop without an own-ness probe, as at every array position, #95).
+   When the constructor is `Array` and the species is `Array`, the builtin's remaining steps (`ArrayCreate`, the
    stores into it, its length) run no user code, so the copy stands in for them. Stock then iterates its result with
    `for...of`, which reads `Symbol.iterator` off it, calls what it got, reads `next` off the iterator and calls it
    per step; the skeleton makes the two reads on the copy with the same receivers (the copy is a plain array holding
@@ -755,9 +774,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    held gives stock's value, throw and hook calls (the timeline group of the tuple smoke runs one mutation per source
    and target on both sides; the earlier heads of #88 handed such a parse back to stock, whose rerun met the input as
    the hooks had left it and ran them again). What remains is the CoW contract itself: the clean path returns the
-   input, so a slot rewritten after its read is visible in that output only (§5.3); a length that converts to `NaN`
-   is never equal to itself and takes the presence decision, stock's fresh output, where the other under-reported
-   Proxy lengths keep the clean path (#95); a Proxy sees the skeleton read `length` a different number of times than
+   input, so a slot rewritten after its read is visible in that output only (§5.3); a Proxy under-reporting its
+   length keeps the clean path, the input with the elements stock never saw (the known limitation of #95, above),
+   except that a length converting to `NaN` is never equal to itself and takes the presence decision, stock's fresh
+   output; a Proxy sees the skeleton read `length` a different number of times than
    stock's runtime does (the guard, each gated slot, the copy and the presence decision, against stock's slice and
    its two loops); a present slot whose product fails returns to stock at once where stock keeps going and may drop
    the failure with a truncation the rest moved, and that early exit from a continuation's `for...of` closes a
@@ -768,8 +788,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    79 ns under `slice` to 62 ns, with four from 84 to 69 ns, with sixteen from 117 to 108 ns, an object rest of four
    from 306 to 285 ns, against a stock parse of 170 to 250 ns; the presence decision and the two iterator reads
    cost the fast path nothing measurable over the bare copy (within 1 to 3 ns, the control row's spread; the reads
-   measured against the earlier data-property comparison on the same rows, interleaved, sixth review of #88). A rest hole over an inherited `undefined` comes out as an own slot like stock's,
-   where `slice` read the inherited value through `HasProperty` and made it own.
+   measured against the earlier data-property comparison on the same rows, interleaved, sixth review of #88). A rest hole over an inherited `undefined` comes out as an own slot like stock's
+   in both layouts, since the rest loop judges the `undefined` the copy holds dirty without asking whether it is own
+   (#95); `slice` read the inherited value through `HasProperty` and made it own on the copy, which until #95 kept the
+   async layout's clean path there.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
@@ -979,7 +1001,7 @@ S1's +3.1MB of short-lived allocation is the strip probe's own-symbol array: exa
 
 - `packages/zod-cow-v4/tests/smoke-z4.test.ts` (22 groups of behavioral assertions; the twenty-second, the review of #73: `z.exactOptional` above a container, a further wrapper or a union with a container option rejects `undefined` like stock at the top level and under a key, keeps strip and the leaf options on the official parser, and over a leaf stays on the validator; the twenty-first #58: a union of strip objects shares the clean input through its first and through a later option, a fired default copies like stock, strip / strict / loose options behave like stock, a nested union shares with its parent when clean and copies only the dirty path, leaf and container options mix, a discriminated union dispatches and shares, `optional(union)`, `array(union)` and a nested union reach the skeleton, an optional over a union with a defaulted option fires the default like stock (also under a refine and under a further nullable), the union's own refine, overwrite and superRefine behave like stock, `z.xor` and an async option take the official product, a leaf-only union keeps the validator, and the dump lists one nested skeleton per container option; the twentieth #71: set members that are tuples, objects, enum records or arrays with two async children settle in stock's order, the children's side effects interleave like stock (the second key's transform starts before the first settles), a rejecting child next to a failing sync sibling rejects the parse with nothing reaching `unhandledRejection`, and the async layout of a tuple (fixed slots or rest), object, array and enum record awaits one `Promise.all` and nothing else while a sync tuple awaits nothing; the eighteenth #56: a refine on an optional / nullable wrapper above a container rejects like stock at the top level and nested (object and array, and the same above a record, a map, a set and a tuple), sees the shortcut value, runs in stock's order along a two-wrapper chain, sees the stripped copy and keeps sharing when it passes, a superRefine on such a wrapper takes the official parser (an async refine keeps the skeleton and shares since #13), and a length / size check attached to the wrapper through `.check()` takes the official parser and strips like stock above every container kind, at the top level and under a key; the nineteenth #57: an overwrite or a superRefine on a wrapper around a leaf rewrites like stock at the top level, under an object key and as a union option; the twelfth and thirteenth the `ownSymbolKeys` option: default and `"probe"` still copy on an undeclared symbol, `"ignore"` returns the input by reference with the symbol kept, keeps strip semantics for string keys and the copy path, validates declared symbol keys, reaches nested skeletons under every container (object, array, tuple, record, map, set), treats a non-enumerable undeclared symbol like an enumerable one, rejects an unknown value, an explicit `null` or a non-plain options object with `TypeError` (also when the rejected object carries a throwing `constructor` / `name` accessor or a throwing Proxy `getPrototypeOf` trap, when the rejected value carries a throwing `toJSON` or Proxy `get` trap, is a bigint, a symbol, a function or a cycle, and when the options object is a Proxy whose `getOwnPropertyDescriptor` / `get` trap throws, then with the trap's error as `cause`), treats an explicit `undefined` as the default, ignores an `ownSymbolKeys` inherited from `Object.prototype`; then the same probe in strict and loose mode, #42: default copies on an undeclared symbol, enumerable or not, and shares the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, strict still rejects an undeclared string key, loose keeps one in the copy while dropping the symbol, declared symbol keys count as known, a nested loose object is reached; the fourteenth #47: a union with a strip-object option drops an undeclared key like stock at the top level and nested with the sibling still shared, a strict option drops an undeclared own symbol, `optional(object)`, `array(object)` and discriminated-union options strip like stock, and a leaf-only union keeps the validator so its parent shares; the fifteenth #46: `code` of a schema with object, array, tuple, record, map and set children holds the top-level source first and one `nested skeleton` header per nested skeleton, carries a probe per object skeleton by default and none under `"ignore"`, and a schema without nested containers has no header; the sixteenth #51: strict and loose enum-keyed records copy and drop an undeclared own symbol, enumerable or not, under the default and `"probe"`, share the same input without it, `"ignore"` shares and emits no probe, the copy path drops the symbol under both settings, string-keyed, checked-string-keyed and number-keyed records still reject an enumerable symbol key and copy-and-drop a non-enumerable one without a probe call, a key schema that admits symbols and a loose record keep the symbol like stock, and a nested enum record under a strip object is reached; the seventeenth #48: a non-enumerable undeclared string key survives the clean path of every object mode and every record path (the number-keyed record included) and is dropped by the copy path like stock, a class instance is returned as it is while the copy is a plain object and records reject it on both sides, an inherited enumerable key is copied by strip like stock, rejected by strict on both sides and kept inherited by loose where stock writes it as an own key, a throwing `ownKeys`, `getOwnPropertyDescriptor` or `getPrototypeOf` trap throws from strip's `for...in` probe under both settings where stock's strip parses, throws on both sides for strict and for loose's `ownKeys` by default, and is not consulted by loose for `getOwnPropertyDescriptor` or `getPrototypeOf`, nor for any of the three under `"ignore"`, and the object skeleton's `code` carries no explicit descriptor or prototype probe) + `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
   (the three record paths / map / set / size checks / container combinations) + `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
-  (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches) all pass.
+  (tuple truncate/fill/rest/refine + the async channel through array / record / map / set / tuple children and object keys / lazy(async) / union async branches; its last group pins the two decisions of #95: no own-ness probe in any array-shaped skeleton, an explicit `undefined` element copying to stock's output, and the array skeleton under every under-reported Proxy length) all pass.
 - `packages/zod-cow-v4/tests/differential-z4.test.ts`: 50000 cases (seeds=500×100, randomly nested
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine / async transform wrappers), fully consistent with stock zod4:

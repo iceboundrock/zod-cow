@@ -1137,8 +1137,9 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     ok("a short input under an optional tail has an empty rest copy, like stock's slice");
   }
   // A rest hole over an inherited undefined is an own slot in stock's output (finding 5 of the #70 review for a rest
-  // slot): the copy keeps a hole where the index is not own, so the rest loop materializes it; `slice` (#86) read the
-  // inherited value through `HasProperty` and made it own, and the clean path returned the input with the hole
+  // slot): the copy reads the inherited value through `in`-then-read as slice's `HasProperty` then `Get` does, and the
+  // rest loop judges the `undefined` dirty without asking whether it is own (#95), so it is materialized; `slice`
+  // (#86) made it own on the copy and the clean path returned the input with the hole
   {
     const S = z.tuple([z.string()], z.number().optional());
     const C = compile(S);
@@ -1590,12 +1591,12 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     assert.deepEqual(CT.parse(["h", "a", "b"]), ["h", "a!", "b!"], "restored: the hand copy again");
     ok("a replaced Array[Symbol.species] takes the real call, like stock");
   }
-  // The copy is slice's `HasProperty` then `Get` per index and nothing else (third review of #88). The own-ness
-  // question an `undefined` value raises for the CoW decision (an inherited `undefined` under a hole is a hole, where
-  // stock's output holds an own slot) is asked from the rest loop, only when the rest element's output equals that
-  // `undefined`: the hole test every array position makes (`Object.hasOwn` on the input, a `getOwnPropertyDescriptor`
-  // trap stock never runs). A transform rest that maps `undefined` to a value never asks it; a validator rest asks it
-  // after the copy, where the array skeleton asks it inline, and a trap with effects is observed there on both alike
+  // The copy is slice's `HasProperty` then `Get` per index and nothing else (third review of #88). An `undefined` the
+  // copy holds (an own `undefined` of the input, a hole, a hole over an inherited `undefined`: slice's `in`-then-read
+  // makes them the same slot) is judged dirty by the rest loop without asking the input whether it owns the index
+  // (#95), so no `getOwnPropertyDescriptor` trap runs on either side; a validator rest copies to stock's output, a
+  // transform rest that maps `undefined` to a value copies through the comparison. The #95 group at the end of this
+  // file pins the same decision for the array skeleton and the fixed slots
   {
     const T = z.tuple(
       [z.string()],
@@ -1605,7 +1606,6 @@ head("the sync tuple layout slices the rest before running any rest element, lik
         .transform((v) => (v === undefined ? "U" : `${v}!`)),
     );
     const V = z.tuple([z.string()], z.string().optional());
-    const A = z.array(z.string().optional());
     const log: string[] = [];
     const mutating = () =>
       new Proxy(["h", undefined, "b"] as unknown[], {
@@ -1622,60 +1622,30 @@ head("the sync tuple layout slices the rest before running any rest element, lik
           return Reflect.getOwnPropertyDescriptor(t, k);
         },
       });
-    {
-      const stock = T.parse(mutating());
+    for (const [label, S, expected] of [
+      ["transform rest", T, ["h", "U", "b!"]],
+      ["validator rest", V, ["h", undefined, "b"]],
+    ] as [string, z.ZodType, unknown[]][]) {
+      const stock = S.parse(mutating());
       assert.deepEqual(
         stock,
-        ["h", "U", "b!"],
-        "stock reads the later index before anything else runs",
+        expected,
+        `${label}: stock reads every index before anything else runs`,
       );
-      log.length = 0;
-      const cow = compile(T).parse(mutating());
-      assert.deepEqual(
-        cow,
-        stock,
-        "the copy holds slice's values: every index read before any probe",
-      );
-      assert.deepEqual(log, [], "a transform rest asks no descriptor");
-      assert.deepEqual(
-        compile(T).parse(throwing()),
-        stock,
-        "a throwing descriptor trap is never consulted",
-      );
-    }
-    {
-      const stock = V.parse(mutating());
-      assert.deepEqual(stock, ["h", undefined, "b"]);
       log.length = 0;
       const input = mutating();
-      const cow = compile(V).parse(input);
-      assert.equal(
-        cow,
-        input,
-        "clean: an own undefined the validator passed, the input by reference",
-      );
+      const cow = compile(S).parse(input);
+      assert.deepEqual(cow, stock, `${label}: the copy holds slice's values`);
+      assert.notEqual(cow, input, `${label}: an undefined rest element copies`);
+      assert.deepEqual(log, [], `${label}: no descriptor consulted`);
+      assert.equal(input[2], "b", `${label}: the trap's effect never happens`);
       assert.deepEqual(
-        log,
-        ["gopd:1"],
-        "one probe, from the rest loop, for the undefined value only",
+        compile(S).parse(throwing()),
+        stock,
+        `${label}: a throwing descriptor trap is never reached`,
       );
-      assert.equal(
-        input[2],
-        "MUT",
-        "the trap's effect is observed, as the array skeleton's hole test observes it",
-      );
-      log.length = 0;
-      const arr = mutating();
-      assert.equal(compile(A).parse(arr), arr, "the array skeleton: the same clean path");
-      assert.deepEqual(log, ["gopd:1"], "the array skeleton asks the same probe");
-      assert.throws(
-        () => compile(V).parse(throwing()),
-        /gopd trap/,
-        "a validator rest consults the trap",
-      );
-      assert.throws(() => compile(A).parse(throwing()), /gopd trap/, "as the array skeleton does");
     }
-    ok("the rest copy asks own-ness only where the array skeleton asks it");
+    ok("the rest copy asks no own-ness question (#95)");
   }
   // The one length read is coerced as slice's `LengthOfArrayLike` coerces it (third review of #88): `ToLength`, so a
   // Proxy answering a fraction, a negative, a string or a non-number gives the count slice gives and never a
@@ -1964,7 +1934,8 @@ head("the sync tuple layout slices the rest before running any rest element, lik
   // element throws; every other case is a continuation over an iterable named `rest` (a `for...of` continued from
   // the method or the `next` that was read, the native builtin finished on the facade with the reads already made,
   // or what the custom `slice` answered, called through the hoisted `Reflect.apply`, never a second `.slice`), and
-  // the live length read after the rest is compared with every read before it. A fixed tuple reads no `slice` and
+  // the live length read after the rest is compared with every read before it. An `undefined` rest element copies
+  // from the read alone, with no own-ness probe on the copy or the input (#95). A fixed tuple reads no `slice` and
   // allocates nothing on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
@@ -1978,8 +1949,10 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       /\} catch \(err\) \{\s*c\d+\((x\d+)\);\s*throw err;\s*\}\s*\} else \{\s*x\d+ = c\d+\(\1, x\d+\);\s*\}\s*\} else \{\s*x\d+ = c\d+\(x\d+, x\d+\);/.test(
         restCode,
       ) &&
-      !/Array\.prototype|getOwnPropertyDescriptor/.test(restCode) &&
-      /!Object\.hasOwn\(x\d+, i - 1\) \|\| !Object\.hasOwn\(input, i\)/.test(restCode) &&
+      !/Array\.prototype|getOwnPropertyDescriptor|hasOwn/.test(restCode) &&
+      /else if \(e === undefined\) \{\s*if \(x\d+ === input\) \{ x\d+ = \[x\d+\]; for \(let j = 1; j < i; j\+\+\) x\d+\[j\] = x\d+\[j - 1\]; \}\s*x\d+\[i\] = undefined;/.test(
+        restCode,
+      ) &&
       /= c\d+\(input, x\d+, x\d+ === Array \? \{ \[Symbol\.species\]: x\d+ \} : x\d+, 1\);/.test(
         restCode,
       ) &&
@@ -2906,11 +2879,10 @@ head(
     expect: ["h", undefined],
   });
   check({
-    label: "an explicit own undefined in the rest keeps the reference",
+    label: "an explicit own undefined in the rest copies, like a hole (#95)",
     S: S1(opt),
     make: () => ["h", undefined],
     expect: ["h", undefined],
-    ref: true,
   });
   check({
     label: "a dense rest keeps the reference",
@@ -4462,6 +4434,301 @@ head(
     );
   }
   ok("a getter that always throws surfaces its error from the sync API like stock");
+}
+
+head(
+  "an undefined element is judged dirty without an own-ness probe; an under-reported Proxy length keeps the clean path (#95)",
+);
+{
+  // Item 1 of #95: stock's array and tuple runtimes read each element (`input[i]`, or `HasProperty` then `Get` inside
+  // `input.slice(items.length)`) and never ask whether the index is own, and their output holds an own `undefined`
+  // slot wherever the read gave `undefined` (an own `undefined`, a hole, a hole over an inherited `undefined`, a Proxy
+  // whose `get` answers it). The skeletons asked `Object.hasOwn` on such a value to keep the reference for an own
+  // `undefined`, a `getOwnPropertyDescriptor` trap stock never runs. They now judge the value dirty without asking:
+  // the copy is stock's output, and the reference is lost for an input holding an explicit `undefined` member, the
+  // class of `z.nan()` (never `===` itself). The differential fuzzer put that loss at 0.1 point of its top-level
+  // sharing rate. Item 2: a Proxy under-reporting its `length` keeps the clean path (below).
+  const asyncOpt = z
+    .string()
+    .optional()
+    .refine(async () => true);
+  const sync: [string, z.ZodType][] = [
+    ["array", z.array(z.string().optional())],
+    ["fixed tuple", z.tuple([z.string(), z.string().optional(), z.string()])],
+    ["rest tuple", z.tuple([z.string()], z.string().optional())],
+    ["array of any", z.array(z.any())],
+    ["array of undefined", z.array(z.undefined())],
+  ];
+  const asyncs: [string, z.ZodType][] = [
+    ["async array", z.array(asyncOpt)],
+    ["async fixed tuple", z.tuple([z.string(), asyncOpt, z.string()])],
+    ["async rest tuple", z.tuple([z.string()], asyncOpt)],
+  ];
+  const noProbe = /hasOwn|getOwnPropertyDescriptor|propertyIsEnumerable|ownKeys/;
+  /** The async rest row: stock's runtime hands back a sparse array there and loses the value (the quirk the README
+   *  lists as deliberately not matched, for `null` in a nullable slot), where the skeleton writes the own slot */
+  const sparseRest = "async rest tuple";
+  // 1. The code pin: no own-ness probe in any array-shaped skeleton, sync or async, at any depth (`code` dumps every
+  //    nested skeleton, #46)
+  for (const [label, S] of [...sync, ...asyncs]) {
+    const C = compile(S);
+    assert.equal(C.stock, false, `${label}: a skeleton`);
+    assert.ok(!noProbe.test(C.code ?? ""), `${label}: no own-ness probe in the generated code`);
+  }
+  {
+    const nested = z.object({
+      rows: z.array(z.tuple([z.string(), z.array(z.string().optional()).optional()])),
+    });
+    const C = compile(nested);
+    assert.ok(!noProbe.test(C.code ?? ""), "nested: no own-ness probe at any depth");
+  }
+  ok("no array-shaped skeleton carries an own-ness probe");
+  // 2. An explicit `undefined` member copies: stock's output, an own slot, a fresh array; an input without one keeps
+  //    the reference (the loss is bounded to inputs holding a present `undefined`)
+  {
+    const withUndefined = () => ["h", undefined, "b"];
+    const without = () => ["h", "a", "b"];
+    for (const [label, S] of sync) {
+      const C = compile(S);
+      const allUndefined = label === "array of undefined";
+      const input = allUndefined ? [undefined, undefined] : withUndefined();
+      const stock = S.parse(input) as unknown[];
+      assert.deepEqual(stock, allUndefined ? [undefined, undefined] : ["h", undefined, "b"]);
+      const cow = C.parse(input) as unknown[];
+      assert.deepEqual(cow, stock, `${label}: stock's output`);
+      assert.notEqual(cow, input, `${label}: an explicit undefined member copies`);
+      assert.ok(Object.hasOwn(cow, 1), `${label}: an own slot`);
+      if (allUndefined) continue;
+      const clean = without();
+      assert.equal(C.parse(clean), clean, `${label}: no undefined member, the reference`);
+    }
+    // The async layouts: the array and the fixed slots give stock's dense output, the rest row the dense output
+    // stock's sparse quirk withholds
+    for (const [label, S] of asyncs) {
+      const C = compile(S);
+      assert.equal(C.async, true, `${label}: the async layout`);
+      const input = withUndefined();
+      const stock = (await S.parseAsync(input)) as unknown[];
+      if (label !== sparseRest) assert.deepEqual(stock, ["h", undefined, "b"]);
+      else assert.deepEqual(Object.keys(stock), ["0", "2"], "stock's async rest loses the slot");
+      const cow = (await C.parseAsync(input)) as unknown[];
+      assert.deepEqual(cow, ["h", undefined, "b"], `${label}: the dense output`);
+      assert.notEqual(cow, input, `${label}: an explicit undefined member copies`);
+      assert.ok(Object.hasOwn(cow, 1), `${label}: an own slot`);
+      const clean = without();
+      assert.equal(
+        await C.parseAsync(clean),
+        clean,
+        `${label}: no undefined member, the reference`,
+      );
+    }
+    // The array skeleton's copy holds the prefix and every later element from the loop's single read
+    const A = z.array(z.string().optional());
+    const long = ["a", "b", undefined, "d", undefined];
+    const cowLong = compile(A).parse(long) as unknown[];
+    assert.deepEqual(cowLong, long);
+    assert.notEqual(cowLong, long);
+    assert.equal(Object.keys(cowLong).length, 5, "every index own");
+    ok(
+      "an explicit undefined member copies to stock's output; an input without one keeps the reference",
+    );
+  }
+  // 3. A hole and a hole over an inherited `undefined` copy like stock, an own slot in the output (the #67 / #70
+  //    rows, now decided from the read alone)
+  {
+    const HOLE = Symbol("hole");
+    const arr = (...vs: unknown[]): unknown[] => {
+      const a: unknown[] = [];
+      for (let i = 0; i < vs.length; i++) if (vs[i] !== HOLE) a[i] = vs[i];
+      a.length = vs.length;
+      return a;
+    };
+    const inherited = (...vs: unknown[]): unknown[] => {
+      const a = arr(...vs);
+      const proto = Object.create(Array.prototype) as Record<number, unknown>;
+      for (let i = 0; i < vs.length; i++) if (vs[i] === HOLE) proto[i] = undefined;
+      Object.setPrototypeOf(a, proto);
+      return a;
+    };
+    for (const [label, S] of sync) {
+      if (label === "array of undefined") continue;
+      const C = compile(S);
+      for (const [kind, make] of [
+        ["a hole", () => arr("h", HOLE, "b")],
+        ["a hole over an inherited undefined", () => inherited("h", HOLE, "b")],
+      ] as [string, () => unknown[]][]) {
+        const stock = S.parse(make()) as unknown[];
+        assert.ok(Object.hasOwn(stock, 1) && stock.length === 3, `${label}: stock owns the slot`);
+        const input = make();
+        const cow = C.parse(input) as unknown[];
+        assert.deepEqual(cow, stock, `${label}, ${kind}: stock's output`);
+        assert.notEqual(cow, input, `${label}, ${kind}: copied`);
+        assert.ok(Object.hasOwn(cow, 1), `${label}, ${kind}: an own slot`);
+      }
+    }
+    for (const [label, S] of asyncs) {
+      const C = compile(S);
+      for (const [kind, make] of [
+        ["a hole", () => arr("h", HOLE, "b")],
+        ["a hole over an inherited undefined", () => inherited("h", HOLE, "b")],
+      ] as [string, () => unknown[]][]) {
+        const stock = (await S.parseAsync(make())) as unknown[];
+        if (label !== sparseRest) assert.deepEqual(stock, ["h", undefined, "b"]);
+        const input = make();
+        const cow = (await C.parseAsync(input)) as unknown[];
+        assert.deepEqual(cow, ["h", undefined, "b"], `${label}, ${kind}: the dense output`);
+        assert.notEqual(cow, input, `${label}, ${kind}: copied`);
+        assert.ok(Object.hasOwn(cow, 1), `${label}, ${kind}: an own slot`);
+      }
+    }
+    ok("a hole and a hole over an inherited undefined are own slots, like stock, in every layout");
+  }
+  // 4. The issue's Proxies: a `getOwnPropertyDescriptor` trap that writes to a later index, and one that throws.
+  //    Neither runs on either side: the compiled output is stock's and the input's later index is untouched
+  {
+    const mutating = (log: string[]) =>
+      new Proxy(["h", undefined, "b"] as unknown[], {
+        getOwnPropertyDescriptor(t, k) {
+          log.push(`gopd:${String(k)}`);
+          if (k === "1") t[2] = "MUT";
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+      });
+    const throwing = () =>
+      new Proxy(["h", undefined, "b"] as unknown[], {
+        getOwnPropertyDescriptor(t, k) {
+          if (k === "1") throw new Error("gopd trap");
+          return Reflect.getOwnPropertyDescriptor(t, k);
+        },
+      });
+    for (const [label, S] of sync) {
+      if (label === "array of undefined") continue;
+      const C = compile(S);
+      const stockLog: string[] = [];
+      const stock = S.parse(mutating(stockLog)) as unknown[];
+      assert.deepEqual(stock, ["h", undefined, "b"]);
+      assert.deepEqual(stockLog, [], `${label}: stock consults no descriptor`);
+      const log: string[] = [];
+      const input = mutating(log);
+      const cow = C.parse(input) as unknown[];
+      assert.deepEqual(cow, stock, `${label}: stock's output`);
+      assert.deepEqual(log, [], `${label}: the skeleton consults no descriptor either`);
+      assert.equal(input[2], "b", `${label}: the trap's effect never happens`);
+      assert.deepEqual(C.parse(throwing()), stock, `${label}: a throwing trap is never reached`);
+    }
+    for (const [label, S] of asyncs) {
+      const C = compile(S);
+      const stockLog: string[] = [];
+      await S.parseAsync(mutating(stockLog));
+      assert.deepEqual(stockLog, [], `${label}: stock consults no descriptor`);
+      const log: string[] = [];
+      const input = mutating(log);
+      const cow = (await C.parseAsync(input)) as unknown[];
+      assert.deepEqual(cow, ["h", undefined, "b"], `${label}: the dense output`);
+      assert.deepEqual(log, [], `${label}: no descriptor consulted before the await`);
+      assert.equal(input[2], "b");
+      assert.deepEqual(
+        await C.parseAsync(throwing()),
+        ["h", undefined, "b"],
+        `${label}: a throwing trap is never reached`,
+      );
+    }
+    ok("a getOwnPropertyDescriptor trap is never consulted, like stock");
+  }
+  // Item 2 of #95: the skeletons size their walk from `input.length` as stock does and return the input by reference
+  // when every element the reported length covers is unchanged. A Proxy under-reporting its length (only a Proxy
+  // can: a plain array's length is exact) gets stock a fresh truncated output and the compiled parser the input
+  // itself, whose further elements stock never saw: the clean path's known limitation, the class of the
+  // non-enumerable undeclared key and the prototype (#48), since proving the length costs an allocation
+  // (`Reflect.ownKeys`) or a trap per clean array. The array skeleton walks `i < length` like stock's runtime and
+  // allocates nothing on its clean path, where stock's runtime sizes its output with `Array(length)` first: a length
+  // that allocation rejects (a fraction, `NaN`, a negative) throws stock's `RangeError` from
+  // the skeleton's copy path only, when the walk reached an element a rewrite changed. The tuple rows sit in the
+  // #78 group (its presence decision after the rest re-runs stock's algorithm for a length converting to NaN, the
+  // one exception). A rewrite forces the copy, which is stock's truncated output
+  {
+    const withLength = (len: unknown) =>
+      new Proxy(["h", "a", "b"], {
+        get(t, k, r) {
+          return k === "length" ? len : Reflect.get(t, k, r);
+        },
+      });
+    const V = z.array(z.string());
+    const T = z.array(z.string().transform((v) => `${v}!`));
+    const CV = compile(V);
+    const CT = compile(T);
+    // Lengths stock's `Array(length)` accepts: the walk stock makes, the input by reference
+    for (const [len, asInt] of [
+      [1, 1],
+      [2, 2],
+      ["2", 2],
+      [true, 1],
+    ] as [unknown, number][]) {
+      const stock = V.parse(withLength(len));
+      assert.deepEqual(
+        stock,
+        ["h", "a", "b"].slice(0, asInt),
+        `stock walks ${String(len)} as ${asInt}`,
+      );
+      const input = withLength(len);
+      assert.equal(CV.parse(input), input, `length ${String(len)}: the input by reference`);
+      const stockT = T.parse(withLength(len));
+      assert.deepEqual(stockT, ["h!", "a!", "b!"].slice(0, asInt));
+      assert.deepEqual(
+        CT.parse(withLength(len)),
+        stockT,
+        `length ${String(len)}: the rewrite copies to stock's output`,
+      );
+    }
+    // Lengths that allocation rejects: stock throws before it reads an element; the clean path walks what
+    // `i < length` covers (a fraction some elements, NaN or a negative none) and returns the input; the copy path
+    // allocates as stock does and throws the same RangeError, so a rewrite under a fraction throws
+    for (const [len, walks] of [
+      [2.9, true],
+      [1.5, true],
+      [Number.NaN, false],
+      [-1, false],
+    ] as [unknown, boolean][]) {
+      assert.throws(
+        () => V.parse(withLength(len)),
+        RangeError,
+        `stock's Array(${String(len)}) throws`,
+      );
+      const input = withLength(len);
+      assert.equal(
+        CV.parse(input),
+        input,
+        `length ${String(len)}: the clean path returns the input`,
+      );
+      if (walks) {
+        assert.throws(
+          () => CT.parse(withLength(len)),
+          RangeError,
+          `length ${String(len)}: the copy path throws stock's RangeError`,
+        );
+      } else {
+        const t = withLength(len);
+        assert.equal(CT.parse(t), t, `length ${String(len)}: an empty walk, the input`);
+      }
+    }
+    // The fixed tuple: a length below the required slots is stock's failure (the guard hands it to stock), a length
+    // that lands in the optional range is the truncation, on the clean path
+    const F = z.tuple([z.string(), z.string().optional()]);
+    const CF = compile(F);
+    const one = withLength(1);
+    assert.deepEqual(F.parse(one), ["h"]);
+    assert.equal(CF.parse(one), one, "the fixed tuple truncates on the clean path");
+    const F3 = z.tuple([z.string(), z.string(), z.string()]);
+    assert.equal(F3.safeParse(withLength(1)).success, false);
+    assert.equal(compile(F3).safeParse(withLength(1)).success, false, "stock's failure");
+    // The async array layout: the same clean path for an integer under-report
+    const CA = compile(z.array(z.string().refine(async () => true)));
+    const p = withLength(1);
+    assert.equal(await CA.parseAsync(p), p, "the async layout: the input by reference");
+    ok(
+      "an under-reported Proxy length keeps the clean path (the known limitation), a rewrite copies to stock's output",
+    );
+  }
 }
 
 console.log("\nAll tuple + async smoke assertions passed ✓");

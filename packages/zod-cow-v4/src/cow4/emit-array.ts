@@ -1,4 +1,4 @@
-/** Array skeleton: element-level reference comparison + prefix rebuild at the first change, holes materialized. */
+/** Array skeleton: element-level reference comparison + prefix rebuild at the first change, an undefined element copied. */
 import type { CodeCtx } from "./codectx.js";
 import { containerChildFn, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
@@ -38,31 +38,31 @@ export function emitCoWArray(
   const e = ctx.var();
   const t = ctx.var();
 
-  // The first forced change (a changed element or a hole) rebuilds the clean prefix into a fresh
-  // array, reading those elements from the input a second time (#36), and every later element is
-  // written from the single read the loop makes, so a getter or a hole after the first change is
-  // observed exactly as stock observes it. `slice()` did neither: it re-read every element and kept
-  // a hole where stock writes an own undefined slot (#67, review of #70). A hole is an index the
-  // input does not own (`Object.hasOwn`: an inherited undefined under a hole is still a hole, where
-  // `in` called it present); an inherited value under a hole reads as that value and stays the
-  // prototype limitation of the clean path (#48). The async layout below rebuilds the prefix from
-  // the reads it captured before the await and decides a hole in that same pass (#77): a child may
-  // mutate the input before its promise settles, and stock, which reads every element once before
-  // any promise settles, does not observe that mutation.
+  // The first forced change (a changed element or an undefined one) rebuilds the clean prefix into
+  // a fresh array, reading those elements from the input a second time (#36), and every later
+  // element is written from the single read the loop makes, so a getter or a hole after the first
+  // change is observed exactly as stock observes it. `slice()` did neither: it re-read every element
+  // and kept a hole where stock writes an own undefined slot (#67, review of #70). An element that
+  // reads as `undefined` and comes back unchanged is judged dirty without asking whether the index
+  // is own (#95): stock's output holds an own `undefined` slot there whether the input held an own
+  // `undefined`, a hole, or a hole over an inherited `undefined`, and the own-ness test that told
+  // those apart (`Object.hasOwn`) was a `getOwnPropertyDescriptor` trap stock never consults; the
+  // reference is lost for an input holding an explicit `undefined` member, the class of `z.nan()`.
+  // An inherited value under a hole reads as that value and stays the prototype limitation of the
+  // clean path (#48). The async layout below rebuilds the prefix from the reads it captured before
+  // the await (#77): a child may mutate the input before its promise settles, and stock, which
+  // reads every element once before any promise settles, does not observe that mutation.
   const reads = ctx.var();
   const len0 = ctx.var();
-  const holes = ctx.var();
   const copy = elemAsync
     ? `${dirty} = true; ${out} = new Array(${len0}); for (let j = 0; j < ${i}; j++) ${out}[j] = ${reads}[j];`
     : `${dirty} = true; ${out} = new Array(${accessor}.length); for (let j = 0; j < ${i}; j++) ${out}[j] = ${accessor}[j];`;
-  const hole = elemAsync
-    ? `${holes} !== null && ${holes}[${i}] === true`
-    : `${e} === undefined && !Object.hasOwn(${accessor}, ${i})`;
+  const hole = `${e} === undefined`;
   ctx.write(`let ${out} = ${accessor}, ${dirty} = false;`);
   /** The comparison of element `i`, read once into `e`, against its settled result `res` (a call expression or a local) */
   const emitElement = (res: string): void => {
     if (elemPure && !elemIsContainer) {
-      // Pure leaf element: value === input, no copy unless a hole forced one (the validator product returns true and cannot be reference-compared)
+      // Pure leaf element: value === input, no copy unless an undefined value forced one (the validator product returns true and cannot be reference-compared)
       ctx.write(`if (${res} === INVALID) return INVALID;`);
       ctx.write(`if (${dirty}) ${out}[${i}] = ${e};`);
       ctx.write(`else if (${hole}) { ${copy} ${out}[${i}] = undefined; }`);
@@ -83,8 +83,8 @@ export function emitCoWArray(
     ctx.write(`}`);
   } else {
     // Async element (#71): stock's runtime starts every element's parse inside its loop and awaits
-    // them together. The first loop reads each element once, notes a hole and starts its product,
-    // one `Promise.all` settles them, and the second loop runs the comparisons above on the captured
+    // them together. The first loop reads each element once and starts its product, one
+    // `Promise.all` settles them, and the second loop runs the comparisons above on the captured
     // reads and the settled results (the async path allocates two arrays; the sync path none).
     // Nothing is read from the input after the await (#77): the length stock sizes its output with
     // is taken before the loop, the loop bound is live like stock's, and the second loop covers the
@@ -95,14 +95,11 @@ export function emitCoWArray(
     ctx.write(
       `const ${len0} = ${accessor}.length, ${reads} = new Array(${len0}), ${started} = new Array(${len0});`,
     );
-    ctx.write(`let ${holes} = null, ${n} = 0;`);
+    ctx.write(`let ${n} = 0;`);
     ctx.write(`for (; ${n} < ${accessor}.length; ${n}++) {`);
     ctx.indented(() => {
       ctx.write(`const ${e} = ${accessor}[${n}];`);
       ctx.write(`${reads}[${n}] = ${e};`);
-      ctx.write(
-        `if (${e} === undefined && !Object.hasOwn(${accessor}, ${n})) (${holes} ??= [])[${n}] = true;`,
-      );
       ctx.write(`${started}[${n}] = ${f}(${e});`);
     });
     ctx.write(`}`);

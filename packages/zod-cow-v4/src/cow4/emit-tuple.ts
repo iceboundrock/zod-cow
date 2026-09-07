@@ -120,9 +120,8 @@ export function emitCoWTuple(
   /** The length fixed slot i's presence is decided from: the held read in the sync rest layout, the live one elsewhere */
   const lenAt = (i: number): string => (syncRest ? slotLen[i]! : `${accessor}.length`);
 
-  /** Async layout: the local holding the single read of fixed slot i, the one holding whether it was a hole, and the one holding its settled result */
+  /** Async layout: the local holding the single read of fixed slot i and the one holding its settled result */
   const slotRead: string[] = [];
-  const slotHole: string[] = [];
   const slotResult: string[] = [];
   /** The rest elements: stock's `input.slice(items.length)`, taken after the fixed slots ran (started, in the async
    *  layout) and before any rest product runs, holes preserved, indexed by `i - N` (#78); the async layout's local
@@ -133,13 +132,10 @@ export function emitCoWTuple(
     const started: string[] = [];
     for (let i = 0; i < N; i++) {
       const e = ctx.var();
-      const h = ctx.var();
       const r = ctx.var();
       ctx.write(`const ${e} = ${accessor}[${i}];`);
-      ctx.write(`const ${h} = ${e} === undefined && !Object.hasOwn(${accessor}, ${i});`);
       ctx.write(`const ${r} = ${ctx.addConst(itemProducts[i]!.fn)}(${e});`);
       slotRead.push(e);
-      slotHole.push(h);
       started.push(r);
       slotResult.push(itemProducts[i]!.kind === "async" ? ctx.var() : r);
     }
@@ -188,8 +184,8 @@ export function emitCoWTuple(
    *  holding the clean prefix [0, idxExpr). The sync layout without a rest reads the fixed slots from the input a second
    *  time (#36); the sync rest layout takes them from the held results and the rest part from the copy (fourth review of
    *  #88); the async layout takes both from its captured reads (#77). Every later slot is written from the loop's single
-   *  read (review of #70). A clean prefix holds present, unchanged slots only (an absent slot, a hole or a truncation
-   *  copies), so what was read and held is the prefix */
+   *  read (review of #70). A clean prefix holds present, unchanged, defined slots only (an absent slot, an undefined
+   *  one or a truncation copies), so what was read and held is the prefix */
   const copyAt = (idxExpr: string): string => {
     if (syncRest) {
       if (idxExpr !== "i") {
@@ -209,23 +205,13 @@ export function emitCoWTuple(
     }
     return `if (${out} === ${accessor}) { ${out} = [${slotRead.join(", ")}]; for (let j = ${N}; j < i; j++) ${out}[j] = ${restReads}[j - ${N}]; }`;
   };
-  /** A hole: an index the input does not own (`Object.hasOwn`, so an inherited undefined under a hole is one too); a
-   *  rest element's is read off the slice, which kept it (#77, #78), and the async layout decided a fixed slot's before
-   *  the await. The sync layout's hand copy holds an own slot wherever `in` answered (slice's `HasProperty`), so an
-   *  `undefined` the copy owns still asks the input whether it owns the index, the probe every array position makes
-   *  on an `undefined` value, from here rather than from the copy loop, so a rest element whose output differs never
-   *  raises it (third review of #88); the async layout reads nothing from the input after its await (#77) and keeps
-   *  the slice's answer */
-  const isHole = (eVar: string, idxExpr: string): string => {
-    if (idxExpr === "i") {
-      const onCopy = `!Object.hasOwn(${restReads}, i - ${N})`;
-      return anyAsync
-        ? `${eVar} === undefined && ${onCopy}`
-        : `${eVar} === undefined && (${onCopy} || !Object.hasOwn(${accessor}, i))`;
-    }
-    if (!anyAsync) return `${eVar} === undefined && !Object.hasOwn(${accessor}, ${idxExpr})`;
-    return slotHole[Number(idxExpr)]!;
-  };
+  /** A slot that read as `undefined` and came back unchanged is judged dirty without asking whether the index is own
+   *  (#95): stock writes an own `undefined` slot there whether the input held an own `undefined`, a hole or a hole over
+   *  an inherited `undefined` (the rest copy's `in`-then-read, slice's `HasProperty` then `Get`, makes the last two the
+   *  same `undefined`), and the own-ness test that told them apart (`Object.hasOwn`) was a `getOwnPropertyDescriptor`
+   *  trap stock never consults, at every position (a fixed slot, the sync rest loop on the input, the async layouts'
+   *  reads before the await). The reference is lost for an input holding an explicit `undefined` member */
+  const isHole = (eVar: string): string => `${eVar} === undefined`;
   /** Value-shaped slot (parser/cow/async product), its result `res` (a call expression or a settled local): test for
    *  INVALID + reference comparison + prefix rebuild at the first dirt.
    *  eVar=null marks an absent slot (the official code unconditionally does out[i] = result, including materializing undefined / extending the shape) → write unconditionally. */
@@ -240,7 +226,7 @@ export function emitCoWTuple(
       ctx.write(`${out}[${idxExpr}] = ${t};`);
     } else {
       ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${t};`);
-      ctx.write(`else if (${t} !== ${eVar} || (${isHole(eVar, idxExpr)})) {`);
+      ctx.write(`else if (${t} !== ${eVar} || ${isHole(eVar)}) {`);
       ctx.indented(() => {
         ctx.write(copyAt(idxExpr));
         ctx.write(`${out}[${idxExpr}] = ${t};`);
@@ -248,7 +234,7 @@ export function emitCoWTuple(
       ctx.write(`}`);
     }
   };
-  /** A hole: stock writes every slot it visits, so an index absent from the input is an own undefined in its output (#67) */
+  /** An undefined slot: stock writes every slot it visits, so a hole or an own undefined in the input is an own undefined in its output (#67, #95) */
   const emitHole = (idxExpr: string): void => {
     ctx.write(copyAt(idxExpr));
     ctx.write(`${out}[${idxExpr}] = undefined;`);
@@ -261,7 +247,7 @@ export function emitCoWTuple(
       // eVar is the local holding the value read from the slot: written once copied, a hole is materialized
       keepSlot(idxExpr, eVar);
       ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${eVar};`);
-      ctx.write(`else if (${isHole(eVar, idxExpr)}) {`);
+      ctx.write(`else if (${isHole(eVar)}) {`);
       ctx.indented(() => emitHole(idxExpr));
       ctx.write(`}`);
     } else {
@@ -363,12 +349,12 @@ export function emitCoWTuple(
           ctx.indented(() => {
             if (p.kind === "validator") {
               ctx.write(`if (${out} !== ${accessor}) ${out}[${i}] = ${e};`);
-              ctx.write(`else if (${isHole(e, String(i))}) {`);
+              ctx.write(`else if (${isHole(e)}) {`);
               ctx.indented(() => emitHole(String(i)));
               ctx.write(`}`);
             } else {
               ctx.write(`if (${out} !== ${accessor}) ${out}[${i}] = ${t};`);
-              ctx.write(`else if (${t} !== ${e} || (${isHole(e, String(i))})) {`);
+              ctx.write(`else if (${t} !== ${e} || ${isHole(e)}) {`);
               ctx.indented(() => {
                 ctx.write(copyAt(String(i)));
                 ctx.write(`${out}[${i}] = ${t};`);
@@ -448,7 +434,7 @@ export function emitCoWTuple(
       if (restProduct.kind === "validator") {
         ctx.write(`if ((${res}) === INVALID) return INVALID;`);
         ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${e};`);
-        ctx.write(`else if (${isHole(e, "i")}) {`);
+        ctx.write(`else if (${isHole(e)}) {`);
         ctx.indented(() => emitHole("i"));
         ctx.write(`}`);
       } else {
@@ -456,7 +442,7 @@ export function emitCoWTuple(
         ctx.write(`const ${t} = ${res};`);
         ctx.write(`if (${t} === INVALID) return INVALID;`);
         ctx.write(`if (${out} !== ${accessor}) ${out}[i] = ${t};`);
-        ctx.write(`else if (${t} !== ${e} || (${isHole(e, "i")})) {`);
+        ctx.write(`else if (${t} !== ${e} || ${isHole(e)}) {`);
         ctx.indented(() => {
           ctx.write(copyAt("i"));
           ctx.write(`${out}[i] = ${t};`);

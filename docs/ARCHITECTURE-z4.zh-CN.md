@@ -568,17 +568,33 @@ return out;
 4. 公开 API：`Compiled` 增加 `async: boolean`、`parseAsync` / `safeParseAsync`；
    async 骨架下 sync API 抛 `$ZodAsyncError`（官方同款语义，实测 sync parse 对 async 树就是抛）。
 5. lazy(async) 补漏：官方对 lazy 产物是 runtime island，内部 async 编译期不报错 →
-   Promise 会静默传出去。`subtreeHasAsync` 静态探测（def 树递归，含 checks 的 fn/superRefine、`z.property` / `z.properties` check 携带的
+   Promise 会静默传出去。`inspectSubtree` 静态探测（def 树递归，含 checks 的 fn/superRefine、`z.property` / `z.properties` check 携带的
    schema（#84 review）、pipe 的 transform、lazy getter 展开，seen 防环）→ async lazy 改走 async 岛。
    同一次遍历也决定 stock 编译因非 async 原因失败的子树走哪种岛（#75）：symbol 字面量、coerce、`z.xor` 或带回调的 `catch`
    在 stock codegen 走到 checks 之前就抛 `ZodCompileUnsupportedError`，这个错误说明不了 async 与否，而 `officialFn` 的兜底以前
    一律取同步岛。这个岛在 parse 时才遇到 Promise：`.async` 报 false，且自 #76 起 async 入口接住那次抛出后把整次 parse 交给
-   stock 的 async runtime 重跑，于是每个回调跑两遍、CoW 引用也丢了。改为先问 `subtreeHasAsync` 之后，该子树是 async 岛，
+   stock 的 async runtime 重跑，于是每个回调跑两遍、CoW 引用也丢了。改为先问 `inspectSubtree` 之后，该子树是 async 岛，
    骨架对它 await，外面的 tuple / array / object 对干净输入照样返回原引用。
    这次遍历会读子树下每个 object 的 shape，而 stock 只在 parse 时才读它（`$ZodObject` 在第一次读 `def.shape` 时才复制调用方的
    shape，所以 shape 的 getter 可以引用尚在构造中的 schema），且 stock 对被拒子树的编译根本没走到 shape，因此 getter 在遍历中
    抛错时会被兜住而不是从 `compile()` 抛出（#82 review）：该子树取同步岛，其运行在 parse 时遇到同一个抛错，与 stock 的 parser
-   一致；到 parse 时已能解析的 getter 则遇到 Promise 走 #76 路线。抛错的 `lazy` getter 仍取 async 岛（#83）。
+   一致；到 parse 时已能解析的 getter 则遇到 Promise 走 #76 路线。
+   编译期 getter 抛错的 `lazy` 是不透明的（#83）。stock 在 parse 之前从不调用 getter，所以这次抛错说明不了子树的任何事，getter
+   按同步计。只改取同步岛还不够：`$ZodLazy` 用 `util.defineLazy` 缓存内层类型，它在调用 getter 之前先给单元打上标记，getter
+   抛错时却不复位，于是在 getter 抛错期间对 `_zod.innerType` 的一次读取会让之后每次读取都答 `undefined`，该 schema 之后的每次
+   parse（包括 stock 自己的 `safeParse`）都以 `TypeError` 告终（stock 自己的 `z.compile()` 对暂时性死区中编译的 schema 也是这样）。
+   stock 的 `compileFn` 一上来就做这次读取（`isRecursiveSchema`），骨架在编译期决定的 presence 规则也是，因为 lazy 的
+   `optin` / `optout` / `values` / `propValues` 都经由这个缓存计算。所以遍历直接从 `def` 读 getter；遍历见到这种 getter 时
+   `officialFn` 在尝试 `compileFn` 之前就取岛；`officialValidator` 返回 null（`validate` 走骨架，同 #69）；
+   `cowSafeContainerForChild` 通过 `presenceReadable`（`purity.ts`）拒绝会读该 lazy presence 的容器骨架，它沿 stock 转发这些值的
+   槽位走（`innerType`、`in` / `out`、`options`、`left` / `right`、lazy 的 getter）：object 的每个 shape 子节点、tuple 中
+   `getTupleOptStart` 扫到的尾部槽位（两个 key 都扫，所以扫描到不了的槽位里的 lazy 不影响 tuple 的骨架）、`optional` 层的内层
+   （`emitBoxedContainer` 读它的 `optin`）、discriminated union 的每个选项（`unionSkeletonOk` 读 `propValues`）。被拒的容器走
+   `officialFn`，进而走 runtime 岛，读取在 parse 时发生，与 stock 一致；array、record、map、set 从不读子节点的 presence，保留
+   骨架，lazy 作为岛子节点。到 parse 时解析为同步子树的 getter（暂时性死区：引用模块中稍后声明的绑定，`compile()` 在两个声明
+   之间被调用）于是让同步 API 与 stock 一样作答，骨架保住的地方引用也保住；解析为 async 子树的 getter 遇到 Promise 走 #76
+   路线；始终抛错的 getter 在同步 API 的第一次调用抛自己的错误、之后抛 stock 的 `TypeError`，与 stock 的 schema 经历的序列相同，
+   而 `compile()` 不碰这个缓存。getter 在编译期会被调用几次（岛的判定、validator 的检查、各处门槛），stock 在首次 parse 时调用一次。
    自 #76 第六轮 review 起，裸 `lazy` 不论子树是否 async 都走本层的岛（`officialFn`：`makeAsyncIsland` 或 `makeIsland`）：
    stock 自己对它的产物也是 runtime island（`generateLazyCheck` 在空 context 下运行 getter 的 `_zod.run`，并直接读返回值的
    `.issues`，所以普通函数返回的 thenable 在那里以 `TypeError` 告终），因此不损失任何编译快路径，而这次运行由本层接管。
@@ -625,8 +641,9 @@ compile(schema)
   │     │     │     │     └─ 生成失败 → officialFn(parser) → island
   │     │     │     ├─ 非纯子树 → officialFn(parser 产物)
   │     │     │     │     ├─ 生成失败 → makeIsland（黑盒 _zod.run，遇 Promise 抛 $ZodAsyncError），
-  │     │     │     │     │     子树含 async check（subtreeHasAsync 判定）时改取 makeAsyncIsland（#75；
-  │     │     │     │     │     遍历中 shape getter 抛错则保留同步岛，#82 review）
+  │     │     │     │     │     子树含 async check（inspectSubtree 判定）时改取 makeAsyncIsland（#75；
+  │     │     │     │     │     遍历中 shape getter 抛错则保留同步岛，#82 review；
+  │     │     │     │     │     getter 抛错的 lazy 在尝试 compileFn 之前就取岛，#83）
   │     │     │     │     ├─ ZodCompileAsyncError → makeAsyncIsland（await 通道）★v0.5
   │     │     │     │     └─ 子树任意位置有带非回调 check 的 optional / nullable 层（subtreeFollowsRuntime，#69）
   │     │     │     │           → 先于 compileFn 直接取 makeIsland / makeAsyncIsland：stock 编译器在短路值上的答案与其 runtime 不同
@@ -661,7 +678,7 @@ stock 的编译器把每个非回调 check 发射为对值自身属性的内联�
 `wrapperFollowsRuntime`（`purity.ts`）识别这种层，`isPure` 判其非纯，因此纯子树中不会出现它（`emitNode` 直接调用的
 `assertOnly` 编译不会遇到它）；`subtreeFollowsRuntime`（`official.ts`）在官方子树中查找它（不深入 `lazy`：stock 的产物本来就在
 runtime 中运行 lazy；但会深入 `z.property` / `z.properties` check 携带的 schema，因为 stock 的 `generatePropertyCheck` 把它内联编译，
-其中的包装层遇到同一处分歧，#84 review；`childrenOf` 是两次遍历共用的子节点枚举），`officialFn` 为整个子树取岛，由 `subtreeHasAsync` 决定同步岛还是 async 岛；`officialValidator` 对含有
+其中的包装层遇到同一处分歧，#84 review；`childrenOf` 是两次遍历共用的子节点枚举），`officialFn` 为整个子树取岛，由 `inspectSubtree` 的 async 答案决定同步岛还是 async 岛；`officialValidator` 对含有
 它的整树返回 null，`validate` 于是走骨架。canary 钉住这两处分歧。
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
@@ -779,8 +796,8 @@ The engine lives in `src/cow4/` as a set of modules cut along the seams describe
 | `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
 | `codectx.ts` | §3 | `CodeCtx`（携带 debug dump 共享的 `sources` 列表）, `escKey`, `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
-| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild` |
-| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync`, `subtreeHasPlainTransform` |
+| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild`, `presenceReadable` |
+| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `lazyGetterThrows`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple`：固定槽各段与 async 布局 |

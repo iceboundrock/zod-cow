@@ -263,6 +263,7 @@ export function unionSkeletonOk(schema: Node): boolean {
     if (def.unionFallback) return false;
     const claimed = new Set<unknown>();
     for (const option of def.options) {
+      if (!presenceReadable(option)) return false; // a lazy whose getter throws at compile time (#83)
       const values: Set<unknown> | undefined = option._zod.propValues?.[def.discriminator];
       if (!values || values.size === 0) return false;
       for (const v of values) {
@@ -313,16 +314,87 @@ export function cowSafeContainerForChild(child: Node): boolean {
     if (t === "optional" || t === "nullable") {
       if (isExactOptional(cur) || !wrapperChecksAreCowSafe(cur)) return false;
       cur = cur._zod.def.innerType;
+      // `emitBoxedContainer` reads `optin` off the inner of an optional layer (a defaulted inner does not shortcut)
+      if (t === "optional" && !presenceReadable(cur)) return false;
       continue;
     }
-    if (t === "object" || t === "array") return checksAreCowSafe(cur);
+    if (t === "object") return checksAreCowSafe(cur) && shapePresenceReadable(cur);
+    if (t === "array") return checksAreCowSafe(cur);
     if (t === "record") return recordKeyShapeOk(cur) && checksAreCowSafe(cur);
-    if (t === "map" || t === "set" || t === "tuple") return checksAreCowSafe(cur);
+    if (t === "map" || t === "set") return checksAreCowSafe(cur);
+    if (t === "tuple") return checksAreCowSafe(cur) && tuplePresenceReadable(cur);
     // A union with a container option (at any depth of nested unions) gets the union skeleton, which
     // routes that option through this same decision (#58); a leaf-only union stays one official product
     if (t === "union") return cur._zod.def.options.some(unwrapsToContainer) && unionSkeletonOk(cur);
     return false;
   }
+}
+
+/**
+ * Whether stock's `optin` / `optout` / `values` / `propValues` of a node can be read at compile time (#83). The
+ * object skeleton decides its presence rules from those slots of every shape child (`requiresPresence`,
+ * `mayOutputUndefined`, `dropsWhenAbsent`, the optin branch of a parser child), the tuple skeleton from the
+ * tail slots `getTupleOptStart` scans, `emitBoxedContainer` from the inner of an `optional` layer and
+ * `unionSkeletonOk` from the options of a discriminated union; stock makes the same reads at parse time.
+ * `$ZodLazy` computes every one of them through its `innerType` memo, which one throw of the getter poisons
+ * for every later parse of the schema, stock's own included (`inspectSubtree` in `official.ts`), so a node
+ * whose slots forward to a lazy whose getter throws right now is not readable, and the container that would
+ * read it declines its skeleton: it goes to `officialFn`, which hands it to the runtime island, where the read
+ * happens at parse time like stock's. The walk follows the slots stock's definitions forward through
+ * (`innerType` for the wrappers, `in` / `out` for a pipe, `options` for a union, `left` / `right` for an
+ * intersection, the getter of a lazy, read off `def` and never through the memo) and stops at anything else:
+ * a container forwards nothing, so a lazy below an array or under an object key of the child is not this
+ * decision's business (that child's own skeleton or island decides).
+ */
+function presenceReadable(node: Node, seen: Set<Node> = new Set()): boolean {
+  if (seen.has(node)) return true;
+  seen.add(node);
+  const def = node._zod.def;
+  if (def.type === "lazy") {
+    let inner: Node;
+    try {
+      inner = def.getter();
+    } catch {
+      return false;
+    }
+    return presenceReadable(inner, seen);
+  }
+  const next: Node[] = [];
+  if (def.innerType) next.push(def.innerType);
+  if (def.in) next.push(def.in);
+  if (def.out) next.push(def.out);
+  if (def.left) next.push(def.left);
+  if (def.right) next.push(def.right);
+  if (def.options) next.push(...def.options);
+  return next.every((k) => presenceReadable(k, seen));
+}
+
+/**
+ * Every shape child readable (#83). A shape or a shape key whose getter throws while it is read here is not this
+ * gate's business (review of #82): the answer is yes, and the skeleton meets the throw where it met it before.
+ */
+function shapePresenceReadable(object: Node): boolean {
+  try {
+    const shape = object._zod.def.shape;
+    return Reflect.ownKeys(shape).every((k) => presenceReadable(shape[k]));
+  } catch {
+    return true;
+  }
+}
+
+/** The tail slots `getTupleOptStart` reads, for both keys, readable (#83): the same scan, stopping at the first slot that is not omittable */
+function tuplePresenceReadable(tuple: Node): boolean {
+  const items: Node[] = tuple._zod.def.items;
+  for (const key of ["optin", "optout"] as const) {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i]!;
+      if (!presenceReadable(it)) return false;
+      const omittable =
+        key === "optin" ? it._zod.optin !== undefined : it._zod.optout === "optional";
+      if (!omittable) break;
+    }
+  }
+  return true;
 }
 
 /**

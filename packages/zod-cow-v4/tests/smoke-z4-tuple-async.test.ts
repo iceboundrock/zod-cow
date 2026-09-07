@@ -4103,4 +4103,175 @@ head(
   ok("a shape getter that resolves by parse time answers like stock through the #76 fallback");
 }
 
+head(
+  "a lazy getter that throws at compile time is opaque: sync island, no read through stock's memo (#83)",
+);
+{
+  // Stock never calls a `lazy` getter at compile time (`generateLazyCheck` is a runtime island), so a getter
+  // that throws while `inspectSubtree` expands it says nothing about the subtree's asyncness. It used to count
+  // as async: the subtree took the async island, `.async` reported true and the sync API threw `$ZodAsyncError`
+  // where stock ran the getter at parse time and answered. The realistic case is a temporal dead zone: a lazy
+  // that reads a binding declared later in the module, with `compile()` called between the two declarations.
+  //
+  // The sync island alone would not do: `$ZodLazy` memoizes its inner type through `util.defineLazy`, which
+  // marks the cell before calling the getter and never resets it when the getter throws, so one read through
+  // `_zod.innerType` while the getter throws makes every later read answer `undefined` and every parse of the
+  // schema, stock's own `safeParse` included, end in a `TypeError`. Stock's `compileFn` makes that read
+  // (`isRecursiveSchema`), and so do the presence rules the object and tuple skeletons decide at compile time
+  // (`optin` / `optout` forward through the memo). So a subtree holding such a lazy is never handed to
+  // `compileFn`, the whole-tree validator is skipped, and a container whose skeleton would read the lazy's
+  // presence declines the skeleton and takes the runtime island instead, where the read happens at parse time.
+  // A container that never reads it (an array, a record; a tuple whose tail scan stops before the slot) keeps
+  // its skeleton and the CoW reference. `ref` below says which.
+  type Pos = [
+    name: string,
+    wrap: (leaf: z.ZodType) => z.ZodType,
+    place: (v: unknown) => unknown,
+    ref: boolean,
+  ];
+  const positions: Pos[] = [
+    ["top level", (leaf) => leaf, (v) => v, true],
+    ["first tuple slot", (leaf) => z.tuple([leaf, z.string()]), (v) => [v, "s"], true],
+    ["last tuple slot", (leaf) => z.tuple([z.string(), leaf]), (v) => ["s", v], false],
+    ["array element", (leaf) => z.array(leaf), (v) => [v], true],
+    ["record value", (leaf) => z.record(z.string(), leaf), (v) => ({ k: v }), true],
+    ["object key", (leaf) => z.object({ a: leaf }), (v) => ({ a: v }), false],
+    ["optional object key", (leaf) => z.object({ a: leaf.optional() }), (v) => ({ a: v }), false],
+  ];
+  const tdz = (read: () => z.ZodType | undefined): z.ZodType =>
+    z.lazy(() => {
+      const inner = read();
+      if (inner === undefined) throw new Error("tdz");
+      return inner;
+    });
+  const expectRef = (name: string, ref: boolean, out: unknown, input: unknown): void => {
+    if (ref) assert.equal(out, input, `${name}: the clean input comes back by reference`);
+    else {
+      assert.notEqual(
+        out,
+        input,
+        `${name}: the container declined its skeleton, stock's runtime built the output`,
+      );
+      assert.deepEqual(out, input, `${name}: stock's output`);
+    }
+  };
+
+  // 1. The getter resolves to a sync subtree by parse time: sync island, the sync API answers like stock. The
+  //    same schema object serves both sides, so a read through stock's memo at compile time would show as a
+  //    `TypeError` from stock's own `safeParse` here.
+  for (const [posName, wrap, place, ref] of positions) {
+    const name = `sync inner at ${posName}`;
+    let inner: z.ZodType | undefined;
+    const S = wrap(tdz(() => inner));
+    const C = compile(S);
+    assert.ok(!C.stock && !C.async, `${name}: compiled to a sync product`);
+    inner = z.string();
+    const input = place("a");
+    const stock = S.safeParse(input as never);
+    assert.ok(stock.success, `${name}: compile() left stock's memo untouched`);
+    const r = C.safeParse(input);
+    assert.ok(r.success, `${name}: the sync API accepts like stock`);
+    expectRef(name, ref, r.data, input);
+    assert.deepEqual(r.data, stock.data);
+    assert.equal(C.validate(input), input, `${name}: validate answers the input`);
+    const bad = place(1);
+    assert.equal(S.safeParse(bad as never).success, false);
+    assert.equal(C.safeParse(bad).success, false, `${name}: the sync API rejects like stock`);
+    assert.equal(C.validate(bad), null, `${name}: validate rejects like stock`);
+    const ra = await C.safeParseAsync(input);
+    assert.ok(ra.success, `${name}: the async API accepts too`);
+    expectRef(`${name} (async API)`, ref, ra.data, input);
+  }
+  ok(
+    "a getter that resolves to a sync subtree by parse time takes the sync island and answers like stock, stock's memo untouched",
+  );
+
+  // 2. The getter resolves to an async subtree by parse time: the sync island meets the Promise, the sync API
+  //    throws `$ZodAsyncError` where stock's does, and the async entries hand the parse to stock's async runtime
+  //    (the #76 route: stock's answer, `.async` false, the predicate run twice, no CoW reference).
+  for (const [posName, wrap, place] of positions) {
+    const name = `async inner at ${posName}`;
+    let inner: z.ZodType | undefined;
+    const log: number[] = [];
+    const S = wrap(tdz(() => inner));
+    const C = compile(S);
+    assert.ok(!C.stock && !C.async, `${name}: compiled to a sync product`);
+    inner = z.string().refine(async () => {
+      log.push(1);
+      return true;
+    });
+    const input = place("a");
+    assert.throws(() => S.safeParse(input as never), $ZodAsyncError);
+    assert.throws(
+      () => C.safeParse(input),
+      $ZodAsyncError,
+      `${name}: the sync API throws stock's class`,
+    );
+    log.length = 0;
+    const r = await C.safeParseAsync(input);
+    assert.equal(
+      log.length,
+      2,
+      `${name}: the predicate ran in the island and again in stock's async runtime`,
+    );
+    const stock = await S.safeParseAsync(input as never);
+    assert.ok(r.success && stock.success, `${name}: both sides accept`);
+    assert.deepEqual(r.data, stock.data, `${name}: stock's answer`);
+    assert.equal(
+      (await C.safeParseAsync(place(1))).success,
+      false,
+      `${name}: the async API rejects like stock`,
+    );
+  }
+  ok("a getter that resolves to an async subtree by parse time meets the Promise on the #76 route");
+
+  // 3. The getter always throws: the sync island runs `_zod.run` under the empty context, the getter's error
+  //    leaves the run synchronously and `runIsland` rethrows it, so the sync API throws stock's error instead of
+  //    `$ZodAsyncError`. Stock's memo then answers `undefined` for every later read (the poisoned cell above),
+  //    which ends in the `TypeError` of reading `_zod` off it: a compiled product is one more caller of the same
+  //    schema, so the same calls in the same order give the same sequence on both sides.
+  const isGetterError = (e: unknown): boolean =>
+    e instanceof Error && !(e instanceof $ZodAsyncError) && e.message === "getter";
+  for (const [posName, wrap, place] of positions) {
+    const name = `always throwing getter at ${posName}`;
+    const mk = (): z.ZodType =>
+      wrap(
+        z.lazy(() => {
+          throw new Error("getter");
+        }),
+      );
+    const input = place("a");
+    const S = mk();
+    const C = compile(mk());
+    assert.ok(!C.stock && !C.async, `${name}: compiled to a sync product`);
+    assert.throws(() => S.safeParse(input as never), isGetterError);
+    assert.throws(
+      () => C.safeParse(input),
+      isGetterError,
+      `${name}: the sync API throws stock's error`,
+    );
+    assert.throws(() => S.parse(input as never), TypeError);
+    assert.throws(
+      () => C.parse(input),
+      TypeError,
+      `${name}: the second call meets stock's memo like stock`,
+    );
+    await assert.rejects(S.safeParseAsync(input as never), TypeError);
+    await assert.rejects(
+      C.safeParseAsync(input),
+      TypeError,
+      `${name}: the async API rejects like stock`,
+    );
+    // The shared instance: compile() made no read through the memo, so stock's first call is still the getter's
+    const shared = mk();
+    compile(shared);
+    assert.throws(
+      () => shared.safeParse(input as never),
+      isGetterError,
+      `${name}: stock's first parse after compile() still runs the getter`,
+    );
+  }
+  ok("a getter that always throws surfaces its error from the sync API like stock");
+}
+
 console.log("\nAll tuple + async smoke assertions passed ✓");

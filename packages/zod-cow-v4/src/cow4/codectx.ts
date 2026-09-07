@@ -12,6 +12,11 @@ export class CodeCtx {
   constValues: unknown[] = [];
   /** The tree contains an async subtree → the product is an async function (await emit points already in place) */
   async = false;
+  /**
+   * Parameters the built function takes after `input`, in order: the checks subroutine of an object with
+   * `z.property` checks receives the held value of each such key from the skeleton (#85); a skeleton takes none
+   */
+  params: string[] = [];
   private varN = 0;
 
   /**
@@ -117,7 +122,9 @@ export function emitOwnSymbolProbe(
 
 export function buildFn(ctx: CodeCtx): Fn {
   const F = Function;
-  const head = ctx.async ? "return async (input) => {" : "return (input) => {";
+  const params = ["input", ...ctx.params].join(", ");
+  const head = ctx.async ? `return async (${params}) => {` : `return (${params}) => {`;
+
   const body = ctx.lines.join("\n");
   const factory = new F("INVALID", ...ctx.constNames, `${head}\n${body}\n}`);
   ctx.sources.push(body);

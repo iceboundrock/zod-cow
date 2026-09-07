@@ -134,3 +134,17 @@ export function getTupleOptStart(items: Node[], key: "optin" | "optout"): number
 export function dropsWhenAbsent(schema: Node): boolean {
   return schema._zod.optin === "optional" && schema._zod.optout === "optional";
 }
+
+/**
+ * Verbatim copy of the official `util.aborted` (the default `startIndex` dropped: the payloads this layer
+ * hands it start empty): whether the issues a check left on its payload abort stock's `runChecks` chain,
+ * which they do unless every one of them carries `continue: true` (the async checks subroutine reads it
+ * off the payload of a `z.property` check's carried schema, #85)
+ */
+export function aborted(x: { aborted?: boolean; issues: { continue?: boolean }[] }): boolean {
+  if (x.aborted === true) return true;
+  for (let i = 0; i < x.issues.length; i++) {
+    if (x.issues[i]?.continue !== true) return true;
+  }
+  return false;
+}

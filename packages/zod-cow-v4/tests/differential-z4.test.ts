@@ -523,10 +523,12 @@ function bObject(rng: RNG, depth: number): Built {
   let desc = `object({${shown.map(keyDesc).join(", ")}${large ? `, …${fields.length - shown.length} more string keys` : ""}})${modeDesc}`;
   // One object in forty carries a `z.property` check on its first field whose schema is an optional string
   // wrapper with a length check (#69 inside a schema-bearing check, review of #84): stock's compiler compiles
-  // the carried schema inline, so the subtree walks must descend into it. The object takes the official
-  // parser (a property check is not CoW-safe), which is where the walk decides between `compileFn` and the
-  // islands; a first field that is not a string fails `invalid_type` on both sides. The draw comes after every
-  // other draw of the shape; like any added draw it shifts the RNG stream from here on.
+  // the carried schema inline, so the subtree walks must descend into it. Since #85 the object keeps its
+  // skeleton and runs the carried schema's verdict-only product on the held value of the key (an island here,
+  // since the wrapper follows the runtime); a first field that is not a string fails `invalid_type` on both
+  // sides. The draw comes after every other draw of the shape; like any added draw it shifts the RNG stream
+  // from here on.
+
   if (!symbolOnly && rng.chance(0.025)) {
     const carried = bWrapperCheck(rng, z.string().optional(), "string.optional()");
     if (carried) {

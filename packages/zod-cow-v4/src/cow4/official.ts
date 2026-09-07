@@ -36,6 +36,22 @@ function runIsland(schema: Node, value: unknown, ctx: object): unknown {
 const SYNC_CTX = {};
 const ASYNC_CTX = { async: true };
 
+/** The payload stock's `_zod.run` answers: the issues decide the verdict (empty is a pass) and whether the check chain aborts */
+export type RunPayload = { value: unknown; issues: { continue?: boolean }[]; aborted?: boolean };
+
+/**
+ * The run stock's `$ZodCheckProperty` makes of the schema a `z.property` / `z.properties` check carries: the
+ * carried schema's `_zod.run` on the key's value under an empty context, whose payload comes back synchronously
+ * or as a promise. The async checks subroutine runs a property check this way (#85) because the payload's issues
+ * decide what `INVALID` cannot: whether the failure aborts stock's `runChecks` chain (`aborted` in
+ * `predicates.ts`), which skips the later checks after a synchronous abort with no promise started. A throw that
+ * leaves the run synchronously is a callback's, recorded like an island's (`runIsland`); the empty context is the
+ * one the check hands stock, so the run never throws `$ZodAsyncError` on its own there either.
+ */
+export function runCarried(schema: Node, value: unknown): RunPayload | Promise<RunPayload> {
+  return runIsland(schema, value, SYNC_CTX) as RunPayload | Promise<RunPayload>;
+}
+
 function makeIsland(schema: Node): Fn {
   // Equivalent of the official runtimeRun: black-box execution of the subtree, failure → INVALID.
   // async reaching the synchronous fast path through this island → throw $ZodAsyncError (same semantics as the official compile.js throwAsync:

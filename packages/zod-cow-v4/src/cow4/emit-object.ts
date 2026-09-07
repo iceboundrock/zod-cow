@@ -6,6 +6,7 @@
 import { ZodCompileUnsupportedError } from "zod/v4/core";
 import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
 import { containerChecksCall, containerChildFn } from "./emit.js";
+
 import { officialFn } from "./official.js";
 import { dropsWhenAbsent, mayOutputUndefined, requiresPresence } from "./predicates.js";
 import { type Fn, isAsyncProduct, type Node } from "./product.js";
@@ -220,7 +221,34 @@ export function emitCoWObject(
   // The container's own checks (.refine/.min and friends): a standalone validation subroutine,
   // called on both paths to match stock semantics (checks apply to the final output: the input when clean, the rebuilt out when dirty)
   const checksCall = containerChecksCall(ctx, schema);
-  const cName = checksCall ? `${checksCall.awaitKw}${checksCall.name}` : null;
+  /**
+   * The value a `z.property` check reads off the output for a declared key (#85). Stock reads it off the
+   * object it just assembled: the held local where the key was written, and otherwise the prototype of a
+   * fresh object, since the presence rules below leave such a key out (`dropsWhenAbsent` when the key is
+   * absent from the input, `mayOutputUndefined` when the value is `undefined` and the key absent). The clean
+   * path hands the subroutine that same value, with the `in` read stock's assembly makes, so a getter on the
+   * input is not read a second time; the copy path lets the subroutine read `out`, which is stock's assembly.
+   * An undeclared key is read off the returned input on the clean path, the one aliasing of a clean parse.
+   */
+  let objectProto: string | null = null;
+  const heldValue = (key: string): string | undefined => {
+    const o = outputs.find((o) => o.key === key);
+    if (!o) return undefined;
+    const child: Node = shape[key];
+    const fallback = () => {
+      objectProto ??= ctx.addConst(Object.prototype);
+      return `${objectProto}[${o.keyExpr}]`;
+    };
+
+    if (dropsWhenAbsent(child))
+      return `(${o.keyExpr} in ${accessor} ? ${o.valueVar} : ${fallback()})`;
+    if (mayOutputUndefined(child))
+      return `(${o.valueVar} !== undefined || ${o.keyExpr} in ${accessor} ? ${o.valueVar} : ${fallback()})`;
+    return o.valueVar;
+  };
+  const cleanCheck = checksCall
+    ? `if ((${checksCall.expr(accessor, heldValue)}) === INVALID) return INVALID;`
+    : null;
 
   // ═══ CoW core: the branch the official template does not have ═══
   // Undeclared-key probes, only here: a copy assembled from the declared keys drops undeclared keys
@@ -254,12 +282,12 @@ export function emitCoWObject(
       }
       ctx.write(`if (!${extra}) {`);
       ctx.indented(() => {
-        if (cName) ctx.write(`if ((${cName}(${accessor})) === INVALID) return INVALID;`);
+        if (cleanCheck) ctx.write(cleanCheck);
         ctx.write(`return ${accessor};`);
       });
       ctx.write(`}`);
     } else {
-      if (cName) ctx.write(`if ((${cName}(${accessor})) === INVALID) return INVALID;`);
+      if (cleanCheck) ctx.write(cleanCheck);
       ctx.write(`return ${accessor};`);
     }
   });
@@ -304,7 +332,7 @@ export function emitCoWObject(
     ctx.write(`}`);
   }
 
-  if (cName) ctx.write(`if ((${cName}(out)) === INVALID) return INVALID;`);
+  if (checksCall) ctx.write(`if ((${checksCall.expr("out")}) === INVALID) return INVALID;`);
 
   return "out";
 }

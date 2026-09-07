@@ -82,8 +82,8 @@ export function emitCoWUnion(
 
   // The union's own checks run on the winning value (stock: after the option chain, on its output)
   const checks = containerChecksCall(ctx, schema);
-  if (checks)
-    ctx.write(`if ((${checks.awaitKw}${checks.name}(${out})) === INVALID) return INVALID;`);
+  if (checks) ctx.write(`if ((${checks.expr(out)}) === INVALID) return INVALID;`);
+
   return out;
 }
 

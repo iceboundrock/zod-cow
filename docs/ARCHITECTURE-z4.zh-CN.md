@@ -250,9 +250,27 @@ return out;
 
 支持集：`custom`（`.refine()` 的 `def.fn` 谓词，同步或 async）+ array 的
 `min_length/max_length/length_equals`（`.length` 直读）+ map/set 的
-`min_size/max_size/size_equals`（`.size` 直读）；record 没有长度或大小检查，所以只有谓词会到达它的骨架
+`min_size/max_size/size_equals`（`.size` 直读）+ object 的 `property`（`z.property` / `z.properties`，#85，见下）；
+record 没有长度或大小检查，所以只有谓词会到达它的骨架
 （#13 之前带任何 check 的 record 都走官方 parser）。其余（superRefine 改写
 `ctx.value`、overwrite、自定义 `when`）→ 该节点整体降级官方 parser 产物。
+
+`property` check 是对输出某一个 key 的谓词：stock 的 `$ZodCheckProperty` 在空上下文下对 `payload.value[property]` 运行它携带的
+schema，只保留 issues 并加上该 key 的前缀（`handleCheckPropertyResult`），携带 schema 的值永远不会进入输出。所以 object 保留骨架
+（`checksAreCowSafe` 在 object 上接受这一种类，要求 key 是 `__proto__` 之外的字符串；携带的 schema 本身不做判定，因为它的输出会被丢弃），
+子程序在目标之后按 check 顺序为每个不同的 key 接收一个参数，即该 key 的值：干净路径把骨架为已声明 key 持有的局部变量交给它，
+并在存在性规则可能省掉该 key 的地方（`dropsWhenAbsent`、`mayOutputUndefined`）做 stock 组装所做的那次 `in` 读取，此时值为新建对象的
+原型上的值，因此输入上的 getter 不会被第二次读取；拷贝路径让它读 `out`，也就是 stock 的组装。未声明的 key 在干净路径上不从返回的
+输入读取，因为该输入不是 stock 组装出的输出（#98 的评审）：不可枚举的自有或继承属性是 `for...in` 永远不会产出的键，所以 strip 的探测
+与 strict 的检查都让输入按原引用通过，而 stock 的新建对象没有这个 key，那里的 getter 也是 stock 从不读取的。干净调用交给子程序的是那次
+组装所持有的值：strip 与 strict 模式下是新建对象原型上的值（干净路径只在 `for...in` 未产出任何未声明 key 时到达），loose 模式下若
+一次按 stock 枚举方式的扫描找到了该 key，则是输入的值（此时追加会写入它，并且只读一次，干净调用亦然），否则同样是原型上的值。同步变体里携带 schema 的产物是 `officialFn(carried, true)`，即只给判定的链
+（validator，否则 parser，否则岛；其中 `wrapperFollowsRuntime` 命名的包装层或 `lazy` 与别处一样取岛），失败时像该变体的其他 check 一样
+立即返回 `INVALID`。async 变体里携带 schema 通过 stock 的 `_zod.run` 运行，与该 check 的运行方式相同（`official.ts` 的 `runCarried`）：
+payload 的 issues 能回答 `INVALID` 回答不了的问题，即这次失败是否中止链（`aborted`，拷贝进 `predicates.ts`），于是携带 schema 的类型不匹配
+恰在 stock 跳过之处跳过后面的 check，而携带 schema 的 check 失败（`continue: true`）不跳过；运行是否以 promise 返回在运行时判断，
+和普通函数谓词的结果一样，promise 与其他结果一起由 `settleChecks` 结算。smoke 第 25 组钉住各位置的共享、getter 读取次数、原型读取、
+调度和中止规则；fuzzer 的 property 抽样自 #85 起保留其 object 的骨架（默认规模下成功用例的 83.0% / 83.8%，之前为 82.9% / 83.8%）。
 
 async 谓词过去被门控拒绝，带它的容器变成 runtime island，每次解析都返回拷贝（#13）。自 #13 起只要有一个谓词是
 async，子程序本身就是 async 函数，并遵循 stock 的调度：`runChecks` 按声明顺序同步调用每个 check，只把 await 串起来，
@@ -277,6 +295,18 @@ const x3 = f3(input);                                   // 同步谓词，在 x2
 if (!(await settle([x0, x1, x2, x3]))) return INVALID;
 return true;
 ```
+
+带 property check 的 object 的同一子程序（#85），`(input, p0)` 接收 `k` 的持有值：
+
+```js
+const x0 = run(carried, p0);                            // stock 的 $ZodCheckProperty 对携带 schema 在该 key 值上的运行
+const x1 = x0 instanceof Promise ? x0.then(passed) : x0.issues.length === 0;
+if (x1 === false && aborted(x0)) return INVALID;        // 携带 schema 的类型不匹配中止 stock 的链；check 失败则继续
+const x2 = f2(input);                                   // async 谓词，已启动
+if (!(await settle([x1, x2]))) return INVALID;
+return true;
+```
+
 
 这一调度描述的是成功路径。某个 check 失败时，子程序像本线的其他失败一样返回 `INVALID`（§6）：失败的长度 / 大小检查之后声明的
 check 不会被子程序调用，调用方回退到 stock 的 `safeParse` / `safeParseAsync`，后者从头再跑一遍 schema 的所有 check。所以失败之前

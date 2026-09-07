@@ -257,10 +257,39 @@ return out;
 
 Supported set: `custom` (the predicate in `.refine()`'s `def.fn`, sync or async) + array's
 `min_length/max_length/length_equals` (`.length` read directly) + map/set's
-`min_size/max_size/size_equals` (`.size` read directly); a record has no length or size check, so only
+`min_size/max_size/size_equals` (`.size` read directly) + an object's `property` (`z.property` /
+`z.properties`, #85, below); a record has no length or size check, so only
 predicates reach its skeleton (a record with any check took the official parser until #13). Everything
 else (superRefine rewriting `ctx.value`, overwrite, a custom `when`) → the whole node degrades to the
 official parser product.
+
+A `property` check is a predicate on one key of the output: stock's `$ZodCheckProperty` runs the schema it
+carries on `payload.value[property]` under an empty context and keeps only the issues, prefixed with the key
+(`handleCheckPropertyResult`); the carried value never reaches the output. So the object keeps its skeleton
+(`checksAreCowSafe` admits the kind on an object, for a string key other than `__proto__`; the carried schema
+is not judged, since its output is discarded) and the subroutine takes the key's value as a parameter after
+its target, one per distinct key in check order: the clean call hands it the local the skeleton holds for a
+declared key, with the `in` read stock's assembly makes where a presence rule may leave the key out
+(`dropsWhenAbsent`, `mayOutputUndefined`) and the prototype of a fresh object as the value then, so no getter
+of the input is read a second time; the copy call lets it read `out`, which is stock's assembly. An
+undeclared key is not read off the returned input on the clean path, since that input is not stock's
+assembled output (review of #98): a non-enumerable own or inherited property is one `for...in` never yields,
+so strip's probe and strict's check let the input through by reference while stock's fresh object lacks the
+key, and a getter there is one stock never reads. The clean call hands the subroutine what that assembly
+holds: in strip and strict mode the prototype of a fresh object (the clean path is reached only when
+`for...in` yields no undeclared key), in loose mode the input's value when a scan with stock's enumeration
+finds the key (the append writes it then, and reads it once, as the clean call does) and the prototype
+otherwise. In the sync variant the carried schema's product is `officialFn(carried, true)`,
+the verdict-only chain (validator, else parser, else island; a wrapper `wrapperFollowsRuntime` names or a
+`lazy` inside it takes its island as anywhere else), and a failure returns `INVALID` at once like every other
+check of the variant. In the async variant the carried schema runs through stock's `_zod.run` as the check
+runs it (`runCarried` in `official.ts`): the payload's issues say whether the failure aborts the chain
+(`aborted`, copied into `predicates.ts`), which `INVALID` cannot, so a carried type mismatch skips the later
+checks exactly where stock skips them and a carried check failure (`continue: true`) does not; whether the run
+came back as a promise is a runtime test, like a plain-function predicate's result, and a promise is settled
+with the others by `settleChecks`. Smoke group 25 pins the sharing at every position, the getter read count,
+the prototype read, the schedule and the abort rule; the fuzzer's property draw keeps its object's skeleton
+since #85 (83.0% / 83.8% among successful cases at the default size, 82.9% / 83.8% before).
 
 An async predicate used to be rejected by the gate, so a container carrying one became a runtime island and
 came back as a copy on every parse (#13). Since #13 the subroutine is an async function whenever a predicate
@@ -294,6 +323,18 @@ const x3 = f3(input);                                   // sync predicate, calle
 if (!(await settle([x0, x1, x2, x3]))) return INVALID;
 return true;
 ```
+
+The same subroutine for an object with a property check (#85), `(input, p0)` taking the held value of `k`:
+
+```js
+const x0 = run(carried, p0);                            // stock's $ZodCheckProperty run of the carried schema on the key's value
+const x1 = x0 instanceof Promise ? x0.then(passed) : x0.issues.length === 0;
+if (x1 === false && aborted(x0)) return INVALID;        // a carried type mismatch aborts stock's chain; a check failure continues
+const x2 = f2(input);                                   // async predicate, started
+if (!(await settle([x1, x2]))) return INVALID;
+return true;
+```
+
 
 That schedule is the success path's. A failing check answers `INVALID` like every other failure of this line (§6): the
 subroutine does not reach the checks declared after a failing length / size check, and the caller falls back to stock

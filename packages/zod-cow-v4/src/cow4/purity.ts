@@ -165,6 +165,13 @@ function leafChecksArePure(schema: Node): boolean {
  *     inside an async skeleton on stock's schedule (#13) ✓
  *   - min_length / max_length / length_equals (array .min/.max/.length, reads only .length) ✓
  *   - min_size / max_size / size_equals (map / set .min/.max/.size, reads only .size) ✓
+ *   - property (`z.property` / `z.properties`) on an object (#85): stock runs the carried schema on one key of the
+ *     output and discards its value, keeping only the issues (`handleCheckPropertyResult`), so the check reads like a
+ *     predicate on the key's value; `containerChecksFn` runs the carried schema's product for its verdict on the
+ *     value the skeleton holds for that key. The carried schema itself is not judged (its output never reaches the
+ *     object's) ✓. Declined: a key that is not a string, and `__proto__` (the skeleton never writes that key and stock's
+ *     assembly never does either, so the check would read a prototype off a fresh object; the official parser reads it
+ *     the same way, and a shape with that key is refused anyway)
  *   A record has no length or size check, so only predicates reach its skeleton (a record with any check
  *   used to take the official parser, sync predicates included; found while fixing #13).
  * Everything else (superRefine may rewrite ctx.value, overwrite transforms the value, a custom when…) → impure,
@@ -197,6 +204,9 @@ function checksAreCowSafe(schema: Node): boolean {
       (d.check === "min_size" || d.check === "max_size" || d.check === "size_equals")
     ) {
       return true;
+    }
+    if (def.type === "object" && d.check === "property") {
+      return typeof d.property === "string" && d.property !== "__proto__" && !!d.schema?._zod;
     }
     return false;
   });

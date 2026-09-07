@@ -4,7 +4,7 @@
  * hoisted function declarations only; nothing in the cycle runs at module load).
  */
 import { compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
-import { buildFn, CodeCtx } from "./codectx.js";
+import { buildFn, CodeCtx, escKey } from "./codectx.js";
 import { emitCoWArray } from "./emit-array.js";
 import { emitCoWMap } from "./emit-map.js";
 import { emitCoWObject } from "./emit-object.js";
@@ -12,8 +12,9 @@ import { emitCoWRecord } from "./emit-record.js";
 import { emitCoWSet } from "./emit-set.js";
 import { emitCoWTuple } from "./emit-tuple.js";
 import { emitCoWUnion } from "./emit-union.js";
-import { makeAsyncIsland, officialFn } from "./official.js";
+import { makeAsyncIsland, officialFn, type RunPayload, runCarried } from "./official.js";
 import { DEFAULT_OPTIONS } from "./options.js";
+import { aborted } from "./predicates.js";
 import {
   type Fn,
   isAsyncFn,
@@ -111,10 +112,25 @@ async function settleChecks(results: unknown[]): Promise<boolean> {
   return ok;
 }
 
+/** The subroutine of `containerChecksFn` and the property keys whose held values it takes after its target, in parameter order (#85) */
+type ChecksProduct = { fn: Fn; held: string[] };
+
 /**
  * Validation subroutine for a container's own checks (a standalone product function, answering pass/fail only).
  * Supported: custom (a def.fn predicate, same template as the official generateCustomRefineCheck) /
- * min_length / max_length / length_equals (array .length) / min_size / max_size / size_equals (map / set .size).
+ * min_length / max_length / length_equals (array .length) / min_size / max_size / size_equals (map / set .size) /
+ * property (`z.property` / `z.properties` on an object, #85: the schema the check carries run for its verdict on
+ * the key's value, which the subroutine takes as a parameter after its target, one per distinct key in check
+ * order (`held`), so the object skeleton hands it the value it holds for a declared key and the output's own
+ * property is read for no key twice; the carried value is discarded, as stock's `handleCheckPropertyResult`
+ * keeps only the issues). In the sync variant the product is `officialFn(carried, true)`, the verdict-only
+ * chain (validator, else parser, else island) since nothing reads the output; a `$ZodAsyncError` it throws is
+ * stock's own signal, as from any official product (#80). In the async variant the carried schema runs through
+ * stock's `_zod.run` as `$ZodCheckProperty` runs it (`runCarried`): its payload's issues say whether a failure
+ * aborts the chain, which the product's `INVALID` cannot, so the abort rule below applies to a property check
+ * exactly as stock applies it (a carried type mismatch aborts, a carried check failure carries `continue: true`
+ * and does not; the check's own `abort` flag is ignored by stock and here). Whether the run came back as a
+ * promise is a runtime test, like a plain-function predicate's result.
  * With an async predicate among the checks (#13) the subroutine is an async function on stock's schedule:
  * `runChecks` calls every check synchronously in declaration order and only chains the awaits, so every
  * predicate (sync or async) is called before the first `await`, a length / size check keeps its place,
@@ -132,21 +148,39 @@ async function settleChecks(results: unknown[]): Promise<boolean> {
  * unrecorded one (this subroutine's own `throwAsync` at a Promise) hands the parse to stock's async runtime.
  * Returning null means a check the skeleton cannot handle is present (the caller should already have blocked it via checksAreCowSafe).
  */
-export function containerChecksFn(schema: Node): Fn | null {
+export function containerChecksFn(schema: Node): ChecksProduct | null {
   const checks: Node[] = schema._zod.def.checks ?? [];
   if (checks.length === 0) return null;
   // A check subroutine emits no container skeleton, so the compile options never matter here
   const ctx = new CodeCtx(DEFAULT_OPTIONS);
   const defOf = (check: Node) => check._zod?.def ?? check;
+  // The verdict-only product of every property check, built first: the async decision reads it
+  const carried = new Map<Node, Fn>();
+  for (const c of checks) {
+    const d = defOf(c);
+    if (d.check === "property") carried.set(c, officialFn(d.schema, true));
+  }
   const anyAsync = checks.some((c) => {
     const d = defOf(c);
+    if (d.check === "property") return isAsyncProduct(carried.get(c));
     return d.check === "custom" && !!d.fn && isAsyncFn(d.fn);
   });
   ctx.async = anyAsync;
   const settleC = anyAsync ? ctx.addConst(settleChecks) : null;
   const rethrowC = ctx.addConst(rethrowCallerError);
-  const started: string[] = []; // async variant: the results of the predicates called so far
+  const held: string[] = [];
+  const heldParam = (key: string): string => {
+    let i = held.indexOf(key);
+    if (i < 0) {
+      i = held.push(key) - 1;
+      ctx.params.push(`p${i}`);
+    }
+    return `p${i}`;
+  };
+  const started: string[] = []; // async variant: the results of the checks called so far
   let promiseStarted = false; // async variant: an async-function predicate was called, so a promise has certainly started
+  /** The runtime test that no promise has started among the results so far (an async-function predicate settles it statically) */
+  const noPromiseStarted = (): string[] => started.map((s) => `!(${s} instanceof Promise)`);
   const fail = (): string =>
     started.length === 0
       ? "return INVALID;"
@@ -162,9 +196,8 @@ export function containerChecksFn(schema: Node): Fn | null {
         if (d.abort && !asyncFn && !promiseStarted) {
           // stock skips the later checks after a sync aborting failure with no promise started yet;
           // `!res` already excludes a Promise returned by this plain function, the earlier results
-          // (all from plain functions at this point) are tested at runtime
-          const noPromise = started.map((s) => `!(${s} instanceof Promise)`);
-          ctx.write(`if (${[`!${res}`, ...noPromise].join(" && ")}) return INVALID;`);
+          // (all from plain functions or carried runs at this point) are tested at runtime
+          ctx.write(`if (${[`!${res}`, ...noPromiseStarted()].join(" && ")}) return INVALID;`);
         }
         if (asyncFn) promiseStarted = true;
         started.push(res);
@@ -174,6 +207,33 @@ export function containerChecksFn(schema: Node): Fn | null {
       const throwAsyncC = ctx.addConst(throwAsync);
       ctx.write(`if (${res} instanceof Promise) ${throwAsyncC}();`);
       ctx.write(`if (!${res}) return INVALID;`);
+      continue;
+    }
+    if (d.check === "property") {
+      const value = heldParam(d.property);
+      if (!anyAsync) {
+        const fnC = ctx.addConst(carried.get(check)!);
+        ctx.write(`if (${fnC}(${value}) === INVALID) return INVALID;`);
+        continue;
+      }
+      // stock's $ZodCheckProperty: the carried schema's run under an empty context, a promise chained, a sync
+      // payload read at once; a failure aborts the chain when its issues say so (`aborted`), which skips the
+      // later checks only while no promise has started, as for a predicate
+      const runC = ctx.addConst(runCarried);
+      const passedC = ctx.addConst(carriedPassed);
+      const abortedC = ctx.addConst(aborted);
+      const run = ctx.var();
+      const res = ctx.var();
+      ctx.write(`const ${run} = ${runC}(${ctx.addConst(d.schema)}, ${value});`);
+      ctx.write(
+        `const ${res} = ${run} instanceof Promise ? ${run}.then(${passedC}) : ${run}.issues.length === 0;`,
+      );
+      if (!promiseStarted) {
+        ctx.write(
+          `if (${[`${res} === false`, `${abortedC}(${run})`, ...noPromiseStarted()].join(" && ")}) return INVALID;`,
+        );
+      }
+      started.push(res);
       continue;
     }
     if (d.check === "min_length") {
@@ -206,19 +266,42 @@ export function containerChecksFn(schema: Node): Fn | null {
     ctx.write(`if (!(await ${settleC}([${started.join(", ")}]))) return INVALID;`);
   }
   ctx.write("return true;");
-  return buildFn(ctx);
+  return { fn: buildFn(ctx), held };
 }
 
-/** A checks subroutine hoisted into `ctx` for its call sites: the constant name and the `await` keyword an async subroutine needs (`ctx.async` is set for it, #13); null when the schema has no checks */
-export function containerChecksCall(
-  ctx: CodeCtx,
-  schema: Node,
-): { name: string; awaitKw: string } | null {
-  const checksFn = containerChecksFn(schema);
-  if (!checksFn) return null;
-  const isAsync = isAsyncProduct(checksFn);
+/** The verdict of a settled carried run (`runCarried`): a pass when the payload holds no issue */
+function carriedPassed(payload: RunPayload): boolean {
+  return payload.issues.length === 0;
+}
+
+/**
+ * A checks subroutine hoisted into `ctx` for its call sites (`ctx.async` is set for an async one, #13); null when
+ * the schema has no checks. `expr` is the call on `target`, `await` included, with the held value of every
+ * property key (`keys`, in parameter order) after it: `heldOf(key)` names the expression holding the output
+ * value of a key the caller answers for (the object skeleton on its clean path, #85: every key, declared or
+ * not, since the input it returns is not stock's assembled output), and any other key is read off the target,
+ * which must then be that output (the copy path's `out`).
+ */
+export type ChecksCall = {
+  keys: readonly string[];
+  expr: (target: string, heldOf?: (key: string) => string | undefined) => string;
+};
+
+export function containerChecksCall(ctx: CodeCtx, schema: Node): ChecksCall | null {
+  const product = containerChecksFn(schema);
+  if (!product) return null;
+  const isAsync = isAsyncProduct(product.fn);
   if (isAsync) ctx.async = true;
-  return { name: ctx.addConst(checksFn), awaitKw: isAsync ? "await " : "" };
+  const name = ctx.addConst(product.fn);
+  const awaitKw = isAsync ? "await " : "";
+  const { held } = product;
+  return {
+    keys: held,
+    expr: (target, heldOf) => {
+      const args = held.map((key) => heldOf?.(key) ?? `${target}[${escKey(key)}]`);
+      return `${awaitKw}${name}(${[target, ...args].join(", ")})`;
+    },
+  };
 }
 
 /**
@@ -235,8 +318,7 @@ export function emitContainerChecks(
 ): boolean {
   const call = containerChecksCall(ctx, schema);
   if (!call) return false;
-  const check = (value: string): string =>
-    `if ((${call.awaitKw}${call.name}(${value})) === INVALID) return INVALID;`;
+  const check = (value: string): string => `if ((${call.expr(value)}) === INVALID) return INVALID;`;
   ctx.write(`if (${clean}) {`);
   ctx.indented(() => {
     ctx.write(check(accessor));
@@ -292,17 +374,16 @@ function emitContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<N
  * Such a layer ends the flat chain: its inner is built as a nested product called once on both paths.
  */
 function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: Set<Node>): string {
-  const layers: { shortcut: "null" | "undefined"; checks: string | null }[] = [];
+  const layers: { shortcut: "null" | "undefined"; checks: ChecksCall | null }[] = [];
   let cur: Node = schema;
   let defaultedInner: Node | null = null;
   for (;;) {
     const def = cur._zod.def;
     if (def.type !== "nullable" && def.type !== "optional") break;
     // custom predicates only, sync or async, see wrapperChecksAreCowSafe
-    const call = containerChecksCall(ctx, cur);
     layers.push({
       shortcut: def.type === "nullable" ? "null" : "undefined",
-      checks: call ? `${call.awaitKw}${call.name}` : null,
+      checks: containerChecksCall(ctx, cur),
     });
     cur = def.innerType;
     if (def.type === "optional" && cur._zod.optin === "defaulted") {
@@ -314,7 +395,7 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
   const emitChecksUpTo = (i: number, value: string): void => {
     for (let j = i; j >= 0; j--) {
       const c = layers[j]!.checks;
-      if (c) ctx.write(`if ((${c}(${value})) === INVALID) return INVALID;`);
+      if (c) ctx.write(`if ((${c.expr(value)}) === INVALID) return INVALID;`);
     }
   };
   const hasChecksUpTo = (i: number): boolean => layers.slice(0, i + 1).some((l) => l.checks);

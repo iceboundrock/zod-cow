@@ -2066,4 +2066,477 @@ import { compile } from "../src/index.js";
   console.log("  an async check inside a property check takes the async island ✓");
 }
 
+/* ── 25. an object carrying a z.property / z.properties check keeps its CoW skeleton (#85) ── */
+{
+  console.log("\n── z.property / z.properties on an object keep the skeleton (#85) ──");
+  const prop = (s: z.ZodType, ...checks: unknown[]) => (s as any).check(...checks) as z.ZodType;
+  const base = z.object({ k: z.string(), keep: z.object({ n: z.number() }) });
+  const S = prop(base, z.property("k", z.string().min(1)));
+  const C = compile(S);
+  const input = { k: "a", keep: { n: 1 } };
+  assert.equal(C.stock, false, "no whole-tree degradation");
+  assert.equal(C.parse(input), input, "the issue's fixture: a clean input is shared");
+  assert.equal(C.validate(input), input);
+  assert.equal(C.validate({ k: "", keep: { n: 1 } }), null);
+  // the clean call hands the subroutine the held local of the checked key, the copy call reads stock's assembly
+  assert.match(C.code!, /\(input, x\d+\)\) === INVALID/, "clean path: the held value is passed");
+  assert.match(
+    C.code!,
+    /\(out, out\["k"\]\)\) === INVALID/,
+    "copy path: the assembled output is read",
+  );
+  // failure parity: the carried schema rejects, stock's error carries the key-prefixed path
+  const bad = C.safeParse({ k: "", keep: { n: 1 } });
+  const stockBad = S.safeParse({ k: "", keep: { n: 1 } });
+  assert.equal(bad.success, false);
+  assert.equal(stockBad.success, false);
+  if (!bad.success && !stockBad.success)
+    assert.deepEqual(
+      bad.error.issues.map((i) => i.path),
+      stockBad.error.issues.map((i) => i.path),
+    );
+  // a copy forced below the check still runs it on the assembled output, and only the dirty path is copied
+  const D = prop(
+    z.object({ k: z.string(), keep: z.object({ n: z.number() }), d: z.string().default("x") }),
+    z.property("k", z.string().min(1)),
+  );
+  const CD = compile(D);
+  const dirtyIn = { k: "a", keep: { n: 1 } };
+  const dirtyOut = CD.parse(dirtyIn) as any;
+  assert.notEqual(dirtyOut, dirtyIn);
+  assert.equal(dirtyOut.keep, dirtyIn.keep, "the untouched nested object is still shared");
+  assert.deepEqual(dirtyOut, D.parse(dirtyIn));
+  assert.equal(CD.safeParse({ k: "", keep: { n: 1 } }).success, false);
+  console.log(
+    "  the issue's fixture shares a clean input, copies only the dirty path, rejects like stock ✓",
+  );
+
+  // every skeleton position: the object keeps its skeleton under a key, in an array, under optional, in a union option
+  const valid = { k: "abc", n: 5, keep: { m: 1 } };
+  const invalid = { k: "ab", n: 0, keep: { m: 1 } };
+  const wide = z.object({ k: z.string(), n: z.number(), keep: z.object({ m: z.number() }) });
+  const P = prop(wide, ...z.properties({ k: z.string().min(3), n: z.number().gt(1) }));
+  const rows: Array<[string, z.ZodType, unknown, unknown]> = [
+    ["properties top", P, valid, invalid],
+    ["under a key", z.object({ o: P }), { o: valid }, { o: invalid }],
+    ["in an array", z.array(P), [valid, valid], [valid, invalid]],
+    ["under optional", P.optional(), valid, invalid],
+    ["union option", z.union([z.string(), P]), valid, invalid],
+    ["nullable under a key", z.object({ o: P.nullable() }), { o: valid }, { o: invalid }],
+  ];
+  for (const [name, R, ok, ko] of rows) {
+    const CR = compile(R);
+    assert.equal(CR.stock, false, `${name}: no degradation`);
+    assert.equal(CR.parse(ok), ok, `${name}: the clean input is shared`);
+    assert.equal(CR.safeParse(ko).success, false, `${name}: the carried check rejects`);
+    assert.equal(R.safeParse(ko).success, false);
+    assert.equal(CR.validate(ok), ok, `${name}: validate`);
+    assert.equal(CR.validate(ko), null, `${name}: validate rejects`);
+  }
+  console.log("  the skeleton is kept at every position, with z.properties too ✓");
+
+  // the carried schema's output is discarded: a transform or a nested container inside it never reaches the output
+  const T = prop(
+    base,
+    z.property("keep", z.object({ n: z.number().transform((n) => n + 1) })),
+    z.property(
+      "k",
+      z
+        .string()
+        .transform((s) => s.toUpperCase())
+        .pipe(z.literal("A")),
+    ),
+  );
+  const CT = compile(T);
+  assert.equal(CT.parse(input), input, "carried transforms leave the output alone: shared");
+  assert.deepEqual(T.parse(input), input);
+  assert.equal(CT.safeParse({ k: "b", keep: { n: 1 } }).success, false);
+  assert.equal(T.safeParse({ k: "b", keep: { n: 1 } }).success, false);
+  // two checks on one key take one held value
+  const Two = prop(base, z.property("k", z.string().min(1)), z.property("k", z.string().max(3)));
+  const CTwo = compile(Two);
+  assert.equal(CTwo.parse(input), input);
+  assert.equal(CTwo.safeParse({ k: "abcd", keep: { n: 1 } }).success, false);
+  assert.match(CTwo.code!, /\(input, x\d+\)\) === INVALID/);
+  assert.doesNotMatch(CTwo.code!, /\(input, x\d+, x\d+\)\)/, "one parameter per distinct key");
+  console.log("  the carried output is discarded, one held value per key ✓");
+
+  // a getter on the checked key is read once per parse, as stock reads it once off its assembled output
+  {
+    let reads = 0;
+    const withGetter = () => {
+      const o = { keep: { n: 1 } } as any;
+      Object.defineProperty(o, "k", {
+        enumerable: true,
+        get() {
+          reads++;
+          return "a";
+        },
+      });
+      return o;
+    };
+    const g = withGetter();
+    reads = 0;
+    S.parse(g);
+    const stockReads = reads;
+    reads = 0;
+    const out = C.parse(g);
+    assert.equal(
+      reads,
+      stockReads,
+      `the getter is read ${reads} times, stock reads it ${stockReads}`,
+    );
+    assert.equal(stockReads, 1);
+    assert.equal(out, g, "a getter key is a clean key: shared");
+  }
+  // an undeclared key named by the check: strip drops it from the copy and the check reads `undefined` there,
+  // like stock; loose appends it and the check reads the input's value
+  const U = prop(base, z.property("extra", z.string().optional()));
+  const CU = compile(U);
+  assert.equal(CU.parse(input), input);
+  const withExtra = { ...input, extra: 1 };
+  assert.deepEqual(CU.parse(withExtra), U.parse(withExtra), "the stripped key reads undefined");
+  assert.equal(CU.safeParse(withExtra).success, true);
+  const L = prop(z.looseObject({ k: z.string() }), z.property("extra", z.number().optional()));
+  const CL = compile(L);
+  const loose = { k: "a", extra: 1 };
+  assert.equal(CL.parse(loose), loose, "loose: the kept undeclared key is read off the input");
+  assert.equal(CL.safeParse({ k: "a", extra: "x" }).success, false);
+  assert.equal(L.safeParse({ k: "a", extra: "x" }).success, false);
+  console.log("  a getter is read once, an undeclared key reads as stock's assembly answers ✓");
+
+  // an undeclared key the clean path keeps but stock's assembly never writes (review of #98): a non-enumerable
+  // own or inherited property is not enumerated, so strip's probe and strict's check let the input through by
+  // reference, and stock's fresh object has no such key. The check reads what stock reads: the prototype of a
+  // fresh object in strip and strict mode, and in loose mode the input's value only when stock's `for...in`
+  // append writes the key. A getter stock never reads is never read here either.
+  {
+    const modes: [string, z.ZodObject][] = [
+      ["strip", z.object({ k: z.string() })],
+      ["strict", z.strictObject({ k: z.string() })],
+      ["loose", z.looseObject({ k: z.string() })],
+    ];
+    const hidden = (value: unknown) => {
+      const o: Record<string, unknown> = { k: "a" };
+      Object.defineProperty(o, "extra", { value, enumerable: false });
+      return o;
+    };
+    const inherited = (proto: object) => Object.assign(Object.create(proto), { k: "a" });
+    for (const [mode, obj] of modes) {
+      const Required = prop(obj, z.property("extra", z.string()));
+      const CRequired = compile(Required);
+      assert.equal(CRequired.stock, false);
+      for (const [what, make] of [
+        ["a non-enumerable own data property", () => hidden("present")],
+        [
+          "a non-enumerable inherited data property",
+          () => {
+            const proto = {};
+            Object.defineProperty(proto, "extra", { value: "present", enumerable: false });
+            return inherited(proto);
+          },
+        ],
+      ] as const) {
+        const ours = CRequired.safeParse(make());
+        const stock = Required.safeParse(make());
+        assert.equal(
+          stock.success,
+          false,
+          `${mode}: stock checks its assembly, which lacks ${what}`,
+        );
+        assert.equal(
+          ours.success,
+          false,
+          `${mode}: the clean path checks the same value for ${what}`,
+        );
+        if (!ours.success && !stock.success)
+          assert.deepEqual(
+            ours.error.issues.map((i) => [i.code, i.path]),
+            stock.error.issues.map((i) => [i.code, i.path]),
+          );
+        assert.equal(CRequired.validate(make()), null);
+      }
+      // the same input passes a check that admits the absence, and is still shared
+      const Optional = prop(obj, z.property("extra", z.string().optional()));
+      const COptional = compile(Optional);
+      const shared = hidden("present");
+      assert.equal(Optional.safeParse(shared).success, true);
+      assert.equal(COptional.parse(shared), shared, `${mode}: the clean input is shared`);
+      // a non-enumerable getter is read by neither side
+      let reads = 0;
+      const withGetter = () => {
+        const o: Record<string, unknown> = { k: "a" };
+        Object.defineProperty(o, "extra", {
+          get() {
+            reads++;
+            throw new Error("read");
+          },
+          enumerable: false,
+        });
+        return o;
+      };
+      assert.equal(Optional.safeParse(withGetter()).success, true, `${mode}: stock never reads it`);
+      assert.equal(reads, 0);
+      assert.equal(
+        COptional.safeParse(withGetter()).success,
+        true,
+        `${mode}: nor does the skeleton`,
+      );
+      assert.equal(reads, 0);
+      // the check's schema is called once, with the prototype's value, on a null-prototype input (no stock rerun)
+      let calls: unknown[] = [];
+      const Proto = prop(
+        obj,
+        z.property(
+          "toString",
+          z.custom((v) => {
+            calls.push(v);
+            return typeof v === "function";
+          }),
+        ),
+      );
+      const CProto = compile(Proto);
+      const nullProto = Object.assign(Object.create(null), { k: "a" });
+      assert.equal(Proto.safeParse(nullProto).success, true);
+      assert.deepEqual(calls, [Object.prototype.toString], `${mode}: stock reads its fresh object`);
+      calls = [];
+      assert.equal(CProto.parse(nullProto), nullProto, `${mode}: shared`);
+      assert.deepEqual(
+        calls,
+        [Object.prototype.toString],
+        `${mode}: the skeleton reads the same, once`,
+      );
+      if (mode === "loose") {
+        assert.match(
+          COptional.code!,
+          /\(x\d+ \? input\["extra"\] : c\d+\["extra"\]\)/,
+          "loose: the clean call reads the input only when the key is enumerated",
+        );
+        assert.match(COptional.code!, /if \(k === "extra"\) x\d+ = true;/);
+        // an enumerated undeclared key, own or inherited, is read once, as stock's append reads it
+        for (const [what, make] of [
+          [
+            "own",
+            () => {
+              const o: Record<string, unknown> = { k: "a" };
+              Object.defineProperty(o, "extra", {
+                get() {
+                  reads++;
+                  return "present";
+                },
+                enumerable: true,
+              });
+              return o;
+            },
+          ],
+          [
+            "inherited",
+            () => {
+              const proto = {};
+              Object.defineProperty(proto, "extra", {
+                get() {
+                  reads++;
+                  return "present";
+                },
+                enumerable: true,
+              });
+              return inherited(proto);
+            },
+          ],
+        ] as const) {
+          reads = 0;
+          assert.equal(Required.safeParse(make()).success, true);
+          const stockReads = reads;
+          reads = 0;
+          const made = make();
+          assert.equal(CRequired.parse(made), made, `loose: the ${what} enumerable key is shared`);
+          assert.equal(
+            reads,
+            stockReads,
+            `loose: the ${what} getter is read ${reads}, stock ${stockReads}`,
+          );
+          assert.equal(stockReads, 1);
+        }
+      } else {
+        assert.doesNotMatch(COptional.code!, /k === "extra"/, `${mode}: no scan on the clean path`);
+        assert.match(
+          COptional.code!,
+          /\(input, c\d+\["extra"\]\)\) === INVALID/,
+          `${mode}: the prototype is read`,
+        );
+      }
+    }
+    console.log("  an undeclared key stock's assembly does not write reads as stock reads it ✓");
+  }
+
+  // a declared key the presence rules leave out of stock's output: the check reads the prototype of a fresh
+  // object, not the local. A null-prototype input lacking `toString` makes the two differ.
+  const Proto = prop(
+    z.object({ toString: z.string().optional(), k: z.string() }),
+    z.property(
+      "toString",
+      z.custom((v) => typeof v === "function"),
+    ),
+  );
+  const CProto = compile(Proto);
+  const nullProto = Object.assign(Object.create(null), { k: "a" });
+  assert.equal(Proto.safeParse(nullProto).success, true, "stock reads Object.prototype.toString");
+  assert.equal(
+    CProto.safeParse(nullProto).success,
+    true,
+    "the skeleton answers the same on the clean path",
+  );
+  assert.equal(CProto.parse(nullProto), nullProto);
+  const plain = { k: "a" };
+  assert.equal(CProto.safeParse(plain).success, Proto.safeParse(plain).success);
+  const present = { k: "a", toString: "s" };
+  assert.equal(CProto.safeParse(present).success, Proto.safeParse(present).success);
+  console.log("  an absent declared key reads a fresh object's prototype like stock ✓");
+
+  // declined keys: `__proto__` and a non-string key send the object to the official parser, stock's answer either way
+  const Declined = prop(z.object({ k: z.string() }), z.property("__proto__", z.any()));
+  const CDeclined = compile(Declined);
+  const declinedIn = { k: "a" };
+  assert.equal(CDeclined.stock, false);
+  assert.notEqual(CDeclined.parse(declinedIn), declinedIn, "official parser: a copy");
+  assert.deepEqual(CDeclined.parse(declinedIn), Declined.parse(declinedIn));
+  console.log("  a __proto__ property check takes the official parser ✓");
+
+  // a lazy whose getter throws at compile time inside the carried schema (#83): the island calls it at parse time
+  {
+    const Later = prop(
+      base,
+      z.property(
+        "k",
+        z.lazy(() => later),
+      ),
+    );
+    const CLater = compile(Later);
+    const later = z.string().min(1);
+    assert.equal(CLater.stock, false);
+    assert.equal(CLater.parse(input), input);
+    assert.equal(CLater.safeParse({ k: "", keep: { n: 1 } }).success, false);
+  }
+  console.log(
+    "  a lazy in a temporal dead zone inside the carried schema resolves at parse time ✓",
+  );
+
+  // async: an async check inside the carried schema makes the subroutine async on stock's schedule
+  {
+    const log: string[] = [];
+    const A = prop(
+      z.object({ k: z.string(), keep: z.object({ n: z.number() }) }),
+      z.property(
+        "k",
+        z.string().refine((v) => {
+          log.push("P");
+          return v !== "no";
+        }),
+      ),
+      z.refine(async (v: any) => {
+        log.push("A");
+        return v.k !== "async-no";
+      }),
+      z.refine((v: any) => {
+        log.push("S");
+        return v.k !== "sync-no";
+      }),
+    );
+    const CA = compile(A);
+    assert.equal(CA.async, true);
+    assert.equal(CA.stock, false);
+    assert.throws(() => CA.parse(input), /async/i, "sync entry throws on an async product");
+    log.length = 0;
+    await A.safeParseAsync(input);
+    const stockLog = [...log];
+    log.length = 0;
+    assert.equal(
+      await CA.parseAsync(input),
+      input,
+      "async property check: the clean input is shared",
+    );
+    assert.deepEqual(log, stockLog, "every check called synchronously in declaration order");
+    assert.deepEqual(stockLog, ["P", "A", "S"]);
+    for (const v of [
+      { k: "no", keep: { n: 1 } },
+      { k: "async-no", keep: { n: 1 } },
+    ]) {
+      assert.equal((await CA.safeParseAsync(v)).success, (await A.safeParseAsync(v)).success);
+    }
+    // an async carried schema: the property check itself is a promise, chained like stock's
+    const AC = prop(
+      base,
+      z.property(
+        "k",
+        z.string().refine(async (v) => v !== "no"),
+      ),
+    );
+    const CAC = compile(AC);
+    assert.equal(CAC.async, true);
+    assert.equal(await CAC.parseAsync(input), input);
+    assert.equal((await CAC.safeParseAsync({ k: "no", keep: { n: 1 } })).success, false);
+    assert.equal((await AC.safeParseAsync({ k: "no", keep: { n: 1 } })).success, false);
+    console.log(
+      "  an async subroutine runs the property check on stock's schedule and shares the input ✓",
+    );
+  }
+  // the abort rule of the async variant, read off the carried run's issues: a carried type mismatch aborts stock's
+  // chain (the later predicate is never called), a carried check failure carries `continue: true` (it is called).
+  // A failing parse is rerun by stock, so the compiled product logs exactly twice stock's calls when it skips
+  // what stock skips, and once more when it does not.
+  {
+    const laterCalls = (carried: z.ZodType) => {
+      let calls = 0;
+      const A = prop(
+        z.object({ k: z.unknown() }),
+        z.property("k", carried),
+        z.refine(() => {
+          calls++;
+          return true;
+        }),
+        z.refine(async () => true),
+      );
+      return {
+        schema: A,
+        compiled: compile(A),
+        count: () => calls,
+        reset: () => {
+          calls = 0;
+        },
+      };
+    };
+    const typeMismatch = laterCalls(z.number());
+    const checkFailure = laterCalls(z.string().min(5));
+    for (const [name, t] of [
+      ["type mismatch", typeMismatch],
+      ["check failure", checkFailure],
+    ] as const) {
+      const v = { k: "abc" };
+      t.reset();
+      assert.equal((await t.schema.safeParseAsync(v)).success, false);
+      const stockCalls = t.count();
+      t.reset();
+      assert.equal((await t.compiled.safeParseAsync(v)).success, false);
+      assert.equal(
+        t.count(),
+        2 * stockCalls,
+        `${name}: the later predicate is called ${t.count()} times against stock's ${stockCalls}, then stock's rerun`,
+      );
+    }
+    assert.equal(
+      typeMismatch.count(),
+      0,
+      "a carried type mismatch aborts: the later predicate is never called",
+    );
+    assert.equal(
+      checkFailure.count(),
+      2,
+      "a carried check failure continues: called once, then by stock's rerun",
+    );
+    console.log(
+      "  the async variant aborts on a carried type mismatch and continues on a check failure, like stock ✓",
+    );
+  }
+}
+
 console.log("\nAll smoke assertions passed ✓");

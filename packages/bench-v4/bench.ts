@@ -42,7 +42,7 @@ import { ArkErrors, type } from "arktype";
 import { z } from "zod";
 import { compileFn, ZodCompileAsyncError } from "zod/v4/core";
 import { compile } from "zod-cow-v4";
-import { runCalibration } from "./calibration.js";
+import { ITERS, runCalibration } from "./calibration.js";
 import { runFailures } from "./failures.js";
 import { type Fixture, gate, type Impl } from "./gates.js";
 import {
@@ -89,7 +89,7 @@ import {
 import { runStripParity } from "./strip.js";
 
 console.log(
-  `bench-v4 · ${N.toLocaleString()} records · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
+  `bench-v4 · ${N.toLocaleString()} records · ${ITERS.toLocaleString()} operations per hot-loop round · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
 );
 printArkKeywordChecks();
 

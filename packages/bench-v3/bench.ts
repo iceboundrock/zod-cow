@@ -37,7 +37,7 @@ import assert from "node:assert/strict";
 import { ArkErrors, type } from "arktype";
 import { z } from "zod";
 import { compile } from "zod-cow-v3";
-import { runCalibration } from "./calibration.js";
+import { ITERS, runCalibration } from "./calibration.js";
 import { runFailures } from "./failures.js";
 import { type Fixture, gate, type Impl } from "./gates.js";
 import {
@@ -77,7 +77,7 @@ import {
 } from "./schemas.js";
 
 console.log(
-  `bench-v3 · ${N.toLocaleString()} records · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
+  `bench-v3 · ${N.toLocaleString()} records · ${ITERS.toLocaleString()} operations per hot-loop round · at least ${WARMUP} warmup + ${PASSES} timed rounds per candidate, rounded up to complete rotations of the candidate order · node ${process.version}`,
 );
 printArkKeywordChecks();
 

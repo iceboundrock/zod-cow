@@ -22,7 +22,7 @@ import { ArkErrors, type } from "arktype";
 import { z } from "zod";
 import { compileFn, INVALID } from "zod/v4/core";
 import { compile } from "zod-cow-v4";
-import { ITERS } from "./calibration.js";
+import { ERROR_ITERS, ITERS } from "./calibration.js";
 import { gate, type Impl } from "./gates.js";
 import { printRatios, runScenario, type ScenarioRun } from "./harness.js";
 import {
@@ -45,6 +45,7 @@ type Validator = (i: unknown) => unknown;
 export async function runFailures(): Promise<ScenarioRun[]> {
   const runs: ScenarioRun[] = [];
   const K = ITERS;
+  const KE = ERROR_ITERS;
 
   /* ─────────────────────────── S9: validation-only failures ─────────────────────────── */
 
@@ -375,15 +376,15 @@ export async function runFailures(): Promise<ScenarioRun[]> {
     const { schema, compiled, zc, ark, input } = p;
     const run = await runScenario(
       p.id,
-      `${p.what}, detailed errors, ${K.toLocaleString()} parses per round`,
+      `${p.what}, detailed errors, ${KE.toLocaleString()} parses per round`,
       [
         {
           column: "stock",
           label: "stock zod4 safeParse (ZodError)",
           run: () => {
             let rejected = 0;
-            for (let i = 0; i < K; i++) if (!schema.safeParse(input).success) rejected++;
-            return rejected === K ? rejected : fail("stock accepted");
+            for (let i = 0; i < KE; i++) if (!schema.safeParse(input).success) rejected++;
+            return rejected === KE ? rejected : fail("stock accepted");
           },
         },
         {
@@ -391,8 +392,8 @@ export async function runFailures(): Promise<ScenarioRun[]> {
           label: "z.compile() safeParse (fast path + runtime fallback)",
           run: () => {
             let rejected = 0;
-            for (let i = 0; i < K; i++) if (!compiled.safeParse(input).success) rejected++;
-            return rejected === K ? rejected : fail("z.compile() accepted");
+            for (let i = 0; i < KE; i++) if (!compiled.safeParse(input).success) rejected++;
+            return rejected === KE ? rejected : fail("z.compile() accepted");
           },
         },
         {
@@ -405,8 +406,8 @@ export async function runFailures(): Promise<ScenarioRun[]> {
           label: "zod-cow-v4 safeParse (skeleton + stock fallback)",
           run: () => {
             let rejected = 0;
-            for (let i = 0; i < K; i++) if (!zc.safeParse(input).success) rejected++;
-            return rejected === K ? rejected : fail("zod-cow accepted");
+            for (let i = 0; i < KE; i++) if (!zc.safeParse(input).success) rejected++;
+            return rejected === KE ? rejected : fail("zod-cow accepted");
           },
         },
         {
@@ -414,12 +415,12 @@ export async function runFailures(): Promise<ScenarioRun[]> {
           label: "ArkType Type(data) (ArkErrors)",
           run: () => {
             let rejected = 0;
-            for (let i = 0; i < K; i++) if (ark(input) instanceof ArkErrors) rejected++;
-            return rejected === K ? rejected : fail("ArkType accepted");
+            for (let i = 0; i < KE; i++) if (ark(input) instanceof ArkErrors) rejected++;
+            return rejected === KE ? rejected : fail("ArkType accepted");
           },
         },
       ],
-      { iterations: K },
+      { iterations: KE },
     );
     printRatios(run);
     runs.push(run);

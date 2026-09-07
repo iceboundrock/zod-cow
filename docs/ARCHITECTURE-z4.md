@@ -929,8 +929,9 @@ the async answer of `inspectSubtree` choosing which; `officialValidator` decline
 the skeleton. The canary pins the three divergences.
 
 Actual behavior for recursive schemas: the top-level skeleton of `z.object({children: z.array(z.lazy(() => Tree))})`
-compiles as usual. The lazy subtree goes through the official parser product at the element position, and the official `generateLazyCheck`
-brings its own cache-parser black box that handles circular references correctly (smoke test #9: `stock: false` and the semantics are normal).
+compiles as usual. The lazy subtree goes through this layer's runtime island at the element position (`subtreeFollowsRuntime`
+answers true at the lazy, §5.5 item 5), which runs the getter's schema and handles circular references correctly
+(smoke test #9: `stock: false` and the semantics are normal).
 What really degrades the whole tree is a top-level recursive schema (a circular reference in the def tree, which the official compileFn rejects).
 
 ## 7. Benchmarks (Benchmarks workflow run, 50 000 accounts, node v24, --expose-gc, medians over complete rotations of the candidate order)

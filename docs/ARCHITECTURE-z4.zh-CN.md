@@ -723,8 +723,9 @@ stock 的编译器把每个非回调 check 发射为对值自身属性的内联�
 它的整树返回 null，`validate` 于是走骨架。canary 钉住这三处分歧。
 
 递归 schema 的实际行为：`z.object({children: z.array(z.lazy(() => Tree))})` 的
-顶层骨架照常编译，lazy 子树在元素位走官方 parser 产物，官方 `generateLazyCheck`
-自带 cache-parser 黑盒，正确处理循环引用（冒烟 #9：`stock: false` 且语义正常）。
+顶层骨架照常编译，lazy 子树在元素位走本层的 runtime 岛（`subtreeFollowsRuntime`
+在 lazy 处返回 true，§5.5 第 5 条），运行 getter 的 schema 并正确处理循环引用
+（冒烟 #9：`stock: false` 且语义正常）。
 真正整树降级的是顶层递归 schema（def 树循环引用，官方 compileFn 拒绝）。
 
 ## 7. 基准（50 万账户，node v24，--expose-gc，3 轮中位）

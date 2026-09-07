@@ -677,10 +677,22 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    `undefined` value raises for the CoW decision is asked from the rest loop's hole test, on the copy and then on the
    input, only when the rest element's output equals that `undefined`: the hole test every array position makes,
    #95). When the constructor is `Array` and the species is `Array`, the builtin's remaining steps (`ArrayCreate`, the
-   stores into it, its length, its iteration) run no user code, so the copy stands in for them and the inline rest
-   loop walks it; the array iterator and its `next`, two data properties, are compared against the ones captured at
-   module load after the copy (the per-index reads are the last user code before stock's `for...of` reads them), and
-   a replaced one sends the copy through `for...of` instead. Any other constructor (a subclass instance, an own or
+   stores into it, its length) run no user code, so the copy stands in for them. Stock then iterates its result with
+   `for...of`, which reads `Symbol.iterator` off it, calls what it got, reads `next` off the iterator and calls it
+   per step; the skeleton makes the two reads on the copy with the same receivers (the copy is a plain array holding
+   what the native slice would hold, which is all an accessor on either prototype can tell about its receiver) and,
+   when both answered the native array iterator and its `next`, runs the inline index loop, since that iteration is
+   the copy's elements in order and runs no user code (the loop closes the iterator through its `return`, read off
+   it, when the rest element throws, as `for...of` does); any other answer continues through a real `for...of` from
+   the values already read (`restFromMethod`, `restFromIterator` in `emit-tuple-rest.ts`), so the call of the
+   method on the copy, the object check on its result, the read and call of `next` per step, the reads of `done`
+   and `value`, the close through `return` and every `TypeError` are the engine's own. The sixth review of #88
+   found the earlier guard reading the two properties off their prototypes, which invoked an accessor with the
+   prototype as receiver where stock's iteration hands it the array or the iterator, so a receiver-sensitive
+   accessor could pass the guard and iterate differently under stock; a descriptor check that invokes nothing
+   (`Object.getOwnPropertyDescriptor` twice) costs 60 to 80 ns per parse, more than the parse, and a `for...of` over
+   the copy that verifies each yield against it costs about a nanosecond per element, where the two reads with
+   stock's receivers cost nothing measurable. Any other constructor (a subclass instance, an own or
    inherited `constructor`, another realm's `Array`) or any other species hands the builtin the reads already made
    and lets it finish: `Array.prototype.slice` is called on a facade that answers `length` and `constructor` from what
    was read (the species that was read, when the constructor was `Array`, carried on a plain object the builtin reads
@@ -707,13 +719,15 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    Proxy lengths keep the clean path (#95); a Proxy sees the skeleton read `length` a different number of times than
    stock's runtime does (the guard, each gated slot, the copy and the presence decision, against stock's slice and
    its two loops); a present slot whose product fails returns to stock at once where stock keeps going and may drop
-   the failure with a truncation the rest moved; a `slice` that is not callable throws a `TypeError` on both sides
-   with the engine's message for each call site. `Array.prototype.slice` costs a near-constant 30 ns per call (its
+   the failure with a truncation the rest moved, and that early exit from a continuation's `for...of` closes a
+   custom iterator through its `return`, which stock's loop, never exiting early, does not call; a `slice` that is
+   not callable throws a `TypeError` on both sides with the engine's message for each call site. `Array.prototype.slice` costs a near-constant 30 ns per call (its
    species lookup and generic entry, not the copy), the inlined loop about a third of that at a short rest; measured
    on #88 (the #78 microbenchmark), a clean parse of `[string, ...string[]]` with one rest element went from about
    79 ns under `slice` to 62 ns, with four from 84 to 69 ns, with sixteen from 117 to 108 ns, an object rest of four
-   from 306 to 285 ns, against a stock parse of 170 to 250 ns; the presence decision and the iterator comparison
-   cost the fast path nothing measurable over the bare copy (within 1 to 3 ns, the control row's spread). A rest hole over an inherited `undefined` comes out as an own slot like stock's,
+   from 306 to 285 ns, against a stock parse of 170 to 250 ns; the presence decision and the two iterator reads
+   cost the fast path nothing measurable over the bare copy (within 1 to 3 ns, the control row's spread; the reads
+   measured against the earlier data-property comparison on the same rows, interleaved, sixth review of #88). A rest hole over an inherited `undefined` comes out as an own slot like stock's,
    where `slice` read the inherited value through `HasProperty` and made it own.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
@@ -952,7 +966,8 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
-| `emit-tuple.ts` | §5.4 | `emitCoWTuple` |
+| `emit-tuple.ts` | §5.4 | `emitCoWTuple`: the fixed-slot segments and the async layout |
+| `emit-tuple-rest.ts` | §5.4 | `emitSyncRest`: the sync rest layout's rest segment and presence decision (#87, #88), `nativeSliceFrom`, `restFromMethod`, `restFromIterator`; imported by `emit-tuple.ts` only, outside the cycle below |
 | `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
 | `emit-union.ts` | §4 trap four | `emitCoWUnion` (#58) |
 

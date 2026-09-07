@@ -1957,26 +1957,34 @@ head("the sync tuple layout slices the rest before running any rest element, lik
   }
   // Code pin: a rest tuple's sync skeleton holds the guard's length read, reads `slice` once and, on the native one,
   // makes slice's reads in slice's order (the length once, converted; the constructor; the species off `Array`),
-  // copies by hand (#87: `slice` pays a fixed builtin cost) with `in` then a store per index and nothing else, and
-  // runs the inline rest loop only while the array iterator and its `next` are the captured ones; every other case is
-  // a continuation over an iterable named `rest` (the copy, the native builtin finished on the facade with the reads
-  // already made, or what the custom `slice` answered, called through the hoisted `Reflect.apply`, never a second
-  // `.slice`), and the live length read after the rest is compared with every read before it. A fixed tuple reads
-  // no `slice` and allocates nothing on its clean path
+  // copies by hand (#87: `slice` pays a fixed builtin cost) with `in` then a store per index and nothing else, then
+  // makes the two reads stock's `for...of` makes with stock's receivers (`Symbol.iterator` off the copy, `next` off
+  // the iterator the native one creates; nothing is read off a prototype, sixth review of #88) and runs the inline
+  // index loop only when both answered the captured natives, closing the iterator through `return` when the rest
+  // element throws; every other case is a continuation over an iterable named `rest` (a `for...of` continued from
+  // the method or the `next` that was read, the native builtin finished on the facade with the reads already made,
+  // or what the custom `slice` answered, called through the hoisted `Reflect.apply`, never a second `.slice`), and
+  // the live length read after the rest is compared with every read before it. A fixed tuple reads no `slice` and
+  // allocates nothing on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
     /const (x\d+) = input\.length;\s*if \(\1 < 1\) return INVALID;/.test(restCode) &&
       /const (x\d+) = input\.slice;\s*let [x\d, ]+ = null, x\d+ = false;\s*if \(\1 === c\d+\) \{\s*(x\d+) = \+input\.length;\s*(x\d+) = input\.constructor;\s*if \(\3 === Array && \((x\d+) = Array\[Symbol\.species\]\) === Array\) \{/.test(
         restCode,
       ) &&
-      /= new Array\((x\d+) > 1 \? Math\.floor\(\1\) - 1 : 0\);\s*for \(let j = 0; j < (x\d+)\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \2\[j\] = input\[1 \+ j\];\s*\}\s*if \(Array\.prototype\[Symbol\.iterator\] === c\d+ && c\d+\.next === c\d+\) \{/.test(
+      /= new Array\((x\d+) > 1 \? Math\.floor\(\1\) - 1 : 0\);\s*for \(let j = 0; j < (x\d+)\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \2\[j\] = input\[1 \+ j\];\s*\}\s*const (x\d+) = \2\[Symbol\.iterator\];\s*if \(\3 === c\d+\) \{\s*const (x\d+) = c\d+\(\2\);\s*const (x\d+) = \4\.next;\s*if \(\5 === c\d+\) \{\s*x\d+ = true;\s*try \{\s*for \(let i = 1; i < 1 \+ \2\.length; i\+\+\) \{/.test(
         restCode,
       ) &&
+      /\} catch \(err\) \{\s*c\d+\((x\d+)\);\s*throw err;\s*\}\s*\} else \{\s*x\d+ = c\d+\(\1, x\d+\);\s*\}\s*\} else \{\s*x\d+ = c\d+\(x\d+, x\d+\);/.test(
+        restCode,
+      ) &&
+      !/Array\.prototype|getOwnPropertyDescriptor/.test(restCode) &&
       /!Object\.hasOwn\(x\d+, i - 1\) \|\| !Object\.hasOwn\(input, i\)/.test(restCode) &&
       /= c\d+\(input, x\d+, x\d+ === Array \? \{ \[Symbol\.species\]: x\d+ \} : x\d+, 1\);/.test(
         restCode,
       ) &&
       /= c\d+\(x\d+, input, \[1\]\);/.test(restCode) &&
+      (restCode.match(/for \(const e of rest\) \{/g) ?? []).length === 1 &&
       /const rest = x\d+;\s*for \(const e of rest\) \{/.test(restCode) &&
       /const (x\d+) = input\.length;\s*if \(x\d+ !== null \|\| !\(\1 === x\d+ && \+\1 === x\d+\)\) \{/.test(
         restCode,
@@ -2008,9 +2016,10 @@ head(
   // (No helper here calls an array method that constructs through the species: a getter on it is under test.)
   const snap = (v: unknown): unknown => {
     if (!Array.isArray(v)) return v;
+    // Index loops, no spread or `for...of`: the array iterator may be under test (group 9)
     const keys = Object.keys(v);
     const values: unknown[] = [];
-    for (const k of keys) values.push(snap(v[Number(k)]));
+    for (let i = 0; i < keys.length; i++) values.push(snap(v[Number(keys[i])]));
     return { length: v.length, keys, values };
   };
   type Err = { name: string; message: string };
@@ -2026,11 +2035,16 @@ head(
   ): Run => {
     const log: string[] = [];
     const input = make(log);
+    const taken = (): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < log.length; i++) out.push(log[i]!);
+      return out;
+    };
     try {
       const value = parse(input);
-      return { value: snap(value), log: [...log], ref: value === input };
+      return { value: snap(value), log: taken(), ref: value === input };
     } catch (e) {
-      const r: Run = { error: errOf(e), log: [...log], ref: false };
+      const r: Run = { error: errOf(e), log: taken(), ref: false };
       try {
         safe(make([]));
         r.safeError = { name: "none", message: "" };
@@ -2060,6 +2074,9 @@ head(
   const check = ({ label, S, make, expect, throws, setup, ref, rerun }: Case): void => {
     const C = compile(S);
     assert.ok(!C.stock, `${label}: on the CoW path`);
+    // Stock's memoizer walks the items with `for...of` on a schema's first parse (`isRecursive`), a read of the
+    // array iterator outside the tuple's timeline: taken here, before any global under test is swapped
+    S.safeParse(null);
     const undo = setup?.([]);
     let stock: Run;
     let cow: Run;
@@ -2908,6 +2925,368 @@ head(
     expect: ["h"],
     ref: true,
   });
+
+  // 9. The array iterator and its `next` on the prototypes (sixth review of #88): stock's `for...of` over the
+  // slice result reads `Symbol.iterator` once with the result as receiver, calls it, reads `next` once with the
+  // iterator as receiver, calls it per step and closes through `return` when the rest element throws. The skeleton
+  // makes the two reads on its copy with the same receivers (the copy is a plain array holding what the native
+  // slice would hold, which is all an accessor can tell about its receiver), runs the index loop when both answered
+  // the natives, and continues through a real `for...of` from what they answered otherwise, so a data or accessor
+  // replacement of either, receiver-sensitive or not, meets the same reads, calls and engine errors
+  {
+    const ARRAY_ITERATOR_PROTOTYPE = Object.getPrototypeOf([][Symbol.iterator]()) as {
+      next: () => IteratorResult<unknown>;
+    };
+    /** The log of the run under way, for a hook that lives on a prototype */
+    const logOf: { log: string[] } = { log: [] };
+    /** A fresh copy of `values` by index (the array iterator is under test), registered in `holder` */
+    const logged = (values: unknown[]) => (log: string[]) => {
+      logOf.log = log;
+      const a: unknown[] = [];
+      for (let i = 0; i < values.length; i++) a.push(values[i]);
+      holder.input = a;
+      return a;
+    };
+    const kindOf = (receiver: unknown): string =>
+      receiver === Array.prototype
+        ? "proto"
+        : receiver === holder.input
+          ? "input"
+          : Array.isArray(receiver)
+            ? "rest"
+            : "other";
+    /** `Array.prototype[Symbol.iterator]` redefined for the two parses from `define(native)`, restored from its
+     *  descriptor; `define` gets the native iterator function */
+    const arrayIterator =
+      (define: (native: (this: unknown[]) => IterableIterator<unknown>) => PropertyDescriptor) =>
+      () => {
+        const desc = Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator)!;
+        Object.defineProperty(Array.prototype, Symbol.iterator, {
+          configurable: true,
+          ...define(desc.value),
+        });
+        return () => {
+          Object.defineProperty(Array.prototype, Symbol.iterator, desc);
+          holder.input = null;
+        };
+      };
+    /** `%ArrayIteratorPrototype%.next` redefined the same way */
+    const arrayNext =
+      (define: (native: () => IteratorResult<unknown>) => PropertyDescriptor) => () => {
+        const desc = Object.getOwnPropertyDescriptor(ARRAY_ITERATOR_PROTOTYPE, "next")!;
+        Object.defineProperty(ARRAY_ITERATOR_PROTOTYPE, "next", {
+          configurable: true,
+          ...define(desc.value),
+        });
+        return () => {
+          Object.defineProperty(ARRAY_ITERATOR_PROTOTYPE, "next", desc);
+          holder.input = null;
+        };
+      };
+    check({
+      label: "a data-property array iterator that yields something else",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator(() => ({
+        value: function* (this: unknown[]) {
+          logOf.log.push(`iter:${kindOf(this)}`);
+          yield "changed";
+        },
+      })),
+      expect: ["a", "changed"],
+    });
+    check({
+      label:
+        "an accessor array iterator that answers the native one to the prototype and another to an array (the review's repro)",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype
+            ? native
+            : function* () {
+                yield "changed";
+              };
+        },
+      })),
+      expect: ["a", "changed"],
+    });
+    check({
+      label: "an accessor array iterator under a transform rest",
+      S: S1(restT),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype
+            ? native
+            : function* () {
+                yield "changed";
+              };
+        },
+      })),
+      expect: ["a", "changed!"],
+    });
+    check({
+      label:
+        "an accessor array iterator that answers the native one: read once, the input by reference",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return native;
+        },
+      })),
+      expect: ["a", "b"],
+      ref: true,
+    });
+    check({
+      label: "an array iterator that stops after the first element",
+      S: S1(restT),
+      make: logged(["a", "b", "c"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype
+            ? native
+            : function* (this: unknown[]) {
+                yield this[0];
+              };
+        },
+      })),
+      expect: ["a", "b!"],
+    });
+    check({
+      label:
+        "an array iterator that yields one element more: stock's trailing loop walks past the items",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype
+            ? native
+            : function* (this: unknown[]) {
+                yield* native.call(this);
+                yield "extra";
+              };
+        },
+      })),
+      throws: "TypeError",
+    });
+    check({
+      label:
+        "an array iterator that yields the copy's elements and then rewrites the fixed slot and the length",
+      S: SO(restT),
+      make: logged(["h", "x", "r"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype
+            ? native
+            : function* (this: unknown[]) {
+                yield* native.call(this);
+                holder.input![0] = "M";
+                holder.input!.length = 1;
+              };
+        },
+      })),
+      expect: ["h"],
+    });
+    check({
+      label: "a data-property next that rewrites every value",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayNext((native) => ({
+        value: function (this: unknown) {
+          const r = native.call(this);
+          logOf.log.push(`next:${r.done}`);
+          return r.done ? r : { value: "changed", done: false };
+        },
+      })),
+      expect: ["a", "changed"],
+    });
+    check({
+      label:
+        "an accessor next that answers the native one to the prototype and another to an iterator (the review's second case)",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayNext((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:next:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`);
+          return this === ARRAY_ITERATOR_PROTOTYPE
+            ? native
+            : function (this: unknown) {
+                const r = native.call(this);
+                return r.done ? r : { value: "changed", done: false };
+              };
+        },
+      })),
+      expect: ["a", "changed"],
+    });
+    check({
+      label: "an accessor next that answers the native one: read once, the input by reference",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayNext((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:next:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`);
+          return native;
+        },
+      })),
+      expect: ["a", "b"],
+      ref: true,
+    });
+    check({
+      label:
+        "an accessor next whose function shrinks the length below the optional slot after the rest",
+      S: SO(restT),
+      make: logged(["h", "x", "r"]),
+      setup: arrayNext((native) => ({
+        get(this: unknown) {
+          return this === ARRAY_ITERATOR_PROTOTYPE
+            ? native
+            : function (this: unknown) {
+                const r = native.call(this);
+                if (r.done) holder.input!.length = 1;
+                return r;
+              };
+        },
+      })),
+      expect: ["h"],
+    });
+    // The protocol's errors, the engine's own on both sides
+    check({
+      label: "an accessor array iterator that answers a number: not iterable",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype ? native : 5;
+        },
+      })),
+      throws: "TypeError",
+    });
+    check({
+      label: "an array iterator that answers a non-object: the engine's TypeError",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype ? native : () => 5;
+        },
+      })),
+      throws: "TypeError",
+    });
+    check({
+      label: "an array iterator that is a class: the engine's TypeError on the call",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayIterator((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:iterator:${kindOf(this)}`);
+          return this === Array.prototype ? native : class {};
+        },
+      })),
+      throws: "TypeError",
+    });
+    check({
+      label: "an accessor next that answers a number: the engine's TypeError",
+      S: S1(z.string()),
+      make: logged(["a", "b"]),
+      setup: arrayNext((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:next:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`);
+          return this === ARRAY_ITERATOR_PROTOTYPE ? native : 5;
+        },
+      })),
+      throws: "TypeError",
+    });
+    check({
+      label: "a next that answers a non-object result after one value: the engine's TypeError",
+      S: S1(restT),
+      make: logged(["a", "b", "c"]),
+      setup: arrayNext((native) => ({
+        get(this: unknown) {
+          logOf.log.push(`get:next:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`);
+          let n = 0;
+          return this === ARRAY_ITERATOR_PROTOTYPE
+            ? native
+            : function (this: unknown) {
+                logOf.log.push(`next:${n}`);
+                return n++ === 0 ? native.call(this) : null;
+              };
+        },
+      })),
+      throws: "TypeError",
+    });
+    // `return` on the iterator prototype: stock's `for...of` reads it off the iterator when the rest element throws
+    {
+      const withReturn = (setup: () => () => void) => () => {
+        const undo = setup();
+        Object.defineProperty(ARRAY_ITERATOR_PROTOTYPE, "return", {
+          configurable: true,
+          get(this: unknown) {
+            logOf.log.push(
+              `get:return:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`,
+            );
+            return function (this: unknown) {
+              logOf.log.push("return");
+              return { done: true, value: undefined };
+            };
+          },
+        });
+        return () => {
+          delete (ARRAY_ITERATOR_PROTOTYPE as { return?: unknown }).return;
+          undo();
+        };
+      };
+      const throwing = z.string().transform((v) => {
+        if (v === "b") throw new RangeError("rest");
+        return `${v}!`;
+      });
+      check({
+        label:
+          "a return on the array iterator prototype under the native iteration: read and called on the throw",
+        S: S1(throwing),
+        make: logged(["a", "b"]),
+        setup: withReturn(() => () => {}),
+        throws: "RangeError",
+      });
+      check({
+        label:
+          "a return on the array iterator prototype under a replaced next: read and called on the throw",
+        S: S1(throwing),
+        make: logged(["a", "b"]),
+        setup: withReturn(
+          arrayNext((native) => ({
+            get(this: unknown) {
+              logOf.log.push(
+                `get:next:${this === ARRAY_ITERATOR_PROTOTYPE ? "proto" : "iterator"}`,
+              );
+              return this === ARRAY_ITERATOR_PROTOTYPE
+                ? native
+                : function (this: unknown) {
+                    return native.call(this);
+                  };
+            },
+          })),
+        ),
+        throws: "RangeError",
+      });
+      check({
+        label: "a return on the array iterator prototype is not read when nothing throws",
+        S: S1(restT),
+        make: logged(["a", "b"]),
+        setup: withReturn(() => () => {}),
+        expect: ["a", "b!"],
+      });
+    }
+  }
 }
 
 head("async failure path falls back to stock safeParseAsync (official issues structure)");

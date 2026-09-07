@@ -75,8 +75,13 @@ export function escKey(k: string): string {
  * the same width the chain is 20 to 30% faster at 17 to 32 keys, level at 48 and 5 to 10% slower
  * at 64 on Node 24 locally (strip clean 219 → 177 ns at 17 keys, 354 → 275 ns at 32, 446 → 443 ns
  * at 48, 621 → 663 ns at 64; the strict and extra-key rows move the same way, the dirty row, which
- * runs no probe, not at all). The Benchmarks workflow runs on Node 22 / 24 / 26 read the same
- * direction (run ids in the CHANGELOG entry). 32 is the largest width with a clear win; the code
+ * runs no probe, not at all). The Benchmarks workflow (GitHub-hosted runner, `BENCH_ITERS=1 000 000`)
+ * read the 32-key rows at the cap of 16 and at 32 on Node 22 / 24 / 26: strip clean 380 → 250,
+ * 273 → 222 and 227 → 200 ns, strict clean 379 → 245, 273 → 208 and 226 → 197 ns, the extra-key row
+ * 294 → 191, 288 → 214 and 226 → 216 ns, while the 16- and 64-key rows, whose probe did not change,
+ * moved by at most 4% on Node 24 and 26 and by about 25% either way on Node 22, its run-to-run
+ * variance (runs 34155229369 / 34155230627 / 34155231942 at 16, 34155316232 / 34155317795 /
+ * 34155319415 at 32). 32 is the largest width with a clear win on every lane; the code
  * size is not a concern at that width (a 32-key strip skeleton is about 500 characters longer with
  * the chain). The review microbenchmark of #33, which timed the probe alone over an object of that
  * width, put the crossover near 128 keys; timing the whole parse moves it to about 48, since the

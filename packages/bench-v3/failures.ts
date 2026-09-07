@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { ArkErrors, type } from "arktype";
 import { z } from "zod";
 import { type Compiled, compile } from "zod-cow-v3";
-import { ITERS } from "./calibration.js";
+import { ERROR_ITERS } from "./calibration.js";
 import { gate, type Impl } from "./gates.js";
 import { printRatios, runScenario, type ScenarioRun } from "./harness.js";
 import {
@@ -77,7 +77,7 @@ function issueParity(
 
 export async function runFailures(): Promise<ScenarioRun[]> {
   const runs: ScenarioRun[] = [];
-  const K = ITERS;
+  const K = ERROR_ITERS;
 
   const parseImpls = (
     schema: z.ZodTypeAny,

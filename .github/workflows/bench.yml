@@ -36,15 +36,17 @@ env:
   # for local runs; 50 000 keeps a workflow run under a few minutes.
   BENCH_N: ${{ inputs.bench_n || '50000' }}
   # Operations per timed round of the hot loops. The scripts default to BENCH_N,
-  # which at 50 000 gives 1 to 5 ms rounds; 1 000 000 gives 50 to 250 ms rounds
-  # on the fast loops and a few seconds on the slowest failure rows.
+  # which at 50 000 gives 1 to 5 ms rounds on the nanosecond-scale loops;
+  # 1 000 000 gives 20 to 250 ms. The loops that build detailed errors run a
+  # tenth of it (ERROR_ITERS in the bench scripts), so their microsecond
+  # operations give rounds in the same range instead of several seconds.
   BENCH_ITERS: ${{ inputs.bench_iters || '1000000' }}
 
 jobs:
   bench:
     name: bench (node 24, BENCH_N=${{ inputs.bench_n || '50000' }}, BENCH_ITERS=${{ inputs.bench_iters || '1000000' }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7

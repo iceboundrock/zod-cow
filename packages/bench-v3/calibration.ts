@@ -31,6 +31,13 @@ if (!Number.isInteger(ITERS) || ITERS < 1) {
     `BENCH_ITERS must be a positive integer, got ${JSON.stringify(process.env.BENCH_ITERS)}`,
   );
 }
+/**
+ * Operations per timed round of a hot loop that builds detailed errors (the `safeParse` failure
+ * rows): a tenth of `ITERS`. Those loops cost microseconds per operation where the validation-only
+ * and clean-parse loops cost nanoseconds, so the same count would make their rounds ten to a hundred
+ * times longer for no gain in resolution; the tenth keeps every hot-loop round in the same range.
+ */
+export const ERROR_ITERS = Math.max(1, Math.ceil(ITERS / 10));
 const SCALE_ITERS = Math.max(1, Math.ceil(ITERS / 5));
 
 type ArkType = ((i: unknown) => unknown) & { allows: (i: unknown) => boolean };

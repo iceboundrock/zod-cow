@@ -660,8 +660,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    rest element (a tuple without one still allocates nothing). The sync layout builds it by hand (#87): `new Array(n)`
    with `slice` and the length each read once, the length converted once as slice's `LengthOfArrayLike` converts it
    (`ToLength`: a fraction is floored, `NaN`, a negative or a non-numeric string gives an empty copy, a BigInt or a
-   Symbol the `TypeError` `ToNumber` throws, third review of #88), an empty copy when the input is shorter than the
-   fixed slots, each index asked `in` before it is read (`slice` runs `HasProperty` then `Get`, so a Proxy whose `has`
+   Symbol the `TypeError` `ToNumber` throws, third review of #88) and read before the constructor and the species, as
+   slice reads it before `ArraySpeciesCreate`, so a species getter that changes the length changes nothing the copy
+   has not fixed already (fourth review of #88), an empty copy when the input is shorter than the fixed slots, each
+   index asked `in` before it is read (`slice` runs `HasProperty` then `Get`, so a Proxy whose `has`
    trap denies an index gets a hole there under both, second review of #88) and written when `in` answered, as slice
    writes it, so a hole stays a hole. The copy asks nothing else of the input: the own-ness question an `undefined`
    value raises for the CoW decision (an inherited `undefined` under a hole is a hole, where stock's output holds an
@@ -675,16 +677,24 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    its result through `ArraySpeciesCreate`, so an input carrying another `slice` (an own `slice`, a subclass override,
    a replaced `Array.prototype.slice`), a subclass instance or a plain array under a replaced species, whose native
    `slice` constructs its result through that species constructor, takes that call on the function that was read,
-   the copy is forced from the fixed prefix so the output is assembled from what the call returned, and the result is
-   consumed as stock consumes it: `for...of`, the rest element run on each yielded value in turn (a Set, a generator,
-   any iterable), the elements a truncated prefix drops in stock's `handleTupleResults` validated and dropped too, and
-   a result with more elements than the input holds past the fixed slots handed to stock, whose `handleTupleResults`
-   throws a `TypeError` there (review of #88 and its second and third rounds; the slice of #86 returned the input by
-   reference there under a validator-shaped rest, which compares nothing against the live input, and indexed a
-   species-built result by `length` where stock iterates it). What a Proxy still sees differently in the copy is order
-   only: it reads `constructor` before `length` where `slice` reads them the other way round. A Proxy that
-   under-reports its `length` keeps the clean path, on every array-shaped skeleton (#95): no element past the reported
-   length is read, as under `slice`, and stock's fresh output is the truncated one.
+   the copy is forced so the output is assembled from what the call returned, its fixed prefix the results the fixed
+   slots produced, as stock assembles from `itemResults`, never the input after the `slice` read (a getter there, or
+   the call, may have written a fixed slot meanwhile; fourth review of #88), and the result is consumed as stock
+   consumes it: `for...of`, the rest element run on each yielded value in turn (a Set, a generator, any iterable), the
+   elements a truncated prefix drops in stock's `handleTupleResults` validated and dropped too, a result with more
+   elements than the input holds past the fixed slots handed to stock, whose `handleTupleResults` throws a `TypeError`
+   there, and a call that moved the length across a fixed slot handed to stock too, since `handleTupleResults` decides
+   each fixed slot's presence from the live length after the call where the skeleton decided it as the slot ran (a
+   shrink truncates at the first optional slot it uncovers, a growth keeps what an absent slot's run on `undefined`
+   gave, which a `dropsWhenAbsent` slot never ran here); stock's run then sees the input as the call left it, so a
+   mutation that is not idempotent gives it a different input (review of #88 and its second, third and fourth rounds;
+   the slice of #86 returned the input by reference there under a validator-shaped rest, which compares nothing
+   against the live input, and indexed a species-built result by `length` where stock iterates it). A Proxy sees the
+   copy make slice's reads in slice's order: `slice`, the length, the constructor, the species, then `in` and the read
+   per index. A length moved across a fixed slot after that slot ran, by a species getter, a custom `slice` or a
+   callback, is #96: the skeleton decided the slot's presence already where stock decides it after the rest ran. A
+   Proxy that under-reports its `length` keeps the clean path, on every array-shaped skeleton (#95): no element past
+   the reported length is read, as under `slice`, and stock's fresh output is the truncated one.
    `Array.prototype.slice` costs a near-constant 30 ns per call (its species lookup and generic entry, not
    the copy), the inlined loop about a third of that at a short rest; measured on #87, a clean parse of `[string,
    ...string[]]` with one rest element went from 75 ns under `slice` to 58 ns, with sixteen it is unchanged, against

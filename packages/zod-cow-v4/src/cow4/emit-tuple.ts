@@ -42,16 +42,19 @@ const NATIVE_APPLY = Reflect.apply;
  * one allocation on the clean path of a tuple with a rest element (a tuple without one allocates nothing).
  * The sync layout builds the slice by hand (#87): `Array.prototype.slice` costs a near-constant 30 ns per call
  * (its species lookup and generic entry, not the copy), where an inlined `new Array(n)` plus a copy loop costs
- * a third at a short rest. The loop reads the length once before any rest element runs and converts it as
- * `slice` does (`ToLength`), gives an empty copy when the input is shorter than the fixed slots, asks `in`
- * before each read, as `slice` runs `HasProperty` then `Get`, and writes a slot when `in` answered, as `slice`
- * writes it, so a hole stays a hole; the own-ness probe an `undefined` value raises for the CoW decision moved
+ * a third at a short rest. The loop reads the length once before any rest element runs, converts it as
+ * `slice` does (`ToLength`) and reads it before the constructor and the species, as slice reads it before
+ * `ArraySpeciesCreate` (fourth review of #88), gives an empty copy when the input is shorter than the fixed
+ * slots, asks `in` before each read, as `slice` runs `HasProperty` then `Get`, and writes a slot when `in`
+ * answered, as `slice` writes it, so a hole stays a hole; the own-ness probe an `undefined` value raises for the CoW decision moved
  * from the copy loop into the rest loop's hole test, where a rest element whose output differs never raises it
  * (third review of #88). It runs only when the input's `slice` (read once) is the native one, its constructor
  * is `Array` and `Array[Symbol.species]` is `Array`; any other input takes the call stock's runtime makes on
- * the function that was read, the copy is forced, and the result is consumed with `for...of`, the rest element
- * run per yielded value, so the output is assembled from what the call returned like stock's (review of #88
- * and its second and third rounds).
+ * the function that was read, the copy is forced with the fixed slots' results as its prefix, and the result is
+ * consumed with `for...of`, the rest element run per yielded value, so the output is assembled from what the call
+ * returned like stock's; a call that moved the length across a fixed slot is handed to stock, which decides a
+ * fixed slot's presence after the rest ran where the skeleton decided it as the slot ran (#96; review of #88 and
+ * its second, third and fourth rounds).
  *
  * Async layout (#71): when a slot or the rest product is async, stock's runtime starts every fixed
  * slot's parse with `input[i]` (an absent slot included) and every rest element's inside its loop,
@@ -102,6 +105,19 @@ export function emitCoWTuple(
   const out = ctx.var();
   const fillLen = ctx.var();
   ctx.write(`let ${out} = ${accessor};`);
+  /** Sync rest layout: the local holding fixed slot i's result, the value stock's `handleTupleResults` assembles from
+   *  (`itemResults`), so the custom-slice fallback can build the fixed prefix without reading the input after the call
+   *  (fourth review of #88); an absent validator slot's stays `undefined`, a truncated slot's is never read */
+  const slotOut: string[] = [];
+  if (rest && !anyAsync && N > 0) {
+    for (let i = 0; i < N; i++) slotOut.push(ctx.var());
+    ctx.write(`let ${slotOut.join(", ")};`);
+  }
+  /** The fixed slot's result written into its `slotOut` local, when the layout keeps one */
+  const keepSlot = (idxExpr: string, valueExpr: string): void => {
+    if (idxExpr !== "i" && slotOut.length > 0)
+      ctx.write(`${slotOut[Number(idxExpr)]} = ${valueExpr};`);
+  };
 
   /** Async layout: the local holding the single read of fixed slot i, the one holding whether it was a hole, and the one holding its settled result */
   const slotRead: string[] = [];
@@ -209,6 +225,7 @@ export function emitCoWTuple(
     const t = ctx.var();
     ctx.write(`const ${t} = ${res};`);
     ctx.write(`if (${t} === INVALID) return INVALID;`);
+    keepSlot(idxExpr, t);
     if (eVar === null) {
       // Absent slot: the official code writes out[i] unconditionally (materializing even when t === undefined, keeping output length/content identical)
       ctx.write(copyAt(idxExpr));
@@ -234,6 +251,7 @@ export function emitCoWTuple(
     ctx.write(`if ((${res}) === INVALID) return INVALID;`);
     if (eVar !== null) {
       // eVar is the local holding the value read from the slot: written once copied, a hole is materialized
+      keepSlot(idxExpr, eVar);
       ctx.write(`if (${out} !== ${accessor}) ${out}[${idxExpr}] = ${eVar};`);
       ctx.write(`else if (${isHole(eVar, idxExpr)}) {`);
       ctx.indented(() => emitHole(idxExpr));
@@ -329,6 +347,7 @@ export function emitCoWTuple(
             });
             ctx.write(`} else {`);
             ctx.indented(() => {
+              keepSlot(String(i), t);
               ctx.write(copyAt(String(i)));
               ctx.write(`${out}[${i}] = ${t};`);
               ctx.write(`${fillLen} = ${i + 1};`);
@@ -384,11 +403,13 @@ export function emitCoWTuple(
       // reads the species off that constructor, third review of #88): `slice` is read once, like stock's call reads it
       // (second review of #88); the length is read once and converted once, as slice's `LengthOfArrayLike` converts
       // it (`+`, then floored: a fraction, a negative, NaN or a string gives the count `ToLength` gives, a BigInt or a
-      // Symbol the `TypeError` `ToNumber` throws, third review of #88), so an accepted Proxy sees one `length` read
-      // here like under `slice`; a short input gives an empty copy; each index is asked `in` before it is read, as
-      // `slice` runs `HasProperty` then `Get`, and written when `in` answered, as slice writes it (a Proxy whose `has`
-      // denies an index gets a hole there, like under `slice`, second review of #88); nothing else is asked of the
-      // input here, the own-ness question an `undefined` value raises for the CoW decision is asked from the rest
+      // Symbol the `TypeError` `ToNumber` throws, third review of #88), and read before the constructor and the
+      // species, as slice reads its length before `ArraySpeciesCreate`, so a species getter that changes the length
+      // changes nothing the copy has not already fixed (fourth review of #88); an accepted Proxy sees one `length`
+      // read here like under `slice`; a short input gives an empty copy; each index is asked `in` before it is read,
+      // as `slice` runs `HasProperty` then `Get`, and written when `in` answered, as slice writes it (a Proxy whose
+      // `has` denies an index gets a hole there, like under `slice`, second review of #88); nothing else is asked of
+      // the input here, the own-ness question an `undefined` value raises for the CoW decision is asked from the rest
       // loop's hole test (`isHole` above, third review of #88). Any other input takes the call stock's runtime makes
       // and the output is assembled from what it returned (review of #88): an own `slice`, a subclass override or a
       // replaced `Array.prototype.slice` since that is the function stock calls, a subclass instance with the native
@@ -399,11 +420,11 @@ export function emitCoWTuple(
       const sliceFn = ctx.var();
       const len = ctx.var();
       ctx.write(`const ${sliceFn} = ${accessor}.slice;`);
+      ctx.write(`let ${len};`);
       ctx.write(
-        `if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)} && ${accessor}.constructor === Array && Array[Symbol.species] === Array) {`,
+        `if (${sliceFn} === ${ctx.addConst(NATIVE_SLICE)} && (${len} = +${accessor}.length, ${accessor}.constructor === Array && Array[Symbol.species] === Array)) {`,
       );
       ctx.indented(() => {
-        ctx.write(`const ${len} = +${accessor}.length;`);
         ctx.write(`const ${restReads} = new Array(${len} > ${N} ? Math.floor(${len}) - ${N} : 0);`);
         ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
         ctx.indented(() => {
@@ -414,12 +435,19 @@ export function emitCoWTuple(
       });
       ctx.write(`} else {`);
       ctx.indented(() => {
-        // out === input ⟹ fillLen === input.length (the invariant above), so [0, fillLen) is the whole fixed prefix;
-        // copied before the call, so a call that writes to the prefix is not observed, as stock assembles the prefix
-        // from the results it holds
+        // The fixed prefix is the results the fixed slots produced, truncated to what they filled, as stock assembles
+        // it from `itemResults`: never the input, which the `slice` read above (a getter) or the call below may have
+        // written to (fourth review of #88); a copy a fixed slot already made holds those results already
         ctx.write(
-          `if (${out} === ${accessor}) { ${out} = []; for (let j = 0; j < ${fillLen}; j++) ${out}[j] = ${accessor}[j]; }`,
+          `if (${out} === ${accessor}) { ${out} = [${slotOut.join(", ")}]; ${out}.length = ${fillLen}; }`,
         );
+        // Stock's `handleTupleResults` decides each fixed slot's presence from the live length after the call: a call
+        // that moves the length across a fixed slot changes that assembly (a shrink truncates at the first `drop` slot
+        // it uncovers, a growth keeps what an absent slot's run on `undefined` gave, which a `drop` slot never ran
+        // here), so such a parse is handed to stock, whose run sees the input as the call left it; a change that
+        // leaves every fixed slot's presence as it was is assembled here (fourth review of #88)
+        const before = ctx.var();
+        ctx.write(`const ${before} = ${accessor}.length;`);
         const k = ctx.var();
         ctx.write(`let ${k} = 0;`);
         ctx.write(
@@ -439,9 +467,14 @@ export function emitCoWTuple(
           ctx.write(`${k}++;`);
         });
         ctx.write(`}`);
+        const after = ctx.var();
+        ctx.write(`const ${after} = ${accessor}.length;`);
+        ctx.write(
+          `if ((${before} < ${N} ? ${before} : ${N}) !== (${after} < ${N} ? ${after} : ${N})) return INVALID;`,
+        );
         // More elements than the input holds past the fixed slots: stock's `handleTupleResults` walks `items` past
         // its end there and throws a TypeError, so such a parse goes to stock, whose throw is the result
-        ctx.write(`if (${k} !== 0 && ${N} + ${k} > ${accessor}.length) return INVALID;`);
+        ctx.write(`if (${k} !== 0 && ${N} + ${k} > ${after}) return INVALID;`);
       });
       ctx.write(`}`);
     }

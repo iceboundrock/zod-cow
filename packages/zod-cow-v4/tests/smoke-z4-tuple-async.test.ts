@@ -1768,22 +1768,210 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     }
     ok("the length read is coerced with ToLength, like slice");
   }
+  // The fast path reads the length before the constructor and the species, in the order `Array.prototype.slice`
+  // reads them (`LengthOfArrayLike`, then `ArraySpeciesCreate`), so a species getter with a side effect meets the
+  // same state as under stock: the length it changes was read already, and the copy then asks `in` and reads each
+  // index like slice's `HasProperty` then `Get` (fourth review of #88). The head read the species first, so a getter
+  // that grew the input made the copy longer than slice's
+  {
+    const S = z.tuple(
+      [z.string()],
+      z
+        .string()
+        .optional()
+        .transform((v) => (v === undefined ? "U" : `${v}!`)),
+    );
+    const C = compile(S);
+    const desc = Object.getOwnPropertyDescriptor(Array, Symbol.species)!;
+    const log: string[] = [];
+    let active: unknown[] | null = null;
+    const observed = (): unknown[] =>
+      new Proxy(["h", "a"] as unknown[], {
+        get(t, k, r) {
+          if (typeof k === "string" && k !== "0") log.push(`get:${k}`);
+          return Reflect.get(t, k, r);
+        },
+        has(t, k) {
+          log.push(`has:${String(k)}`);
+          return Reflect.has(t, k);
+        },
+      });
+    let stock: unknown;
+    let cow: unknown;
+    let stockOrder: string[] = [];
+    let cowOrder: string[] = [];
+    try {
+      Object.defineProperty(Array, Symbol.species, {
+        configurable: true,
+        get() {
+          log.push("species");
+          if (active) active.length = 3;
+          return Array;
+        },
+      });
+      active = ["h", "a"];
+      stock = S.parse(active);
+      active = ["h", "a"];
+      cow = C.parse(active);
+      active = null;
+      // The reads from `slice` on: stock's slice reads the length, the constructor and the species, then asks `in`
+      // and reads the one rest index; the hand copy makes the same reads in the same order
+      log.length = 0;
+      S.parse(observed());
+      stockOrder = log.slice(log.indexOf("get:slice"), log.indexOf("get:slice") + 6);
+      log.length = 0;
+      C.parse(observed());
+      cowOrder = log.slice(log.indexOf("get:slice"), log.indexOf("get:slice") + 6);
+    } finally {
+      Object.defineProperty(Array, Symbol.species, desc);
+    }
+    assert.deepEqual(
+      stock,
+      ["h", "a!"],
+      "stock's slice fixed its count before the getter grew the input",
+    );
+    assert.deepEqual(cow, stock, "the copy's count is fixed before the species read, like slice's");
+    assert.deepEqual(
+      stockOrder,
+      ["get:slice", "get:length", "get:constructor", "species", "has:1", "get:1"],
+      "stock's slice: length, constructor, species, then HasProperty and Get",
+    );
+    assert.deepEqual(cowOrder, stockOrder, "the hand copy reads in slice's order");
+    ok("a species getter with a side effect meets the length already read, like under slice");
+  }
+  // The fallback assembles the fixed prefix from the results the fixed slots produced, as stock's `handleTupleResults`
+  // assembles from `itemResults`, never from the input after the call: a `slice` getter runs between the fixed slots
+  // and the rest under stock too, and what it writes to a fixed slot is not in stock's output (fourth review of #88).
+  // The head copied the prefix from the input after reading `slice`, so the getter's write was
+  {
+    const S = z.tuple([z.string()], z.string());
+    const make = (rest: unknown[]) => {
+      const input: unknown[] = ["h", "a"];
+      Object.defineProperty(input, "slice", {
+        configurable: true,
+        get() {
+          input[0] = "M";
+          return () => rest;
+        },
+      });
+      return input;
+    };
+    for (const rest of [[], ["a"]]) {
+      const stock = S.parse(make(rest));
+      assert.deepEqual(
+        stock,
+        ["h", ...rest],
+        "stock's output holds the slot's result, not the getter's write",
+      );
+      const input = make(rest);
+      const cow = compile(S).parse(input);
+      assert.deepEqual(
+        cow,
+        stock,
+        `rest ${JSON.stringify(rest)}: the prefix is the fixed slots' results`,
+      );
+      assert.ok(cow !== input, "a custom slice forces the copy");
+      assert.equal(input[0], "M", "the getter ran once, on the input");
+    }
+    ok("a slice getter that writes a fixed slot is not in the output, like stock");
+  }
+  // Stock's `handleTupleResults` decides each fixed slot's presence from the live length after the slice ran, so a
+  // custom slice that changes the length past a fixed slot changes stock's assembly: a shrink truncates at the first
+  // optional slot the new length excludes, a growth keeps what an absent slot's run on `undefined` gave. The fixed
+  // slots decided presence before the call and a `drop` slot never ran, so the fallback compares the length after
+  // the call with the one before it and hands a parse whose fixed-slot presence changed to stock, whose run sees the
+  // input as the call left it; a change that leaves every fixed slot's presence as it was (a growth past the fixed
+  // slots) is assembled here (fourth review of #88). The head kept its earlier decisions: the review's case answered
+  // `["h", "x"]` where stock truncates to `["h"]`
+  {
+    const S = z.tuple([z.string(), z.string().optional()], z.string());
+    const C = compile(S);
+    let sliceCalls = 0;
+    const make = (values: unknown[], effect: (a: unknown[]) => unknown[]) => {
+      const input: unknown[] = values;
+      (input as { slice: unknown }).slice = function (this: unknown[]) {
+        sliceCalls++;
+        return effect(this);
+      };
+      return input;
+    };
+    // Shrunk past the optional slot: stock truncates at it, dropping the value it validated
+    {
+      const shrink = (a: unknown[]) => {
+        a.length = 1;
+        return [];
+      };
+      const stock = S.parse(make(["h", "x", "r"], shrink));
+      assert.deepEqual(stock, ["h"], "stock re-decides presence after the slice");
+      sliceCalls = 0;
+      assert.deepEqual(
+        C.parse(make(["h", "x", "r"], shrink)),
+        stock,
+        "handed to stock, which truncates",
+      );
+      assert.equal(sliceCalls, 2, "the fallback ran the slice once and stock's run once more");
+    }
+    // Grown past the optional slot: stock keeps the `undefined` its run on the absent slot gave
+    {
+      const grow = (a: unknown[]) => {
+        a.length = 4;
+        return [];
+      };
+      const stock = S.parse(make(["h"], grow));
+      assert.deepEqual(
+        stock,
+        ["h", undefined],
+        "stock materializes the absent slot the growth made present",
+      );
+      sliceCalls = 0;
+      const cow = C.parse(make(["h"], grow));
+      assert.deepEqual(cow, stock, "handed to stock, which materializes it");
+      assert.equal(sliceCalls, 2, "the fallback ran the slice once and stock's run once more");
+    }
+    // Grown past the rest only: every fixed slot's presence stands, so the fallback assembles the output itself
+    {
+      const append = (a: unknown[]) => {
+        a.push("z");
+        return ["r"];
+      };
+      const T = z.tuple(
+        [z.string()],
+        z.string().transform((v) => `${v}!`),
+      );
+      const stock = T.parse(make(["h", "r"], append));
+      assert.deepEqual(stock, ["h", "r!"]);
+      sliceCalls = 0;
+      const input = make(["h", "r"], append);
+      const cow = compile(T).parse(input);
+      assert.deepEqual(cow, stock, "the fixed slots' presence is unchanged: assembled here");
+      assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
+      assert.ok(cow !== input);
+    }
+    ok("a custom slice that changes a fixed slot's presence is handed to stock");
+  }
   // Code pin: a rest tuple's sync skeleton reads `slice` once and copies the rest by hand (#87: `slice` pays a fixed
-  // builtin cost) behind a guard on the native `slice`, on `constructor === Array` and on the default species; the
-  // length is converted once and floored (`ToLength`), the copy loop is `in` then a store and nothing else, and the
-  // own-ness probe sits in the rest loop's hole test; the guard's other side calls what was read (through the hoisted
-  // `Reflect.apply`, never a second `.slice`) and iterates the result with `for...of`. A fixed tuple allocates nothing
-  // on its clean path
+  // builtin cost) behind a guard on the native `slice`, on `constructor === Array` and on the default species, with
+  // the length read and converted once, floored (`ToLength`), between the `slice` test and the constructor read, in
+  // slice's order; the copy loop is `in` then a store and nothing else, and the own-ness probe sits in the rest
+  // loop's hole test; the guard's other side builds the prefix from the fixed slots' results, calls what was read
+  // (through the hoisted `Reflect.apply`, never a second `.slice`), iterates the result with `for...of` and compares
+  // the length after the call with the one before it. A fixed tuple allocates nothing on its clean path
   const restCode = compile(z.tuple([z.string()], z.string())).code ?? "";
   assert.ok(
-    /const (x\d+) = input\.slice;\s*if \(\1 === c\d+ && input\.constructor === Array && Array\[Symbol\.species\] === Array\)/.test(
+    /const (x\d+) = input\.slice;\s*let (x\d+);\s*if \(\1 === c\d+ && \(\2 = \+input\.length, input\.constructor === Array && Array\[Symbol\.species\] === Array\)\)/.test(
       restCode,
     ) &&
-      /const (x\d+) = \+input\.length;\s*const (x\d+) = new Array\(\1 > 1 \? Math\.floor\(\1\) - 1 : 0\);\s*for \(let j = 0; j < \2\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \2\[j\] = input\[1 \+ j\];\s*\}/.test(
+      /const (x\d+) = new Array\((x\d+) > 1 \? Math\.floor\(\2\) - 1 : 0\);\s*for \(let j = 0; j < \1\.length; j\+\+\) \{\s*if \(\(1 \+ j\) in input\) \1\[j\] = input\[1 \+ j\];\s*\}/.test(
         restCode,
       ) &&
       /!Object\.hasOwn\(x\d+, i - 1\) \|\| !Object\.hasOwn\(input, i\)/.test(restCode) &&
+      /if \(x\d+ === input\) \{ x\d+ = \[x\d+\]; x\d+\.length = x\d+; \}\s*const (x\d+) = input\.length;/.test(
+        restCode,
+      ) &&
       /for \(const \w+ of c\d+\(x\d+, input, \[1\]\)\)/.test(restCode) &&
+      /const (x\d+) = input\.length;\s*if \(\(x\d+ < 1 \? x\d+ : 1\) !== \(\1 < 1 \? \1 : 1\)\) return INVALID;/.test(
+        restCode,
+      ) &&
       !/\.slice\(/.test(restCode),
     "the sync rest layout copies by hand behind the three-part guard",
   );

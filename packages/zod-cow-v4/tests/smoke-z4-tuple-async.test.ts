@@ -4067,7 +4067,7 @@ head(
   // without asking whether it holds an async check. The sync island then met the Promise at parse time; since
   // #76 the async entries catch that throw and rerun the parse in stock's async runtime, so the answer was right
   // but `.async` reported false, the predicate ran twice and the CoW reference was lost. The fallback now asks
-  // `subtreeHasAsync`, the same answer the `lazy` case already takes.
+  // `inspectSubtree`, the same answer the `lazy` case already takes.
   const sym = Symbol("k");
   // [name, schema builder, clean value, a value the leaf does not accept]: one row per reason stock's compileFn
   // refuses a subtree before its checks are reached. A symbol literal has no failing fixture: stock's own error
@@ -4263,6 +4263,34 @@ head(
   assert.ok(lR.success && lStock.success);
   assert.deepEqual(lR.data, lStock.data);
   ok("a shape getter that resolves by parse time answers like stock through the #76 fallback");
+
+  // The same getter inside a subtree stock's compiler accepts (review of #100). `compileFn` reads the shape in its
+  // cycle check before any codegen and counts a read that throws as a reference cycle, so the subtree, refused or
+  // not, fails stock's compile before its codegen and takes the sync island; `compile()` does not throw and the
+  // getter's error surfaces at parse time where stock's does.
+  const Y = z.object(throwingShape).transform((v) => v);
+  for (const [posName, wrap, place] of positions) {
+    const name = `throwing shape getter in a compilable official subtree at ${posName}`;
+    const S = wrap(Y);
+    const input = place({ a: "x" });
+    const C = compile(S);
+    assert.ok(!C.stock && !C.async, `${name}: compiled to a sync product`);
+    assert.throws(() => S.safeParse(input as never), isShapeError);
+    assert.throws(
+      () => C.safeParse(input),
+      isShapeError,
+      `${name}: the sync API throws stock's error`,
+    );
+    await assert.rejects(S.safeParseAsync(input), isShapeError);
+    await assert.rejects(
+      C.safeParseAsync(input),
+      isShapeError,
+      `${name}: the async API rejects with stock's error`,
+    );
+  }
+  ok(
+    "a shape getter that throws inside a subtree stock's compiler accepts is contained the same way (review of #100)",
+  );
 }
 
 head(

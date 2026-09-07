@@ -160,8 +160,11 @@ function walkSubtree(schema: Node, seen: Set<Node>): boolean {
  *   the getter through the memo a throwing getter poisons for every later parse (#83, see `inspectSubtree`); this
  *   walk stops at the lazy and never makes that read.
  *
- * The walk reads every object shape below the subtree; a getter that throws is contained like in `inspectSubtree`
- * (the subtree goes on to `compileFn`, which meets the same getter, fails before its codegen and takes an island).
+ * The walk reads every object shape below the subtree; a getter that throws is contained like in `inspectSubtree`.
+ * The subtree then goes on to `compileFn`, whose cycle check reads the same shape before any codegen and counts a
+ * read that throws as a reference cycle (zod 4.5.4 `compile.js`: "can't tell" is recursive), so `compileFn` throws
+ * `ZodCompileUnsupportedError` for a compilable subtree too and `officialFn` takes an island, whose run meets the
+ * getter's own error at parse time where stock's parser does (review of #82, review of #100).
  */
 function subtreeFollowsRuntime(schema: Node): boolean {
   try {

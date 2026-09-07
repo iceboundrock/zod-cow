@@ -41,7 +41,7 @@ pnpm run probe:v3    # probe stock zod3 edge semantics (zod3 line)
 pnpm run demo        # 60-second demo of the CoW promises against the published zod-cow-v4 API
 ```
 
-Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200 × 100). `REPRO=seed:case` re-runs one failing zod4 differential case and dumps the schema, input and generated code (`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`). `BENCH_N` sets the benchmark record count (an integer of at least 10). The dirty and invalid shares of S2, S3 and S9 mark every round(1 / share)-th row, so a share is exact only when `BENCH_N` is a multiple of that period (100 for the 1% row); each scenario prints the realized count.
+Environment knobs: `SEEDS` / `CASES` set the differential fuzz size (default 200 × 100). `REPRO=seed:case` re-runs one failing zod4 differential case and dumps the schema, input and generated code (`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`). `BENCH_N` sets the benchmark record count (an integer of at least 10) and `BENCH_ITERS` the operations per timed round of the single-record hot loops (default `BENCH_N`; the Benchmarks workflow sets 1 000 000). The dirty and invalid shares of S2, S3 and S9 mark every round(1 / share)-th row, so a share is exact only when `BENCH_N` is a multiple of that period (100 for the 1% row); each scenario prints the realized count.
 
 > The benchmark tables in this README and in `docs/` come from the
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml),

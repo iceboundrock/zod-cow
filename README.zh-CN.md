@@ -43,7 +43,7 @@ pnpm run probe:v3    # 实测 stock zod3 的边界语义（zod3 线）
 pnpm run demo        # 60 秒 demo：以发布的 zod-cow-v4 API 展示 CoW 的承诺
 ```
 
-环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数（不小于 10 的整数）。S2、S3、S9 的脏行 / 无效行比例按每 round(1 / 比例) 行标记一行，所以只有 `BENCH_N` 是该周期的倍数时比例才精确（1% 行需要 100 的倍数）；每个场景都会打印实际标记的行数。
+环境变量：`SEEDS` / `CASES` 设定差分模糊规模（默认 200 × 100）；`REPRO=seed:case` 重跑某一个失败的 zod4 差分 case 并 dump schema、输入和生成代码（`REPRO=112:80 pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`）；`BENCH_N` 设定基准记录数（不小于 10 的整数），`BENCH_ITERS` 设定单记录热循环每轮计时的操作数（默认等于 `BENCH_N`；Benchmarks workflow 设为 1 000 000）。S2、S3、S9 的脏行 / 无效行比例按每 round(1 / 比例) 行标记一行，所以只有 `BENCH_N` 是该周期的倍数时比例才精确（1% 行需要 100 的倍数）；每个场景都会打印实际标记的行数。
 
 > 本 README 和 `docs/` 中的基准表来自
 > [Benchmarks workflow](https://github.com/iceboundrock/zod-cow/actions/workflows/bench.yml)

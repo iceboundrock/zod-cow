@@ -3,6 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { z } from "zod";
+import { MAX_INLINE_KEY_COMPARISONS } from "../src/cow4/codectx.js";
 import { compile } from "../src/index.js";
 
 /* ── record: bare-string keys ── */
@@ -153,15 +154,27 @@ import { compile } from "../src/index.js";
   assert.deepEqual(compile(T).parse(withGetter), { "1": "x", "2": "y" });
   assert.equal(reads, 1);
 
-  // Above MAX_INLINE_KEY_COMPARISONS declared keys the probe is the hoisted Set, below it the comparison chain
-  const many = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`K${i}`, i + 1]));
+  // Above MAX_INLINE_KEY_COMPARISONS declared keys the probe is the hoisted Set, at and below it the comparison chain
+  const above = MAX_INLINE_KEY_COMPARISONS + 1;
+  const many = Object.fromEntries(Array.from({ length: above }, (_, i) => [`K${i}`, i + 1]));
   const M = compile(z.record(z.enum(many), z.number()));
-  const manyIn = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [String(i + 1), i]));
+  const manyIn = Object.fromEntries(Array.from({ length: above }, (_, i) => [String(i + 1), i]));
   assert.equal(M.parse(manyIn), manyIn);
-  assert.equal(M.safeParse({ ...manyIn, "18": 0 }).success, false);
+  assert.equal(M.safeParse({ ...manyIn, [String(above + 1)]: 0 }).success, false);
   assert.ok(M.code!.includes(".has(k)"));
+  const atCap = Object.fromEntries(
+    Array.from({ length: MAX_INLINE_KEY_COMPARISONS }, (_, i) => [`K${i}`, i + 1]),
+  );
+  const A = compile(z.record(z.enum(atCap), z.number()));
+  const atCapIn = Object.fromEntries(
+    Array.from({ length: MAX_INLINE_KEY_COMPARISONS }, (_, i) => [String(i + 1), i]),
+  );
+  assert.equal(A.parse(atCapIn), atCapIn);
+  assert.ok(!A.code!.includes(".has(k)"));
   assert.ok(!C.code!.includes(".has(k)"));
-  console.log("  17 declared keys probe through the Set, 2 through the comparison chain ✓");
+  console.log(
+    `  ${above} declared keys probe through the Set, ${MAX_INLINE_KEY_COMPARISONS} and 2 through the comparison chain ✓`,
+  );
 }
 
 /* ── record: string-format keys (general path, key names unchanged) ── */

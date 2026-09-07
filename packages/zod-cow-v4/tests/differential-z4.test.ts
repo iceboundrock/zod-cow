@@ -16,6 +16,7 @@
  */
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
+import { MAX_INLINE_KEY_COMPARISONS } from "../src/cow4/codectx.js";
 import { compile, type CompileOptions } from "../src/index.js";
 
 interface RNG {
@@ -482,9 +483,10 @@ function maybeExtraSymbol(out: object, r: RNG): void {
 }
 
 function bObject(rng: RNG, depth: number): Built {
-  // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to 17
-  // to 20 string keys so it crosses the object skeleton's inline-comparison cap and takes the Set
-  // fallback; 1 in 10 shapes declares a symbol key so the declared-symbol probe runs, and 1 in 40
+  // 1 to 3 random fields, as before. 1 in 20 shapes is padded with always-valid string keys to one
+  // to four keys above the object skeleton's inline-comparison cap (`MAX_INLINE_KEY_COMPARISONS`,
+  // 17 to 20 keys at the cap of #33, 33 to 36 since #34) so it takes the Set fallback; 1 in 10
+  // shapes declares a symbol key so the declared-symbol probe runs, and 1 in 40
   // of those keeps no string key at all (a symbol-only shape, whose strip probe treats every
   // string key as undeclared, #35).
   const symbolOnly = rng.chance(0.025);
@@ -495,7 +497,7 @@ function bObject(rng: RNG, depth: number): Built {
   }
   const large = rng.chance(0.05);
   if (large) {
-    const padding = 17 - nFields + rng.int(4);
+    const padding = MAX_INLINE_KEY_COMPARISONS + 1 - nFields + rng.int(4);
     for (let i = 0; i < padding; i++) {
       fields.push({
         key: `p${i}`,
@@ -588,7 +590,8 @@ function bArray(rng: RNG, depth: number): Built {
 
 /**
  * Declaration-driven records (#37): string or numeric enum keys, strict or loose, 2 to 3 declared
- * keys or 18 (above the inline key-comparison cap, so the probe is the hoisted Set). Inputs drop a
+ * keys or two above the inline key-comparison cap (`MAX_INLINE_KEY_COMPARISONS`, so the probe is
+ * the hoisted Set). Inputs drop a
  * declared key now and then (stock materializes it, or rejects it when the value is required) and
  * sometimes carry an undeclared key, which strict rejects and loose keeps. One in five declares the
  * shared symbol next to the string or numeric keys, as a symbol value of the enum's entries form
@@ -603,7 +606,7 @@ function bEnumRecord(rng: RNG, inner: Built): Built {
   const numeric = rng.chance(0.5);
   const symbolOnly = rng.chance(0.025);
   const withSymbol = symbolOnly || rng.chance(0.2);
-  const n = symbolOnly ? 0 : rng.chance(0.15) ? 18 : 2 + rng.int(2);
+  const n = symbolOnly ? 0 : rng.chance(0.15) ? MAX_INLINE_KEY_COMPARISONS + 2 : 2 + rng.int(2);
   const values: (string | number | symbol)[] = Array.from({ length: n }, (_, i) =>
     numeric ? i + 1 : `k${i}`,
   );

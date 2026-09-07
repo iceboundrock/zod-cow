@@ -67,12 +67,22 @@ export function escKey(k: string): string {
  * Containers with at most this many declared string keys probe undeclared keys with a generated
  * `k !== "a" && k !== "b" …` chain; larger ones fall back to `Set.has(k)`. `for...in` hands V8
  * internalized strings, so each comparison is a pointer compare, while `Set.has` hashes and
- * probes per key. Measured on Node 24 the chain is still 4 to 5x faster than the Set at 16 to 32
- * keys and only reaches parity around 128 keys, so this cap is conservative; it bounds the
- * generated code size rather than marking the break-even point. Raising it is a benchmark-backed
- * decision, not a correctness one (#34).
+ * probes per key. The chain is quadratic in the key count (a declared key at position i costs
+ * i + 1 comparisons), the Set linear, so the two cross.
+ *
+ * Measured through the real skeleton (#34; the S11 rows of `bench-v4`, single-record hot loops of
+ * flat objects of string keys built with `JSON.parse`, the whole parse timed): against the Set at
+ * the same width the chain is 20 to 30% faster at 17 to 32 keys, level at 48 and 5 to 10% slower
+ * at 64 on Node 24 locally (strip clean 219 → 177 ns at 17 keys, 354 → 275 ns at 32, 446 → 443 ns
+ * at 48, 621 → 663 ns at 64; the strict and extra-key rows move the same way, the dirty row, which
+ * runs no probe, not at all). The Benchmarks workflow runs on Node 22 / 24 / 26 read the same
+ * direction (run ids in the CHANGELOG entry). 32 is the largest width with a clear win; the code
+ * size is not a concern at that width (a 32-key strip skeleton is about 500 characters longer with
+ * the chain). The review microbenchmark of #33, which timed the probe alone over an object of that
+ * width, put the crossover near 128 keys; timing the whole parse moves it to about 48, since the
+ * rest of the skeleton is linear in the key count and the chain's quadratic term shows earlier.
  */
-export const MAX_INLINE_KEY_COMPARISONS = 16;
+export const MAX_INLINE_KEY_COMPARISONS = 32;
 
 /**
  * Expression over a `for...in` loop variable `k` that is true when `k` is none of `stringKeys`.

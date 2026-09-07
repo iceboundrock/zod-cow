@@ -657,8 +657,78 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    slots ran and before any rest element runs: its rest loop walks the slice, decides a rest hole on it and rebuilds
    the rest part of the prefix from it, so a sync rest callback that overwrites a later rest slot is not observed by
    either layout, as stock does not observe it. The slice is the one allocation on the clean path of a tuple with a
-   rest element (a tuple without one still allocates nothing); measured on the issue, it costs about 25 to 35 ns per
-   parse against a stock parse of 160 to 250 ns for the same input.
+   rest element (a tuple without one still allocates nothing). The sync layout builds it by hand and follows stock's runtime timeline for everything around it (#87, #88). Stock's
+   `$ZodTuple` runtime runs every fixed item and keeps each result (`itemResults`), reads `input.slice` once and calls
+   it once, iterates what came back with `for...of` running the rest element per yield, and only then decides each
+   fixed slot's presence from the live `input.length` (`handleTupleResults`), assembling from the results it holds;
+   the native `slice` itself reads the length (once, `ToLength`), then the constructor, then the species off an
+   `Array` constructor (`ArraySpeciesCreate`), then asks `HasProperty` and `Get` per index and builds its result
+   through the species. The sync rest layout holds every fixed slot's result in a local (a slot an earlier
+   truncation gates out of the assembly is still run at its stock position, on `undefined`, and held; an absent slot
+   whose run on `undefined` failed holds INVALID) and rebuilds every fresh output from those locals, never from a
+   second read of the input (the async layout's rule, #77; the sync layout without a rest keeps the second read of
+   #36). It reads `slice` once. The native one it runs by hand with the same reads in the same order: the length
+   once, converted as `ToLength` converts it (a fraction floored, `NaN`, a negative or a non-numeric string an empty
+   copy, a BigInt or a Symbol the `TypeError` `ToNumber` throws, an infinite length the `RangeError` the allocation
+   throws), then the constructor, then, when the constructor is `Array`, the species (the built-in getter, or one
+   installed on `Array`: the one read that can run user code, made where the builtin makes it, once), then `in` and
+   the read per index and nothing else (`HasProperty` then `Get`, so a Proxy whose `has` trap denies an index gets a
+   hole there under both, and a slot written when `in` answered, so a hole stays a hole; the own-ness question an
+   `undefined` value raises for the CoW decision is asked from the rest loop's hole test, on the copy and then on the
+   input, only when the rest element's output equals that `undefined`: the hole test every array position makes,
+   #95). When the constructor is `Array` and the species is `Array`, the builtin's remaining steps (`ArrayCreate`, the
+   stores into it, its length) run no user code, so the copy stands in for them. Stock then iterates its result with
+   `for...of`, which reads `Symbol.iterator` off it, calls what it got, reads `next` off the iterator and calls it
+   per step; the skeleton makes the two reads on the copy with the same receivers (the copy is a plain array holding
+   what the native slice would hold, which is all an accessor on either prototype can tell about its receiver) and,
+   when both answered the native array iterator and its `next`, runs the inline index loop, since that iteration is
+   the copy's elements in order and runs no user code (the loop closes the iterator through its `return`, read off
+   it, when the rest element throws, as `for...of` does); any other answer continues through a real `for...of` from
+   the values already read (`restFromMethod`, `restFromIterator` in `emit-tuple-rest.ts`), so the call of the
+   method on the copy, the object check on its result, the read and call of `next` per step, the reads of `done`
+   and `value`, the close through `return` and every `TypeError` are the engine's own. The sixth review of #88
+   found the earlier guard reading the two properties off their prototypes, which invoked an accessor with the
+   prototype as receiver where stock's iteration hands it the array or the iterator, so a receiver-sensitive
+   accessor could pass the guard and iterate differently under stock; a descriptor check that invokes nothing
+   (`Object.getOwnPropertyDescriptor` twice) costs 60 to 80 ns per parse, more than the parse, and a `for...of` over
+   the copy that verifies each yield against it costs about a nanosecond per element, where the two reads with
+   stock's receivers cost nothing measurable. Any other constructor (a subclass instance, an own or
+   inherited `constructor`, another realm's `Array`) or any other species hands the builtin the reads already made
+   and lets it finish: `Array.prototype.slice` is called on a facade that answers `length` and `constructor` from what
+   was read (the species that was read, when the constructor was `Array`, carried on a plain object the builtin reads
+   back without running the getter again) and forwards `HasProperty` and `Get` to the input, so the realm check, the
+   species construction, the per-index reads, the writes into the constructed result and the errors are the builtin's
+   own, made once. Any other `slice` (an own one, a subclass override, a replaced `Array.prototype.slice`) is called as
+   stock calls it, on the function that was read. Both results are consumed with `for...of` like stock's (a Set, a
+   generator, any iterable; a non-iterable throws the engine's `TypeError` on an iterable named `rest`, as stock's
+   does), the rest element run per yield and its results collected. After the rest ran, the live length is read once
+   more: when it equals every read the fixed slots and the copy decided with (the copy's read as the number it was
+   converted to) the inline assembly stands, being that algorithm for a length that holds; otherwise, and after every
+   continuation, stock's `handleTupleResults` runs over the held results: a slot the length excludes truncates the
+   output at the first optional-in slot at or past `optoutStart` (or an excluded slot whose run failed), a covered
+   slot's failure is reported (INVALID, stock's rerun), every result it passes is written, the rest results follow,
+   and the trailing loop drops trailing `undefined` results of optional-out slots the length excludes and, past
+   `items`, makes the read stock makes (`items[i]._zod`), so the engine's own `TypeError` with stock's message is
+   thrown from `parse` and `safeParse` alike. So a `slice` getter, a custom `slice`, a species getter or constructor,
+   an iterator, a rest callback or a Proxy trap that moves the length or rewrites a slot after that slot's result was
+   held gives stock's value, throw and hook calls (the timeline group of the tuple smoke runs one mutation per source
+   and target on both sides; the earlier heads of #88 handed such a parse back to stock, whose rerun met the input as
+   the hooks had left it and ran them again). What remains is the CoW contract itself: the clean path returns the
+   input, so a slot rewritten after its read is visible in that output only (§5.3); a length that converts to `NaN`
+   is never equal to itself and takes the presence decision, stock's fresh output, where the other under-reported
+   Proxy lengths keep the clean path (#95); a Proxy sees the skeleton read `length` a different number of times than
+   stock's runtime does (the guard, each gated slot, the copy and the presence decision, against stock's slice and
+   its two loops); a present slot whose product fails returns to stock at once where stock keeps going and may drop
+   the failure with a truncation the rest moved, and that early exit from a continuation's `for...of` closes a
+   custom iterator through its `return`, which stock's loop, never exiting early, does not call; a `slice` that is
+   not callable throws a `TypeError` on both sides with the engine's message for each call site. `Array.prototype.slice` costs a near-constant 30 ns per call (its
+   species lookup and generic entry, not the copy), the inlined loop about a third of that at a short rest; measured
+   on #88 (the #78 microbenchmark), a clean parse of `[string, ...string[]]` with one rest element went from about
+   79 ns under `slice` to 62 ns, with four from 84 to 69 ns, with sixteen from 117 to 108 ns, an object rest of four
+   from 306 to 285 ns, against a stock parse of 170 to 250 ns; the presence decision and the two iterator reads
+   cost the fast path nothing measurable over the bare copy (within 1 to 3 ns, the control row's spread; the reads
+   measured against the earlier data-property comparison on the same rows, interleaved, sixth review of #88). A rest hole over an inherited `undefined` comes out as an own slot like stock's,
+   where `slice` read the inherited value through `HasProperty` and made it own.
 3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
    and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
@@ -896,7 +966,8 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `subtreeHasAsync`, `subtreeHasPlainTransform` |
 | `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
 | `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
-| `emit-tuple.ts` | §5.4 | `emitCoWTuple` |
+| `emit-tuple.ts` | §5.4 | `emitCoWTuple`: the fixed-slot segments and the async layout |
+| `emit-tuple-rest.ts` | §5.4 | `emitSyncRest`: the sync rest layout's rest segment and presence decision (#87, #88), `nativeSliceFrom`, `restFromMethod`, `restFromIterator`; imported by `emit-tuple.ts` only, outside the cycle below |
 | `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
 | `emit-union.ts` | §4 trap four | `emitCoWUnion` (#58) |
 

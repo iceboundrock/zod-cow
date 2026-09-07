@@ -47,9 +47,10 @@
  *
  * What remains: the output is the input by reference when nothing forced a copy, so user code that rewrites a slot
  * whose result is already held is visible in that output only (the CoW premise, §5.3 of the deep dive); the number
- * of `length` reads on a Proxy differs from stock's, and a length that converts to `NaN` is never equal to itself,
- * so it takes the presence decision and stock's fresh output where the other under-reported lengths keep the clean
- * path (#95); a present slot whose product fails returns to stock at once where stock keeps going and may drop the
+ * of `length` reads on a Proxy differs from stock's, and a Proxy under-reporting its length keeps the clean path,
+ * the input with the elements stock never saw (the known limitation of #95), except that a length converting to
+ * `NaN` is never equal to itself, so it takes the presence decision and stock's fresh output; a present slot whose
+ * product fails returns to stock at once where stock keeps going and may drop the
  * failure with a truncation the rest moved, and that early exit from a continuation's `for...of` closes a custom
  * iterator through its `return`, which stock's loop, never exiting early, does not call (the inline loop closes on a
  * throw only, as stock's does, the `$ZodAsyncError` of a plain-`Promise` rest result included, which stock's loop
@@ -229,8 +230,8 @@ export function emitSyncRest(layout: SyncRestLayout): void {
     ctx.indented(() => {
       // `ArrayCreate` and the builtin's stores run no user code: the copy stands in for them. `in` then the read per
       // index is slice's `HasProperty` then `Get` (a Proxy whose `has` denies an index gets a hole there), a slot
-      // written when `in` answered so a hole stays a hole; the own-ness question an `undefined` raises for the CoW
-      // decision is asked from the rest loop's hole test (`isHole`, #95)
+      // written when `in` answered so a hole stays a hole; an `undefined` the copy holds, own or not, is judged
+      // dirty by the rest loop without an own-ness probe (`isHole`, #95)
       ctx.write(`${restReads} = new Array(${len} > ${N} ? Math.floor(${len}) - ${N} : 0);`);
       ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
       ctx.indented(() => {

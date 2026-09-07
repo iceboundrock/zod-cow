@@ -210,7 +210,7 @@ return out;
 | `const v5 = new Array(len)` | （元素循环内）`out = new Array(len)` 加干净前缀 | 数组同理，首脏才重建前缀，之后每个元素只写一次（#70） |
 | `if (!c1.test(v2)) return INVALID` | 同左（assertOnly 产物内部） | 叶子校验 100% 官方 |
 | （输出组装隐式处理键存在性） | `{ ...input }` | 扩展天然保真 presence/键序 |
-| `for (const k in …)` unknown 探测 | 同左逐行照抄 | strict/strip/loose 语义对齐 |
+| `for (const k in …)` unknown 探测 | 对不超过 `MAX_INLINE_KEY_COMPARISONS`（自 #34 起为 32，此前为 16）个键的 shape 生成逐键字符串比较，超过则回退到 `Set`；只有在没有找到未声明字符串键时才接着运行自有 symbol 探测（strict 与 loose 对象只运行自有 symbol 探测，#42） | 继承可枚举键的语义与官方相同，小对象的成员判断更快且单态；两个探测都只在没有键为脏时运行，因为脏对象本来就要从声明键重建。`Set` 只在有东西引用它时才被提升（大 shape、声明的 symbol 键、loose 的追加循环），上限取在比较链不再占优的地方：经真实骨架实测（`bench-v4` 的 S11 行，#34），17 到 32 键时比较链比 `Set` 快 20% 到 30%，48 键持平，64 键起更慢，因为比较链的开销随键数平方增长而 `Set` 是线性的（数字见常量的注释）。只声明 symbol 键的 strip shape 把每个字符串键都视为未声明（#35） |
 
 干净路径的自有 symbol 探测：stock 在所有模式下都会丢弃自有 symbol 键（strict 的未知键循环只看字符串键，所以也不会拒绝 symbol），
 因此按原引用放行之前必须证明没有这样的键，而 `Object.getOwnPropertySymbols` 是唯一不必列出全部键的问法（`Reflect.ownKeys` 会分配全部键）。
@@ -494,7 +494,11 @@ promise 落定后写入，所以输出按落定顺序排列，更早的异步键
 （缺失键 + optional 值 → 写 undefined）+ 未知键 strict 拒绝。骨架：
 
 - 缺失声明键即脏（`!(k in input)` → stock 会物化该键）；
-- 未知键 strict 拒绝照抄（`for...in → INVALID`）；
+- 未知键探测是官方 `for...in` 模板对声明键的照抄，*按 `for...in` 产出它们的形式*：数字 enum 值被字符串化
+  （`z.enum({ A: 1 })` 声明的键是 `"1"`；与原始的 `1` 比较曾拒绝每一个枚举出的键，把每次解析都送去 stock，#37），
+  symbol 键从不参与。探测表达式与对象骨架共用（`codectx.ts` 里的 `unknownStringKeyExpr`）：声明的字符串键不超过
+  `MAX_INLINE_KEY_COMPARISONS`（自 #34 起为 32）个时是 `k !== "a" && k !== "b" …` 比较链，超过则用提升的 `Set`（#33）。
+  strict 在每条路径上都运行它（`→ INVALID`）；loose（`z.looseRecord`）保留未知键，所以它的探测只在拷贝路径上运行；
 - 未声明的自有 symbol 键：`for...in` 永远不会产出它，strict 与 loose 都看不到，而 stock 的重建在每条路径上都会丢弃它，
   正是对象骨架的 #42 情形。没有键为脏时骨架运行与对象骨架相同的 `Object.getOwnPropertySymbols` 探测（`emitOwnSymbolProbe`，#51），
   发现未声明的 symbol 即判脏；拷贝路径按构造就不会带上它。`ownSymbolKeys: "ignore"` 在这里同样跳过探测。

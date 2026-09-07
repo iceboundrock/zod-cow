@@ -3360,7 +3360,8 @@ head(
   // hand the parse to stock `safeParseAsync`, whose output and issues are stock's. The sync entries throw stock's
   // class, `validate` included: the official assertOnly product answers INVALID for a Promise from a transform, so a
   // tree holding a plain transform consults stock's sync parse before answering null, and the throw surfaces (#79).
-  // A transform inside a `lazy` is the residual: `validate` throws a `TypeError` there (#90), not pinned here.
+  // A transform inside a `lazy` used to be the residual (`validate` threw a `TypeError` there, #90); the lazy
+  // group below pins it at every position since an official subtree holding a `lazy` takes an island.
   type Case = {
     name: string;
     make: (ok: boolean) => z.ZodType;
@@ -3893,6 +3894,167 @@ head(
     ok(
       "inside an official product the callback's $ZodAsyncError still takes the fallback (pinned, #80)",
     );
+  }
+}
+
+head(
+  "an official subtree holding a lazy runs in this layer's islands: a Promise a plain function returns inside the lazy reaches every entry as stock's class (#81, #90, #91)",
+);
+{
+  // Stock's compiled product for a `lazy` is `generateLazyCheck`, a runtime island of stock's own generated code: it
+  // runs the getter's `_zod.run` under an empty context and reads `.issues` off whatever came back, without the
+  // thenable check stock's `runtimeRun` has. A plain function that returns a `Promise` inside the lazy (a transform,
+  // #90 / #91; a refine, #81), which no static detector sees, makes that result a thenable and the read a `TypeError`.
+  // A bare `lazy` has gone through this layer's islands since the sixth review of #76; a `lazy` under a wrapper, in a
+  // union of leaves, in a pipe, or under an object key through one of those was part of a larger official subtree
+  // stock compiled, so the sync entries let the `TypeError` out and the async entries had nothing to catch, and the
+  // whole-tree validator behind `validate` was that product for every position. Now any official subtree holding a
+  // `lazy` takes an island (`subtreeFollowsRuntime`), whose `throwAsync` throws `$ZodAsyncError` on the thenable,
+  // the Promise signal the async entries hand to stock's async runtime, and `validate` runs the skeleton, whose
+  // lazy is the same island, instead of the whole-tree validator.
+  const transformLazy = () => z.lazy(() => z.string().transform((v) => Promise.resolve(v)));
+  const refineLazy = () => z.lazy(() => z.string().refine(() => Promise.resolve(true)));
+  type Pos = {
+    name: string;
+    make: (l: z.ZodType<unknown, string>) => z.ZodType;
+    input: unknown;
+    // stock's runtime meets the thenable in the generated parser of `$ZodObject`, which reads `.issues.length` off
+    // it (a TypeError), where the check chain of the refine variant throws `$ZodAsyncError`: a stock quirk this
+    // layer does not match (the skeleton calls the lazy as an island and throws stock's class), pinned as such
+    stockQuirkOnTransform?: true;
+  };
+  const positions: Pos[] = [
+    { name: "bare lazy", make: (l) => l, input: "x" },
+    { name: "array(lazy)", make: (l) => z.array(l), input: ["x"] },
+    { name: "union([lazy, number])", make: (l) => z.union([l, z.number()]), input: "x" },
+    { name: "lazy.optional()", make: (l) => l.optional(), input: "x" },
+    { name: "lazy.nullable()", make: (l) => l.nullable(), input: "x" },
+    { name: "string.pipe(lazy)", make: (l) => z.string().pipe(l), input: "x" },
+    { name: "lazy.pipe(string)", make: (l) => l.pipe(z.string()), input: "x" },
+    {
+      name: "object({ a: lazy })",
+      make: (l) => z.object({ a: l }),
+      input: { a: "x" },
+      stockQuirkOnTransform: true,
+    },
+    {
+      name: "object({ a: lazy.optional() })",
+      make: (l) => z.object({ a: l.optional() }),
+      input: { a: "x" },
+      stockQuirkOnTransform: true,
+    },
+    {
+      name: "object({ a: lazy.transform(identity) })",
+      make: (l) => z.object({ a: l.transform((v) => v) }),
+      input: { a: "x" },
+      stockQuirkOnTransform: true,
+    },
+    {
+      name: "object({ a: union([lazy, number]) })",
+      make: (l) => z.object({ a: z.union([l, z.number()]) }),
+      input: { a: "x" },
+      stockQuirkOnTransform: true,
+    },
+  ];
+  const variants: [string, () => z.ZodType<unknown, string>, boolean][] = [
+    ["transform returning a Promise (#90, #91)", transformLazy, true],
+    ["refine returning a Promise (#81)", refineLazy, false],
+  ];
+  for (const [variant, lazy, isTransform] of variants) {
+    for (const pos of positions) {
+      const S = pos.make(lazy());
+      const C = compile(S);
+      const tag = `${pos.name}, ${variant}`;
+      assert.ok(
+        !C.stock && !C.async,
+        `${tag}: a sync skeleton (a plain function passes every static detector)`,
+      );
+      const stockClass = isTransform && pos.stockQuirkOnTransform ? TypeError : $ZodAsyncError;
+      assert.throws(() => S.safeParse(pos.input), stockClass, `${tag}: stock's sync parse`);
+      assert.throws(
+        () => C.safeParse(pos.input),
+        $ZodAsyncError,
+        `${tag}: safeParse throws stock's class`,
+      );
+      assert.throws(() => C.parse(pos.input), $ZodAsyncError, `${tag}: parse throws stock's class`);
+      assert.throws(
+        () => C.validate(pos.input),
+        $ZodAsyncError,
+        `${tag}: validate throws stock's class`,
+      );
+      const stockAsync = await S.safeParseAsync(pos.input);
+      assert.ok(stockAsync.success, `${tag}: stock's async parse succeeds`);
+      const r = await C.safeParseAsync(pos.input);
+      assert.ok(r.success, `${tag}: safeParseAsync hands the parse to stock's async runtime`);
+      assert.deepEqual(r.data, stockAsync.data, `${tag}: stock's output`);
+      assert.deepEqual(await C.parseAsync(pos.input), stockAsync.data, `${tag}: parseAsync too`);
+    }
+  }
+  ok(
+    "safeParse, parse and validate throw $ZodAsyncError and the async entries answer stock's output at every position",
+  );
+
+  // The #80 residual at the lazy positions goes with it: a callback's own `$ZodAsyncError` inside the lazy (a nested
+  // sync parse of an async schema) used to be thrown by stock's generated code, which this layer cannot mark, so it
+  // took the fallback and a first-call-only throw passed on the rerun; the island's `runIsland` records it now, and
+  // the parse rejects after one call like stock.
+  {
+    const nested = z.string().refine(async () => true);
+    const once = (log: string[]) => () => {
+      log.push("c");
+      if (log.length === 1) nested.parse("x");
+      return true;
+    };
+    const wraps: [string, (l: z.ZodType<unknown, string>) => z.ZodType, unknown][] = [
+      ["lazy.optional() under an object key", (l) => z.object({ a: l.optional() }), { a: "x" }],
+      ["string.pipe(lazy)", (l) => z.string().pipe(l), "x"],
+      ["union([lazy, number])", (l) => z.union([l, z.number()]), "x"],
+    ];
+    for (const [name, make, input] of wraps) {
+      const stockLog: string[] = [];
+      await assert.rejects(
+        make(z.lazy(() => z.string().refine(once(stockLog)))).safeParseAsync(input),
+        $ZodAsyncError,
+      );
+      assert.equal(stockLog.length, 1);
+      const log: string[] = [];
+      const C = compile(make(z.lazy(() => z.string().refine(once(log)))));
+      assert.ok(!C.async && !C.stock);
+      await assert.rejects(C.safeParseAsync(input), $ZodAsyncError, `${name}: the same rejection`);
+      assert.equal(
+        log.length,
+        1,
+        `${name}: one call, no rerun (the #80 residual does not reach a lazy position)`,
+      );
+    }
+    ok(
+      "a callback's own $ZodAsyncError inside a lazy under a wrapper, in a pipe or in a union rejects after one call",
+    );
+  }
+
+  // The cost: `validate` on a tree holding a `lazy` runs the skeleton instead of the whole-tree validator (a
+  // recursive schema included), still answering the input reference on a pass and null on a rejection.
+  {
+    type Tree = { v: number; kids: Tree[] };
+    const Tree: z.ZodType<Tree> = z.object({ v: z.number(), kids: z.array(z.lazy(() => Tree)) });
+    const C = compile(Tree);
+    assert.ok(!C.stock);
+    const input = { v: 1, kids: [{ v: 2, kids: [] }] };
+    assert.equal(C.validate(input), input, "a pass answers the input reference");
+    assert.equal(
+      C.validate({ v: 1, kids: [{ v: "2", kids: [] }] }),
+      null,
+      "a rejection answers null",
+    );
+    const W = compile(z.object({ a: z.lazy(() => z.string()).optional(), b: z.number() }));
+    const wIn = { a: "x", b: 1 };
+    assert.equal(W.validate(wIn), wIn);
+    const wAbsent = { b: 1 };
+    assert.equal(W.validate(wAbsent), wAbsent, "an absent optional lazy key passes by reference");
+    assert.equal(W.validate({ a: 1, b: 1 }), null);
+    const wr = W.safeParse(wIn);
+    assert.ok(wr.success && wr.data === wIn, "the parse entries keep the CoW reference");
+    ok("validate on a tree holding a lazy runs the skeleton and keeps its contract");
   }
 }
 

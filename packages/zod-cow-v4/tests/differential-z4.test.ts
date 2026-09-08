@@ -1668,14 +1668,18 @@ if (ignore.refShared < base.refShared) {
 // aliasing the input on the clean path is the CoW line's whole point and diverges from stock's
 // unconditional rebuild by design (§5.3 of the architecture deep dive), so a nested
 // `object({ n: any().readonly() })` freezes `input.n` on both sides yet returns the parent by
-// reference here and a rebuilt parent in stock — same value, same freeze footprint.
+// reference here and a rebuilt parent in stock — same value, same freeze footprint. An async identity
+// transform under `readonly`, alone and inside a container, takes the async product path (an async
+// island, an awaiting skeleton above it), so those cases run both sides through `safeParseAsync`
+// (second review of #111).
 {
   const RO_CASES = REPRO ? 0 : Number(process.env.RO_CASES ?? 3000);
 
   // A faithful deep clone for exactly the shapes this block generates (plain objects, arrays, Map,
   // Set, Date, primitives); it does not need to preserve holes, symbols or exotic prototypes because
-  // the generator never emits them. `structuredClone` is not used: it drops the Date identity the
-  // freeze lands on and cannot round-trip a Map/Set value the same way on both sides.
+  // the generator never emits them. `structuredClone` would round-trip every one of these shapes too
+  // (fresh identities for Date / Map / Set, contents preserved); the hand-written clone keeps the domain
+  // the oracle relies on explicit in the block (second review of #111).
   const roClone = (v: unknown): unknown => {
     if (typeof v !== "object" || v === null) return v;
     if (v instanceof Date) return new Date(v.getTime());
@@ -1736,8 +1740,10 @@ if (ignore.refShared < base.refShared) {
 
   // A base schema paired with an input its parse accepts. Pass-through leaves (stock freezes the
   // input in place) and containers (stock freezes a copy), each of which `.readonly()` then wraps.
-  const roBase = (r: RNG): { schema: z.ZodType; gen: (r: RNG) => unknown } => {
-    const passThrough: { schema: z.ZodType; gen: (r: RNG) => unknown }[] = [
+  // `async` marks a base holding an async identity transform, parsed through `safeParseAsync`.
+  type RoBuilt = { schema: z.ZodType; gen: (r: RNG) => unknown; async?: boolean };
+  const roBase = (r: RNG): RoBuilt => {
+    const passThrough: RoBuilt[] = [
       { schema: z.any(), gen: roValue },
       { schema: z.unknown(), gen: roValue },
       { schema: z.custom<unknown>(() => true), gen: roValue },
@@ -1748,34 +1754,52 @@ if (ignore.refShared < base.refShared) {
       { schema: z.lazy(() => z.any()), gen: roValue },
       { schema: z.union([z.string(), z.any()]), gen: roValue },
       { schema: z.any().transform((v) => v), gen: roValue },
+      { schema: z.any().transform(async (v) => v), gen: roValue, async: true },
     ];
-    const containers: { schema: z.ZodType; gen: (r: RNG) => unknown }[] = [
+    const containers: RoBuilt[] = [
       { schema: z.object({ x: z.any() }), gen: (rr) => ({ x: roValue(rr) }) },
       { schema: z.array(z.any()), gen: (rr) => [roValue(rr)] },
       { schema: z.tuple([z.any()]), gen: (rr) => [roValue(rr)] },
       { schema: z.record(z.string(), z.any()), gen: (rr) => ({ k: roValue(rr) }) },
       { schema: z.map(z.string(), z.any()), gen: (rr) => new Map([["k", roValue(rr)]]) },
       { schema: z.set(z.any()), gen: (rr) => new Set([roValue(rr)]) },
+      {
+        schema: z.array(z.any().transform(async (v) => v)),
+        gen: (rr) => [roValue(rr)],
+        async: true,
+      },
+      {
+        schema: z.object({ x: z.any().transform(async (v) => v) }),
+        gen: (rr) => ({ x: roValue(rr) }),
+        async: true,
+      },
     ];
     return r.chance(0.5) ? r.pick(passThrough) : r.pick(containers);
   };
 
   // `<base>.readonly()`, sometimes nested one level under a parent object or array so the parent's
   // clean-path aliasing (ours) vs rebuild (stock) is exercised alongside the child's in-place freeze.
-  const roCase = (r: RNG): { schema: z.ZodType; gen: (r: RNG) => unknown } => {
+  const roCase = (r: RNG): RoBuilt => {
     const base = roBase(r);
-    const ro = { schema: base.schema.readonly() as z.ZodType, gen: base.gen };
+    const ro: RoBuilt = {
+      schema: base.schema.readonly() as z.ZodType,
+      gen: base.gen,
+      async: base.async,
+    };
     const nest = r.int(3);
     if (nest === 1)
       return {
         schema: z.object({ n: ro.schema, extra: z.number() }),
         gen: (rr) => ({ n: ro.gen(rr), extra: 9 }),
+        async: ro.async,
       };
-    if (nest === 2) return { schema: z.array(ro.schema), gen: (rr) => [ro.gen(rr)] };
+    if (nest === 2)
+      return { schema: z.array(ro.schema), gen: (rr) => [ro.gen(rr)], async: ro.async };
     return ro;
   };
 
   let roChecked = 0;
+  let roAsync = 0;
   let frozenChecks = 0;
   const roFailures: string[] = [];
   for (let i = 0; i < RO_CASES; i++) {
@@ -1787,23 +1811,39 @@ if (ignore.refShared < base.refShared) {
     const pristine = roClone(model);
     const id = `readonly case=${i} def=${defRepr(built.schema)} input=${repr(model)}`;
 
+    const useAsync = built.async === true;
+    if (useAsync) roAsync++;
     let stock: { ok: boolean; data?: unknown } | null = null;
     let stockThrew: Error | null = null;
     try {
-      const r = built.schema.safeParse(forStock as never);
+      const r = useAsync
+        ? await built.schema.safeParseAsync(forStock as never)
+        : built.schema.safeParse(forStock as never);
       stock = r.success ? { ok: true, data: r.data } : { ok: false };
     } catch (e) {
       stockThrew = e as Error;
     }
     let ours: { ok: boolean; data?: unknown } | null = null;
     let oursThrew: Error | null = null;
+    let asyncFlag: boolean | null = null;
     try {
-      const r = compile(built.schema).safeParse(forOurs);
+      const c = compile(built.schema);
+      asyncFlag = c.async;
+      const r = useAsync ? await c.safeParseAsync(forOurs) : c.safeParse(forOurs);
       ours = r.success ? { ok: true, data: r.data } : { ok: false };
     } catch (e) {
       oursThrew = e as Error;
     }
     roChecked++;
+
+    // The async cases must take the async product path (an async island under an awaiting skeleton),
+    // not a sync product that happens to answer; the sync cases must stay sync.
+    if (asyncFlag !== null && asyncFlag !== useAsync) {
+      roFailures.push(
+        `ASYNC FLAG MISMATCH compiled.async=${asyncFlag} expected=${useAsync} → ${id}`,
+      );
+      continue;
+    }
 
     if ((stockThrew === null) !== (oursThrew === null)) {
       roFailures.push(
@@ -1850,7 +1890,7 @@ if (ignore.refShared < base.refShared) {
   }
   if (RO_CASES > 0) {
     console.log(
-      `  readonly differential (#28): ${roChecked} cases, ${frozenChecks} frozenness comparisons`,
+      `  readonly differential (#28): ${roChecked} cases (${roAsync} async), ${frozenChecks} frozenness comparisons`,
     );
     if (roFailures.length > 0) {
       failed += roFailures.length;

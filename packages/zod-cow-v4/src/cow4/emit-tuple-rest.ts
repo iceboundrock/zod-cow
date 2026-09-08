@@ -1,8 +1,10 @@
 /**
- * The sync rest layout of the tuple skeleton: segment 3 (the rest elements over stock's `input.slice(items.length)`,
- * built by hand, #87) and the presence decision after it, following stock's runtime timeline (#88, #96). The
- * fixed-slot segments and the async layout stay in `emit-tuple.ts`, which calls `emitSyncRest` with what the
- * segments held; this module takes no part in the `emit.ts` import cycle.
+ * The rest segment of the tuple skeleton: the rest elements over stock's `input.slice(items.length)`, built by hand
+ * (#87), and the presence decision after them, following stock's runtime timeline (#88, #96) in both layouts. The
+ * sync layout runs the rest elements inside the source (`emitSyncRest`); the async layout starts them from the
+ * source before its await (`emitAsyncRestStart`, #94) and runs the same presence decision after the settled results
+ * were compared (`emitPresenceDecision`). The fixed-slot segments stay in `emit-tuple.ts`, which calls these with
+ * what the segments held; this module takes no part in the `emit.ts` import cycle.
  *
  * Stock's `$ZodTuple` runtime runs every fixed item and keeps each result, reads `input.slice` once and calls it
  * once (the native slice reads the length, then the constructor, then the species off it, then asks `HasProperty`
@@ -44,6 +46,14 @@
  *     is run at its stock position anyway, on `undefined`, and held), a rest result the length excludes reaches
  *     the trailing loop that walks `items` past its end and throws the `TypeError` stock throws there. A length
  *     nothing moved and a native iteration take none of that: the inline assembly is that algorithm already.
+ *
+ * The async layout (#94) takes the same source before its await: `slice` read once, the hand copy or the
+ * continuation, and one rest product started per element the copy holds or per value a continuation yields, in
+ * stock's order (the fixed slots started, then the slice, then the rest elements inside the iteration, then the
+ * `Promise.all`). After the await the live length is read once, the fixed-slot segments decide presence from it
+ * over the settled results (every fixed slot's result is held, an absent slot's run on `undefined` included, as
+ * stock's `itemResults`), the rest loop compares the settled results with the elements, and the same presence
+ * decision runs whenever a continuation ran or the live length differs from the guard's read or the copy's.
  *
  * What remains: the output is the input by reference when nothing forced a copy, so user code that rewrites a slot
  * whose result is already held is visible in that output only (the CoW premise, §5.3 of the deep dive); the number
@@ -154,64 +164,43 @@ function closeOnThrow(iterator: { return?: unknown }): void {
   } catch {}
 }
 
-/** What the fixed-slot segments of `emitCoWTuple` hold for the sync rest layout */
-export interface SyncRestLayout {
+/** What both rest layouts hand the slice source */
+export interface RestSource {
   ctx: CodeCtx;
   /** The input expression */
   accessor: string;
-  /** The output local: the input until the first forced change, the copy after it */
-  out: string;
-  items: Node[];
   /** `items.length` */
   N: number;
-  optoutStart: number;
   /** The local receiving the hand copy of the rest (`null` when the native slice was not run by hand) */
   restReads: string;
-  /** The rest product's hoisted name and whether it is a validator (answers pass / fail only) */
-  restFn: string;
-  restIsValidator: boolean;
-  /** The guard's length read, and per fixed slot the local holding the read its presence was decided from */
-  guardLen: string;
-  slotLen: string[];
-  /** Per fixed slot the local holding its result (stock's `itemResults`) */
-  slotOut: string[];
-  /** Emits the inline rest body for the copy's element in local `e` at index `i` (the index loop's variable): the
-   *  rest product's call, the reference comparison and the write into the copy */
-  emitRestBody: (e: string) => void;
+}
+
+/** The locals the slice source leaves for the presence decision */
+export interface RestSourceVars {
+  /** The copy's one length read, converted as `ToLength` converts it (set when the native `slice` was read) */
+  len: string;
+  /** Whether the inline index loop ran (a custom `slice` may answer `undefined`, so the iterable local cannot tell) */
+  inline: string;
+  /** The iterable a continuation consumes with `for...of`; unset when the inline index loop stood in for it */
+  iterable: string;
 }
 
 /**
- * Segment 3 of the sync rest layout and the presence decision after it (the header's timeline). `slice` is read
- * once; the native one is run by hand when the constructor is `Array` and the species is `Array`, with the reads
- * the native slice makes, in its order; every other case is a continuation (the native builtin finished on the
- * facade, or what the custom `slice` answered). The copy is iterated by the inline index loop when the two reads
- * stock's `for...of` makes, made here with stock's receivers, answer the native array iterator and its `next`, and
- * through a `for...of` continued from what they answered otherwise; a continuation's result is consumed with
- * `for...of` like stock's and its rest results collected. Then the live length is read once and stock's
- * `handleTupleResults` runs over the held results whenever a continuation ran or the length differs from any read
- * the fixed slots and the copy decided with.
+ * The source of the rest elements, shared by both layouts: `slice` is read once; the native one is run by hand when
+ * the constructor is `Array` and the species is `Array`, with the reads the native slice makes, in its order; every
+ * other case is a continuation (the native builtin finished on the facade, or what the custom `slice` answered). The
+ * copy is iterated by the inline index loop `emitInline` emits (inside the `try` that closes the iterator when a
+ * rest element throws) when the two reads stock's `for...of` makes, made here with stock's receivers, answer the
+ * native array iterator and its `next`, and through a `for...of` continued from what they answered otherwise. The
+ * caller consumes a continuation with `for...of` over an iterable named `rest` when `inline` is false.
  */
-export function emitSyncRest(layout: SyncRestLayout): void {
-  const {
-    ctx,
-    accessor,
-    out,
-    items,
-    N,
-    optoutStart,
-    restReads,
-    restFn,
-    guardLen,
-    slotLen,
-    slotOut,
-  } = layout;
+function emitRestSource(src: RestSource, emitInline: () => void): RestSourceVars {
+  const { ctx, accessor, N, restReads } = src;
   const sliceFn = ctx.var();
   const len = ctx.var();
   const ctor = ctx.var();
   const species = ctx.var();
-  /** The iterable a continuation consumes with `for...of`; unset when the inline index loop stood in for it */
   const iterable = ctx.var();
-  /** Whether the inline index loop ran (a custom `slice` may answer `undefined`, so the iterable local cannot tell) */
   const inline = ctx.var();
   ctx.write(`const ${sliceFn} = ${accessor}.slice;`);
   ctx.write(
@@ -255,14 +244,7 @@ export function emitSyncRest(layout: SyncRestLayout): void {
           ctx.write(`${inline} = true;`);
           // A throw from the rest element leaves stock's `for...of` through `IteratorClose`; the index loop does the same
           ctx.write(`try {`);
-          ctx.indented(() => {
-            ctx.write(`for (let i = ${N}; i < ${N} + ${restReads}.length; i++) {`);
-            ctx.indented(() => {
-              ctx.write(`const e = ${restReads}[i - ${N}];`);
-              layout.emitRestBody("e");
-            });
-            ctx.write(`}`);
-          });
+          ctx.indented(emitInline);
           ctx.write(`} catch (err) {`);
           ctx.indented(() => {
             ctx.write(`${ctx.addConst(closeOnThrow)}(${iterator});`);
@@ -299,44 +281,46 @@ export function emitSyncRest(layout: SyncRestLayout): void {
     ctx.write(`${iterable} = ${ctx.addConst(NATIVE_APPLY)}(${sliceFn}, ${accessor}, [${N}]);`);
   });
   ctx.write(`}`);
-  /** The continuation's rest results, in yield order */
-  const results = ctx.var();
-  ctx.write(`let ${results} = null;`);
-  ctx.write(`if (!${inline}) {`);
-  ctx.indented(() => {
-    ctx.write(`${results} = [];`);
-    // `rest`, block-scoped: the name stock's runtime iterates, so a non-iterable throws the engine's `TypeError`
-    // with stock's message
-    ctx.write(`const rest = ${iterable};`);
-    ctx.write(`for (const e of rest) {`);
-    ctx.indented(() => {
-      if (layout.restIsValidator) {
-        ctx.write(`if ((${restFn}(e)) === INVALID) return INVALID;`);
-        ctx.write(`${results}.push(e);`);
-      } else {
-        ctx.write(`const t = ${restFn}(e);`);
-        ctx.write(`if (t === INVALID) return INVALID;`);
-        ctx.write(`${results}.push(t);`);
-      }
-    });
-    ctx.write(`}`);
-  });
-  ctx.write(`}`);
-  // Stock's `handleTupleResults`: presence from the live length, read here, after the rest ran. A length nothing
-  // moved since the guard, the fixed slots and the copy read it (the copy's read compared as the number it was
-  // converted to) leaves the inline assembly, which is that algorithm for a length that holds; otherwise it runs
-  // over the held results: the leading loop truncates at the first
-  // optional-in slot at or past `optoutStart` the length excludes (or an excluded slot whose run failed), reports a
-  // covered slot's failure, and writes every result it passes; the rest results follow; the trailing loop drops
-  // trailing `undefined` results of optional-out slots the length excludes and, past `items`, throws where stock
-  // throws (the same read on the same `items`, so the engine's own `TypeError` and message)
-  const live = ctx.var();
-  ctx.write(`const ${live} = ${accessor}.length;`);
-  const holds = [
-    ...[guardLen, ...slotLen.filter((v) => v !== guardLen)].map((v) => `${live} === ${v}`),
-    `+${live} === ${len}`,
-  ].join(" && ");
-  ctx.write(`if (${results} !== null || !(${holds})) {`);
+  return { len, inline, iterable };
+}
+
+/** What the presence decision runs over */
+export interface PresenceDecision {
+  ctx: CodeCtx;
+  /** The input expression */
+  accessor: string;
+  /** The output local: the input until the first forced change, the copy after it */
+  out: string;
+  items: Node[];
+  /** `items.length` */
+  N: number;
+  optoutStart: number;
+  /** The local holding the rest elements the inline rest loop walked (the copy, or in the async layout a
+   *  continuation's yields) */
+  restReads: string;
+  /** The local holding the live length, read by the caller after the rest ran */
+  live: string;
+  /** Per fixed slot the local holding its result (stock's `itemResults`) */
+  held: string[];
+  /** The sync layout's local holding a continuation's rest results (`null` at parse time when the inline loop ran);
+   *  absent in the async layout, whose rest loop wrote every rest result into the copy or left the elements standing */
+  results?: string;
+  /** The condition under which stock's algorithm runs over the held results */
+  condition: string;
+}
+
+/**
+ * Stock's `handleTupleResults`: presence from the live length, read after the rest ran. Under `condition` (a
+ * continuation ran, or the live length differs from a read the fixed slots or the copy decided with) it runs over
+ * the held results: the leading loop truncates at the first optional-in slot at or past `optoutStart` the length
+ * excludes (or an excluded slot whose run failed), reports a covered slot's failure, and writes every result it
+ * passes; the rest results follow; the trailing loop drops trailing `undefined` results of optional-out slots the
+ * length excludes and, past `items`, throws where stock throws (the same read on the same `items`, so the engine's
+ * own `TypeError` and message). Otherwise the inline assembly stands, being that algorithm for a length that holds.
+ */
+function emitPresenceDecision(d: PresenceDecision): void {
+  const { ctx, accessor, out, items, N, optoutStart, restReads, live, held: slotOut, results } = d;
+  ctx.write(`if (${d.condition}) {`);
   ctx.indented(() => {
     const itemsConst = ctx.addConst(items);
     const held = ctx.var();
@@ -362,9 +346,15 @@ export function emitSyncRest(layout: SyncRestLayout): void {
       // The rest results: the continuation's, or the inline loop's, which wrote every one into the copy when it
       // copied and left the copy's elements standing (each equal to its result) when it did not
       ctx.write(`const ${fromOut} = ${out} !== ${accessor};`);
-      ctx.write(
-        `const rs = ${results} !== null ? ${results} : ${fromOut} ? ${out} : ${restReads}, off = ${results} === null && ${fromOut} ? ${N} : 0, k = ${results} !== null ? ${results}.length : ${restReads}.length;`,
-      );
+      if (results !== undefined) {
+        ctx.write(
+          `const rs = ${results} !== null ? ${results} : ${fromOut} ? ${out} : ${restReads}, off = ${results} === null && ${fromOut} ? ${N} : 0, k = ${results} !== null ? ${results}.length : ${restReads}.length;`,
+        );
+      } else {
+        ctx.write(
+          `const rs = ${fromOut} ? ${out} : ${restReads}, off = ${fromOut} ? ${N} : 0, k = ${restReads}.length;`,
+        );
+      }
       ctx.write(`for (let j = 0; j < k; j++) ${final}[${N} + j] = rs[off + j];`);
     });
     ctx.write(`}`);
@@ -378,4 +368,143 @@ export function emitSyncRest(layout: SyncRestLayout): void {
     ctx.write(`${out} = ${final};`);
   });
   ctx.write(`}`);
+}
+
+/** What the fixed-slot segments of `emitCoWTuple` hold for the sync rest layout */
+export interface SyncRestLayout extends RestSource {
+  /** The output local: the input until the first forced change, the copy after it */
+  out: string;
+  items: Node[];
+  optoutStart: number;
+  /** The rest product's hoisted name and whether it is a validator (answers pass / fail only) */
+  restFn: string;
+  restIsValidator: boolean;
+  /** The guard's length read, and per fixed slot the local holding the read its presence was decided from */
+  guardLen: string;
+  slotLen: string[];
+  /** Per fixed slot the local holding its result (stock's `itemResults`) */
+  slotOut: string[];
+  /** Emits the inline rest body for the copy's element in local `e` at index `i` (the index loop's variable): the
+   *  rest product's call, the reference comparison and the write into the copy */
+  emitRestBody: (e: string) => void;
+}
+
+/**
+ * Segment 3 of the sync rest layout and the presence decision after it (the header's timeline): the source above,
+ * its inline index loop running the rest body per copy element, a continuation's result consumed with `for...of`
+ * like stock's and its rest results collected. Then the live length is read once and stock's `handleTupleResults`
+ * runs over the held results whenever a continuation ran or the length differs from any read the fixed slots and
+ * the copy decided with.
+ */
+export function emitSyncRest(layout: SyncRestLayout): void {
+  const { ctx, accessor, N, restReads, restFn, guardLen, slotLen } = layout;
+  const { len, inline, iterable } = emitRestSource(layout, () => {
+    ctx.write(`for (let i = ${N}; i < ${N} + ${restReads}.length; i++) {`);
+    ctx.indented(() => {
+      ctx.write(`const e = ${restReads}[i - ${N}];`);
+      layout.emitRestBody("e");
+    });
+    ctx.write(`}`);
+  });
+  /** The continuation's rest results, in yield order */
+  const results = ctx.var();
+  ctx.write(`let ${results} = null;`);
+  ctx.write(`if (!${inline}) {`);
+  ctx.indented(() => {
+    ctx.write(`${results} = [];`);
+    // `rest`, block-scoped: the name stock's runtime iterates, so a non-iterable throws the engine's `TypeError`
+    // with stock's message
+    ctx.write(`const rest = ${iterable};`);
+    ctx.write(`for (const e of rest) {`);
+    ctx.indented(() => {
+      if (layout.restIsValidator) {
+        ctx.write(`if ((${restFn}(e)) === INVALID) return INVALID;`);
+        ctx.write(`${results}.push(e);`);
+      } else {
+        ctx.write(`const t = ${restFn}(e);`);
+        ctx.write(`if (t === INVALID) return INVALID;`);
+        ctx.write(`${results}.push(t);`);
+      }
+    });
+    ctx.write(`}`);
+  });
+  ctx.write(`}`);
+  // A length nothing moved since the guard, the fixed slots and the copy read it (the copy's read compared as the
+  // number it was converted to) leaves the inline assembly
+  const live = ctx.var();
+  ctx.write(`const ${live} = ${accessor}.length;`);
+  const holds = [
+    ...[guardLen, ...slotLen.filter((v) => v !== guardLen)].map((v) => `${live} === ${v}`),
+    `+${live} === ${len}`,
+  ].join(" && ");
+  emitPresenceDecision({
+    ...layout,
+    live,
+    held: layout.slotOut,
+    results,
+    condition: `${results} !== null || !(${holds})`,
+  });
+}
+
+/** What the async layout hands the rest start before its await */
+export interface AsyncRestStart extends RestSource {
+  /** The local receiving one started rest product per element, in stock's order */
+  restStarted: string;
+  /** The rest product's hoisted name */
+  restFn: string;
+}
+
+/**
+ * The async layout's segment 3 before the await (#94): the source above, its inline loop starting one rest product
+ * per copy element, a continuation consumed with `for...of` like stock's, each yield kept in `restReads` and its
+ * product started. The rest loop after the await then compares the settled results with `restReads`, and
+ * `emitAsyncRestDecision` runs the presence decision.
+ */
+export function emitAsyncRestStart(start: AsyncRestStart): RestSourceVars {
+  const { ctx, restReads, restStarted, restFn } = start;
+  ctx.write(`const ${restStarted} = [];`);
+  const vars = emitRestSource(start, () => {
+    ctx.write(`for (let j = 0; j < ${restReads}.length; j++) {`);
+    ctx.indented(() => {
+      ctx.write(`${restStarted}.push(${restFn}(${restReads}[j]));`);
+    });
+    ctx.write(`}`);
+  });
+  ctx.write(`if (!${vars.inline}) {`);
+  ctx.indented(() => {
+    ctx.write(`${restReads} = [];`);
+    // `rest`, block-scoped: the name stock's runtime iterates, so a non-iterable throws the engine's `TypeError`
+    // with stock's message
+    ctx.write(`const rest = ${vars.iterable};`);
+    ctx.write(`for (const e of rest) {`);
+    ctx.indented(() => {
+      ctx.write(`${restReads}.push(e);`);
+      ctx.write(`${restStarted}.push(${restFn}(e));`);
+    });
+    ctx.write(`}`);
+  });
+  ctx.write(`}`);
+  return vars;
+}
+
+/** What the async layout hands the presence decision after its rest loop */
+export interface AsyncRestDecision extends Omit<PresenceDecision, "condition"> {
+  /** The guard's length read, before the fixed slots started */
+  guardLen: string;
+  /** The source's locals */
+  source: RestSourceVars;
+}
+
+/**
+ * The async layout's presence decision (#94): stock's algorithm over the held results whenever a continuation ran
+ * (its rest results may sit under a truncated prefix or past the live length) or the live length, read once after
+ * the await and used by every fixed-slot gate, differs from the guard's read or from the copy's converted one (a
+ * callback moved it before settling); a length that holds leaves the inline assembly.
+ */
+export function emitAsyncRestDecision(d: AsyncRestDecision): void {
+  const { live, guardLen, source } = d;
+  emitPresenceDecision({
+    ...d,
+    condition: `!${source.inline} || !(${live} === ${guardLen} && +${live} === ${source.len})`,
+  });
 }

@@ -1045,6 +1045,22 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     ok(label);
   };
 
+  /** The async twin of a rest tuple (#94): its first fixed slot carries an async refine, so the skeleton takes the
+   *  async layout, whose rest source and presence decision are the sync layout's; the rest stays sync, since stock's
+   *  own async rest writes every result to the last index (the quirk the #77 group pins). Stock's answer is the same
+   *  on both layouts, through `parseAsync` */
+  const asyncTwin = (S: z.ZodType): z.ZodType => {
+    const def = S._zod.def as unknown as { items: z.ZodType[]; rest?: z.ZodType };
+    const [first, ...others] = def.items;
+    return z.tuple([first!.refine(async () => true), ...others], def.rest as never);
+  };
+  /** The async twin's compiled product: the async layout, never stock, the container's own skeleton */
+  const compileTwin = (S: z.ZodType, label: string) => {
+    const C = compile(asyncTwin(S));
+    assert.ok(C.async && !C.stock && !/_zod/.test(C.code ?? ""), `${label}: the async layout`);
+    return C;
+  };
+
   // The reproduction of #78: the first rest element overwrites the second rest slot
   run(
     z.tuple(
@@ -1221,14 +1237,43 @@ head("the sync tuple layout slices the rest before running any rest element, lik
         Array.isArray(cow) && Object.getPrototypeOf(cow) === Array.prototype,
         `${label}: a plain array`,
       );
+      // The async layout (#94): the same slice called once, the output assembled from what it answered after the
+      // await, a truncated prefix dropping the yielded elements; the head returned the input by reference under a
+      // validator rest and wrote the yields past a truncation
+      const SA = asyncTwin(S);
+      const CA = compileTwin(S, label);
+      const stockAsync = (await SA.parseAsync(make())) as unknown[];
+      assert.deepEqual(stockAsync, stock, `${label}: stock's async answer is its sync one`);
+      const inputAsync = make();
+      const cowAsync = (await CA.parseAsync(inputAsync)) as unknown[];
+      assert.deepEqual(cowAsync, stock, `${label}: the async layout`);
+      assert.equal(cowAsync.length, stock.length, `${label}: the async layout's length`);
+      assert.notEqual(cowAsync, inputAsync, `${label}: the async layout assembles from the slice`);
+      assert.ok(
+        Array.isArray(cowAsync) && Object.getPrototypeOf(cowAsync) === Array.prototype,
+        `${label}: the async layout's plain array`,
+      );
     }
     // The dropped elements are still validated, like stock's
     {
       const S = z.tuple([z.string(), z.string().optional()], z.string());
-      const bad: unknown[] = ["h"];
-      (bad as { slice: unknown }).slice = () => [1];
-      assert.equal(S.safeParse(bad).success, false, "stock validates the dropped elements");
-      assert.equal(compile(S).safeParse(bad).success, false, "the skeleton validates them too");
+      const bad = () => {
+        const a: unknown[] = ["h"];
+        (a as { slice: unknown }).slice = () => [1];
+        return a;
+      };
+      assert.equal(S.safeParse(bad()).success, false, "stock validates the dropped elements");
+      assert.equal(compile(S).safeParse(bad()).success, false, "the skeleton validates them too");
+      assert.equal(
+        (await asyncTwin(S).safeParseAsync(bad())).success,
+        false,
+        "stock's async parse validates them",
+      );
+      assert.equal(
+        (await compileTwin(S, "dropped").safeParseAsync(bad())).success,
+        false,
+        "the async layout validates them too",
+      );
     }
     ok("an input whose slice is not the native one is sliced by that slice, like stock");
   }
@@ -1362,6 +1407,11 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       assert.deepEqual(cow, expected, `${label}: the skeleton calls the first answer`);
       assert.equal(reads(), 1, `${label}: the skeleton reads slice once`);
       assert.notEqual(cow, input, `${label}: copied`);
+      const [inputAsync, readsAsync] = make();
+      const cowAsync = (await compileTwin(S, label).parseAsync(inputAsync)) as unknown[];
+      assert.deepEqual(cowAsync, expected, `${label}: the async layout calls the first answer`);
+      assert.equal(readsAsync(), 1, `${label}: the async layout reads slice once`);
+      assert.notEqual(cowAsync, inputAsync, `${label}: the async layout copied`);
     }
     ok("slice is read once and the first answer is called, like stock");
   }
@@ -1408,6 +1458,28 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       assert.deepEqual(log.splice(0), stockLog, `${label}: yields and runs interleave like stock`);
       assert.notEqual(cow, input, `${label}: copied`);
       assert.ok(Object.getPrototypeOf(cow) === Array.prototype, `${label}: a plain array`);
+      // The async layout (#94) starts one rest product per yield inside the iteration, before its await; the head
+      // indexed the result by `length`, so a Set or a generator gave it no rest element at all
+      log.length = 0;
+      assert.deepEqual(
+        await asyncTwin(S).parseAsync(make()),
+        expected,
+        `${label}: stock's async parse iterates the result`,
+      );
+      assert.deepEqual(log.splice(0), stockLog, `${label}: stock's async parse interleaves alike`);
+      const inputAsync = make();
+      const cowAsync = (await compileTwin(S, label).parseAsync(inputAsync)) as unknown[];
+      assert.deepEqual(cowAsync, expected, `${label}: the async layout iterates it too`);
+      assert.deepEqual(
+        log.splice(0),
+        stockLog,
+        `${label}: the async layout interleaves like stock`,
+      );
+      assert.notEqual(cowAsync, inputAsync, `${label}: the async layout copied`);
+      assert.ok(
+        Object.getPrototypeOf(cowAsync) === Array.prototype,
+        `${label}: the async layout's plain array`,
+      );
     }
     assert.deepEqual(
       (() => {
@@ -1424,13 +1496,30 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       (a as { slice: unknown }).slice = () => new Set([1]);
       assert.equal(V.safeParse(a).success, false, "stock validates the yielded element");
       assert.equal(compile(V).safeParse(a).success, false, "the fallback validates it too");
+      assert.equal(
+        (await compileTwin(V, "yielded").safeParseAsync(a)).success,
+        false,
+        "the async layout validates it too",
+      );
     }
-    // A result that is not iterable: stock's `for...of` throws a TypeError, and so does the fallback's
+    // A result that is not iterable: stock's `for...of` throws a TypeError, and so does the fallback's (the async
+    // layout's `for...of` throws it before the first await, so the async entries reject with it, as stock's do)
     {
       const a: unknown[] = ["h"];
       (a as { slice: unknown }).slice = () => 5;
       assert.throws(() => V.parse(a), TypeError, "stock throws on a non-iterable rest");
       assert.throws(() => compile(V).parse(a), TypeError, "the fallback throws too");
+      await assert.rejects(asyncTwin(V).parseAsync(a), TypeError, "stock's async parse rejects");
+      await assert.rejects(
+        compileTwin(V, "non-iterable").parseAsync(a),
+        TypeError,
+        "the async layout rejects too",
+      );
+      await assert.rejects(
+        compileTwin(V, "non-iterable").safeParseAsync(a),
+        TypeError,
+        "through safeParseAsync too",
+      );
     }
     // A result with more elements than the input holds past the fixed slots: stock's `handleTupleResults` walks
     // `items` past its end there and throws a TypeError from `parse` and `safeParse` alike; the fallback hands such a
@@ -1449,6 +1538,23 @@ head("the sync tuple layout slices the rest before running any rest element, lik
         "the skeleton hands it to stock, which throws",
       );
       assert.throws(() => compile(V).safeParse(make()), TypeError, "through safeParse too");
+      // The async layout's presence decision makes the same read past `items` after the await (#94); the head
+      // returned the input by reference
+      await assert.rejects(
+        asyncTwin(V).parseAsync(make()),
+        TypeError,
+        "stock's async parse rejects",
+      );
+      await assert.rejects(
+        compileTwin(V, "over-long").parseAsync(make()),
+        TypeError,
+        "the async layout rejects too",
+      );
+      await assert.rejects(
+        compileTwin(V, "over-long").safeParseAsync(make()),
+        TypeError,
+        "through safeParseAsync too",
+      );
     }
     ok("a custom slice's result is consumed with for...of, like stock");
   }
@@ -1859,6 +1965,7 @@ head("the sync tuple layout slices the rest before running any rest element, lik
   {
     const S = z.tuple([z.string(), z.string().optional()], z.string());
     const C = compile(S);
+    const CA = compileTwin(S, "moved length");
     let sliceCalls = 0;
     const make = (values: unknown[], effect: (a: unknown[]) => unknown[]) => {
       const input: unknown[] = values;
@@ -1882,6 +1989,12 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       assert.deepEqual(cow, stock, "truncated from the held results, like stock");
       assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
       assert.ok(cow !== input, "a fresh array");
+      sliceCalls = 0;
+      const inputAsync = make(["h", "x", "r"], shrink);
+      const cowAsync = await CA.parseAsync(inputAsync);
+      assert.deepEqual(cowAsync, stock, "the async layout truncates from the held results too");
+      assert.equal(sliceCalls, 1, "one call under the async layout");
+      assert.ok(cowAsync !== inputAsync, "a fresh array under the async layout");
     }
     // Grown past the optional slot: stock materializes the `undefined` its run on the absent slot gave
     {
@@ -1901,6 +2014,13 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       assert.deepEqual(cow, stock, "materialized from the held result, like stock");
       assert.equal(sliceCalls, 1, "one call: the parse never reached stock");
       assert.ok(cow !== input, "a fresh array");
+      // The async layout started the absent slot on `undefined` before its await and holds what settled (#94)
+      sliceCalls = 0;
+      const inputAsync = make(["h"], grow);
+      const cowAsync = await CA.parseAsync(inputAsync);
+      assert.deepEqual(cowAsync, stock, "the async layout materializes the held result too");
+      assert.equal(sliceCalls, 1, "one call under the async layout");
+      assert.ok(cowAsync !== inputAsync, "a fresh array under the async layout");
     }
     // Grown past the rest only: every fixed slot's presence stands, the rest results follow them
     {
@@ -1970,11 +2090,39 @@ head("the sync tuple layout slices the rest before running any rest element, lik
     !/new Array\(|\.slice\(|input\.slice/.test(fixedCode),
     "a tuple without a rest takes no copy and reads no slice",
   );
+  // Code pin, the async layout (#94): the guard's length read held, every fixed slot started on its read, `slice`
+  // read once and the same source (the hand copy, the two iterator reads, the continuations), one rest product
+  // started per copy element inside the try that closes the iterator, a continuation consumed with `for...of` over
+  // `rest` before the await with each yield kept and its product started, then the one live length read after the
+  // `Promise.all`, the gates on it, and the presence decision after the rest loop comparing it with the guard's read
+  // and the copy's; no `.slice(` call anywhere
+  const asyncRest = compile(z.tuple([z.string().refine(async () => true)], z.string()));
+  const asyncCode = asyncRest.code ?? "";
+  assert.ok(
+    asyncRest.async &&
+      /const (x\d+) = input\.length;\s*if \(\1 < 1\) return INVALID;/.test(asyncCode) &&
+      /const (x\d+) = input\[0\];\s*const (x\d+) = c\d+\(\1\);\s*const (x\d+) = \[\];\s*const (x\d+) = input\.slice;\s*let [x\d, ]+ = null, x\d+ = false;\s*if \(\4 === c\d+\) \{\s*(x\d+) = \+input\.length;/.test(
+        asyncCode,
+      ) &&
+      /x\d+ = true;\s*try \{\s*for \(let j = 0; j < (x\d+)\.length; j\+\+\) \{\s*(x\d+)\.push\(c\d+\(\1\[j\]\)\);\s*\}\s*\} catch \(err\) \{\s*c\d+\(x\d+\);\s*throw err;/.test(
+        asyncCode,
+      ) &&
+      /if \(!(x\d+)\) \{\s*(x\d+) = \[\];\s*const rest = x\d+;\s*for \(const e of rest\) \{\s*\2\.push\(e\);\s*x\d+\.push\(c\d+\(e\)\);\s*\}\s*\}\s*const \[x\d+\] = await Promise\.all\(\[x\d+\]\);\s*const x\d+ = x\d+;\s*const (x\d+) = input\.length;/.test(
+        asyncCode,
+      ) &&
+      (asyncCode.match(/for \(const e of rest\) \{/g) ?? []).length === 1 &&
+      (asyncCode.match(/input\.length/g) ?? []).length === 3 &&
+      /if \(!(x\d+) \|\| !\((x\d+) === (x\d+) && \+\2 === (x\d+)\)\) \{\s*const x\d+ = \[x\d+\];/.test(
+        asyncCode,
+      ) &&
+      !/\.slice\(|Array\.prototype|getOwnPropertyDescriptor|hasOwn/.test(asyncCode),
+    "the async layout: the sync layout's rest source before the await, one live length read after it, the presence decision after the rest loop",
+  );
   ok("the rest copy is emitted for a rest tuple only");
 }
 
 head(
-  "the sync rest layout follows stock's runtime timeline: results held, one slice, presence decided after the rest (fourth review of #88, #96)",
+  "the rest layouts follow stock's runtime timeline: results held, one slice, presence decided after the rest (fourth review of #88, #96; the async layout #94)",
 );
 {
   // Stock's `$ZodTuple` runtime, in order: it runs every fixed item and keeps each result (`itemResults`); reads
@@ -2027,6 +2175,43 @@ head(
       return r;
     }
   };
+  /** The async analog of `run`, through the async entries: a rejection is the error stock's `.then` chain throws */
+  const runAsync = async (
+    parse: (v: unknown) => Promise<unknown>,
+    safe: (v: unknown) => Promise<unknown>,
+    make: (log: string[]) => unknown,
+  ): Promise<Run> => {
+    const log: string[] = [];
+    const input = make(log);
+    const taken = (): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < log.length; i++) out.push(log[i]!);
+      return out;
+    };
+    try {
+      const value = await parse(input);
+      return { value: snap(value), log: taken(), ref: value === input };
+    } catch (e) {
+      const r: Run = { error: errOf(e), log: taken(), ref: false };
+      try {
+        await safe(make([]));
+        r.safeError = { name: "none", message: "" };
+      } catch (e2) {
+        r.safeError = errOf(e2);
+      }
+      return r;
+    }
+  };
+  /** The async twin of a case's tuple (#94): its first fixed slot carries an async refine, so the skeleton takes the
+   *  async layout, whose rest source and presence decision are the sync layout's; the rest stays sync (stock's own
+   *  async rest writes every result to the last index, the quirk the #77 group pins). Every hook of the case meets
+   *  the same point of stock's async runtime as of its sync one, so stock's value, error and hook calls are the
+   *  sync case's, and the twin is checked against them through the async entries */
+  const asyncTwin = (S: z.ZodType): z.ZodType => {
+    const def = S._zod.def as unknown as { items: z.ZodType[]; rest?: z.ZodType };
+    const [first, ...others] = def.items;
+    return z.tuple([first!.refine(async () => true), ...others], def.rest as never);
+  };
   type Case = {
     label: string;
     S: z.ZodType;
@@ -2043,14 +2228,33 @@ head(
     /** A failing parse: the skeleton hands it to stock, whose run repeats every hook (the failure model), so the
      *  hook calls are not compared */
     rerun?: boolean;
+    /** The global under test is consumed by stock's async runtime outside the tuple's timeline (`Promise.all` over
+     *  its promise list iterates with the array iterator and its `next`), so the async twin is not run: the async
+     *  layout's rest source is the sync layout's emitted code, and the code pin of the #78 group holds it to the
+     *  same two reads */
+    syncOnly?: boolean;
   };
-  const check = ({ label, S, make, expect, throws, setup, ref, rerun }: Case): void => {
+  const check = async ({
+    label,
+    S,
+    make,
+    expect,
+    throws,
+    setup,
+    ref,
+    rerun,
+    syncOnly,
+  }: Case): Promise<void> => {
     const C = compile(S);
     assert.ok(!C.stock, `${label}: on the CoW path`);
+    const SA = asyncTwin(S);
+    const CA = compile(SA);
+    assert.ok(CA.async && !CA.stock, `${label}: the async twin on the CoW path`);
     // Stock's memoizer walks the items with `for...of` on a schema's first parse (`isRecursive`), a read of the
     // array iterator outside the tuple's timeline: taken here, before any global under test is swapped
     S.safeParse(null);
-    const undo = setup?.([]);
+    SA.safeParse(null);
+    let undo = setup?.([]);
     let stock: Run;
     let cow: Run;
     try {
@@ -2079,6 +2283,64 @@ head(
     }
     if (ref !== undefined)
       assert.equal(cow.ref, ref, `${label}: ${ref ? "the input by reference" : "a fresh array"}`);
+    if (syncOnly) {
+      ok(label);
+      return;
+    }
+    // The async layout (#94), against stock's async runtime on the twin, whose answer is the sync case's; the
+    // global under test is swapped again for the two async parses, which settle before it is restored
+    undo = setup?.([]);
+    let stockAsync: Run;
+    let cowAsync: Run;
+    try {
+      stockAsync = await runAsync(
+        (v) => SA.parseAsync(v),
+        (v) => SA.safeParseAsync(v),
+        make,
+      );
+      cowAsync = await runAsync(
+        (v) => CA.parseAsync(v),
+        (v) => CA.safeParseAsync(v),
+        make,
+      );
+    } finally {
+      undo?.();
+    }
+    assert.deepEqual(
+      stockAsync.value,
+      stock.value,
+      `${label}: stock's async value is its sync one`,
+    );
+    assert.deepEqual(
+      stockAsync.error,
+      stock.error,
+      `${label}: stock's async error is its sync one`,
+    );
+    if (!rerun)
+      assert.deepEqual(
+        stockAsync.log,
+        stock.log,
+        `${label}: stock's async hook calls are its sync ones`,
+      );
+    assert.deepEqual(cowAsync.value, stockAsync.value, `${label}: async layout, value`);
+    assert.deepEqual(cowAsync.error, stockAsync.error, `${label}: async layout, error`);
+    assert.deepEqual(
+      cowAsync.safeError,
+      stockAsync.safeError,
+      `${label}: async layout, safeParseAsync error`,
+    );
+    if (!rerun)
+      assert.deepEqual(
+        cowAsync.log,
+        stockAsync.log,
+        `${label}: async layout, hook calls, in order`,
+      );
+    if (ref !== undefined)
+      assert.equal(
+        cowAsync.ref,
+        ref,
+        `${label}: async layout, ${ref ? "the input by reference" : "a fresh array"}`,
+      );
     ok(label);
   };
   const HOLE = Symbol("hole");
@@ -2205,11 +2467,11 @@ head(
       ],
     ];
     for (const [label, S, values, expect] of cases)
-      check({ label: `a fixed slot's callback ${label}`, S, make: held(values), expect });
+      await check({ label: `a fixed slot's callback ${label}`, S, make: held(values), expect });
   }
 
   // 2. A `slice` getter: runs after every fixed result is held and before the call, on both sides
-  check({
+  await check({
     label:
       "a slice getter rewrites the fixed slot and answers a custom function (fourth review of #88, P1-B)",
     S: S1(z.string()),
@@ -2219,7 +2481,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a slice getter rewrites the fixed slot and answers a custom function that yields",
     S: S1(z.string()),
     make: withSliceGetter(["h", "a"], (a) => {
@@ -2228,7 +2490,7 @@ head(
     }),
     expect: ["h", "a"],
   });
-  check({
+  await check({
     label: "a slice getter rewrites the optional slot: the held result is assembled",
     S: SO(z.string()),
     make: withSliceGetter(["h", "x", "r"], (a) => {
@@ -2237,7 +2499,7 @@ head(
     }),
     expect: ["h", "x", "r"],
   });
-  check({
+  await check({
     label: "a slice getter shrinks the length below the optional slot",
     S: SO(z.string()),
     make: withSliceGetter(["h", "x", "r"], (a) => {
@@ -2246,7 +2508,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a slice getter grows the length past the optional slot",
     S: SO(z.string()),
     make: withSliceGetter(["h"], (a) => {
@@ -2256,7 +2518,7 @@ head(
     expect: ["h", undefined],
   });
   // The getter answers the native slice: the copy runs on the state the getter left, as the native call would
-  check({
+  await check({
     label: "a slice getter shrinks the length and answers the native slice",
     S: SO(z.string()),
     make: withSliceGetter(["h", "x", "r"], (a) => {
@@ -2265,7 +2527,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a slice getter grows the length and answers the native slice",
     S: SO(opt),
     make: withSliceGetter(["h"], (a) => {
@@ -2274,7 +2536,7 @@ head(
     }),
     expect: ["h", undefined, undefined],
   });
-  check({
+  await check({
     label:
       "a slice getter rewrites a rest slot and answers the native slice: read after it, like slice",
     S: S1(restT),
@@ -2287,7 +2549,7 @@ head(
 
   // 3. A custom `slice` body and the result it answers: called once, iterated like stock, and the length it left
   // decides presence
-  check({
+  await check({
     label:
       "a custom slice shrinks the length below the optional slot and yields nothing (fourth review of #88, P1-C)",
     S: SO(z.string()),
@@ -2297,7 +2559,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label:
       "a custom slice shrinks the length below the optional slot and yields an element (dropped with the truncation)",
     S: SO(z.string()),
@@ -2307,7 +2569,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label:
       "a custom slice shrinks the length below the rest with no optional slot: stock's trailing loop walks past the items",
     S: S1(z.string()),
@@ -2317,7 +2579,7 @@ head(
     }),
     throws: "TypeError",
   });
-  check({
+  await check({
     label: "a custom slice shrinks the length below the rest and yields nothing",
     S: S1(z.string()),
     make: withSlice(["h", "x", "r"], function () {
@@ -2326,7 +2588,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a custom slice grows the length past the optional slot and yields nothing",
     S: SO(z.string()),
     make: withSlice(["h"], function () {
@@ -2335,7 +2597,7 @@ head(
     }),
     expect: ["h", undefined],
   });
-  check({
+  await check({
     label: "a custom slice grows the length past the optional slot and yields an element",
     S: SO(z.string()),
     make: withSlice(["h"], function () {
@@ -2344,7 +2606,7 @@ head(
     }),
     expect: ["h", undefined, "q"],
   });
-  check({
+  await check({
     label: "a custom slice rewrites the fixed slot and shrinks (#96 row 2)",
     S: SO(z.string()),
     make: withSlice(["h", "x", "r"], function () {
@@ -2354,7 +2616,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a custom slice rewrites the optional slot",
     S: SO(z.string()),
     make: withSlice(["h", "x", "r"], function () {
@@ -2363,25 +2625,25 @@ head(
     }),
     expect: ["h", "x", "r"],
   });
-  check({
+  await check({
     label: "a custom slice yields more than the input holds past the fixed slots",
     S: S1(z.string()),
     make: withSlice(["h", "a"], () => ["p", "q", "r"]),
     throws: "TypeError",
   });
-  check({
+  await check({
     label: "a custom slice yields exactly what the input holds",
     S: S1(restT),
     make: withSlice(["h", "a"], () => ["p"]),
     expect: ["h", "p!"],
   });
-  check({
+  await check({
     label: "a custom slice answers a non-iterable",
     S: S1(z.string()),
     make: withSlice(["h", "a"], () => 5),
     throws: "TypeError",
   });
-  check({
+  await check({
     label: "a custom slice answers an iterable that throws before its first value",
     S: S1(z.string()),
     make: withSlice(["h", "a"], () => ({
@@ -2391,7 +2653,7 @@ head(
     })),
     throws: "RangeError",
   });
-  check({
+  await check({
     label:
       "a custom slice answers an iterator that throws after one value, which ran the rest element",
     S: S1(
@@ -2418,7 +2680,7 @@ head(
     throws: "RangeError",
   });
   // The result's iterator getter and its `next` run between the call and the presence decision
-  check({
+  await check({
     label: "the result's Symbol.iterator getter shrinks the length below the optional slot",
     S: SO(z.string()),
     make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
@@ -2435,7 +2697,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "the result's Symbol.iterator getter shrinks the length below the rest",
     S: S1(z.string()),
     make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
@@ -2452,7 +2714,7 @@ head(
     }),
     throws: "TypeError",
   });
-  check({
+  await check({
     label: "the iterator's next rewrites the fixed slot and grows the length after one value",
     S: SO(restT),
     make: withSlice(["h", "x", "r"], function (this: unknown[], log) {
@@ -2475,13 +2737,13 @@ head(
     }),
     expect: ["h", "x", "p!", "q!"],
   });
-  check({
+  await check({
     label: "an empty custom result under a truncated prefix",
     S: SO(restT),
     make: withSlice(["h"], () => []),
     expect: ["h"],
   });
-  check({
+  await check({
     label:
       "a one-element custom result under a truncated prefix: run, then dropped by the truncation",
     S: SO(
@@ -2496,7 +2758,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label:
       "a failing element in a custom result under a truncated prefix: stock reports it, the truncation notwithstanding",
     S: SO(z.string()),
@@ -2507,7 +2769,7 @@ head(
 
   // 4. A species getter that answers `Array`: the native slice reads the length before it and the indices after
   // it, and the copy does the same; the length it moves is met by the presence decision after the rest
-  check({
+  await check({
     label:
       "a species getter grows the length: the copy's count was fixed before it (fourth review of #88, P1-A)",
     S: S1(restO),
@@ -2517,7 +2779,7 @@ head(
     }),
     expect: ["h", "a!"],
   });
-  check({
+  await check({
     label:
       "a species getter grows the length past the optional slot: materialized after the rest (#96 row 1)",
     S: SO(z.string()),
@@ -2527,7 +2789,7 @@ head(
     }),
     expect: ["h", undefined],
   });
-  check({
+  await check({
     label: "a species getter shrinks the length below the optional slot",
     S: SO(opt),
     make: held(["h", "x", "r"]),
@@ -2536,7 +2798,7 @@ head(
     }),
     expect: ["h"],
   });
-  check({
+  await check({
     label: "a species getter rewrites a rest slot: read after it, like slice",
     S: S1(z.string()),
     make: held(["h", "a"]),
@@ -2546,7 +2808,7 @@ head(
     expect: ["h", "M"],
     ref: true,
   });
-  check({
+  await check({
     label:
       "a species getter rewrites the fixed slot under a transform rest: the held result is assembled",
     S: S1(restT),
@@ -2556,7 +2818,7 @@ head(
     }),
     expect: ["h", "a!"],
   });
-  check({
+  await check({
     label: "a species getter installs an own slice: read already, like under slice",
     S: S1(restT),
     make: held(["h", "a"]),
@@ -2566,7 +2828,7 @@ head(
     expect: ["h", "a!"],
   });
   // The getter answers something else: the native slice constructs through it, on the state it left
-  check({
+  await check({
     label: "a species getter answers a constructor after growing the input",
     S: S1(restT),
     make: held(["h", "a"]),
@@ -2582,7 +2844,7 @@ head(
     ),
     expect: ["h", "a!"],
   });
-  check({
+  await check({
     label: "a species getter answers null: a plain array",
     S: S1(restT),
     make: held(["h", "a"]),
@@ -2592,7 +2854,7 @@ head(
     ),
     expect: ["h", "a!"],
   });
-  check({
+  await check({
     label: "a species getter answers a non-constructor: slice's TypeError",
     S: S1(restT),
     make: held(["h", "a"]),
@@ -2613,7 +2875,7 @@ head(
             return new Array(n);
           },
       );
-    check({
+    await check({
       label: "a species constructor rewrites a rest slot: read after it",
       S: S1(z.string()),
       make: held(["h", "a", "b"]),
@@ -2622,7 +2884,7 @@ head(
       }),
       expect: ["h", "a", "M"],
     });
-    check({
+    await check({
       label: "a species constructor rewrites the fixed slot: the held result is assembled",
       S: S1(z.string()),
       make: held(["h", "a"]),
@@ -2631,7 +2893,7 @@ head(
       }),
       expect: ["h", "a"],
     });
-    check({
+    await check({
       label: "a species constructor shrinks the length below the optional slot",
       S: SO(opt),
       make: held(["h", "x", "r"]),
@@ -2640,7 +2902,7 @@ head(
       }),
       expect: ["h"],
     });
-    check({
+    await check({
       label: "a species constructor grows the length past the optional slot",
       S: SO(z.string()),
       make: held(["h"]),
@@ -2665,7 +2927,7 @@ head(
         });
         return a;
       };
-    check({
+    await check({
       label:
         "a constructor getter grows the length and answers Array: the count was fixed before it",
       S: S1(restO),
@@ -2675,7 +2937,7 @@ head(
       }),
       expect: ["h", "a!"],
     });
-    check({
+    await check({
       label:
         "a constructor getter answers a plain function: slice reads its species (none) and builds a plain array",
       S: S1(restT),
@@ -2691,7 +2953,7 @@ head(
       }),
       expect: ["h", "a!"],
     });
-    check({
+    await check({
       label:
         "a constructor getter answers a function whose species getter rewrites the fixed slot and constructs",
       S: S1(restT),
@@ -2711,7 +2973,7 @@ head(
       }),
       expect: ["h", "a!"],
     });
-    check({
+    await check({
       label: "an own constructor of undefined: a plain array",
       S: S1(restT),
       make: () => {
@@ -2721,7 +2983,7 @@ head(
       },
       expect: ["h", "a!"],
     });
-    check({
+    await check({
       label: "an own constructor of null: slice's TypeError",
       S: S1(restT),
       make: () => {
@@ -2731,7 +2993,7 @@ head(
       },
       throws: "TypeError",
     });
-    check({
+    await check({
       label:
         "a subclass instance whose constructor shrinks the length: the species constructor runs inside slice",
       S: SO(opt),
@@ -2769,7 +3031,7 @@ head(
       Object.defineProperty(a, "effect", { value: effect });
       return a;
     };
-    check({
+    await check({
       label:
         "a rest callback shrinks the length below the rest: stock's trailing loop walks past the items",
       S: S1(restCb),
@@ -2778,7 +3040,7 @@ head(
       }),
       throws: "TypeError",
     });
-    check({
+    await check({
       label: "a rest callback shrinks the length below the optional slot",
       S: SO(restCb),
       make: withEffect(["h", "x", "r"], (a) => {
@@ -2786,7 +3048,7 @@ head(
       }),
       expect: ["h"],
     });
-    check({
+    await check({
       label: "a rest callback grows the length",
       S: SO(restCb),
       make: withEffect(["h", "x", "r"], (a) => {
@@ -2794,7 +3056,7 @@ head(
       }),
       expect: ["h", "x", "r!"],
     });
-    check({
+    await check({
       label: "a rest callback writes a later rest slot: the slice held it",
       S: SO(restCb),
       make: withEffect(["h", "x", "r", "s"], (a) => {
@@ -2814,7 +3076,7 @@ head(
     const indexLog = (log: string[]) => (kind: string, k: PropertyKey) => {
       if (typeof k === "string" && k !== "length") log.push(`${kind}:${k}`);
     };
-    check({
+    await check({
       label: "a get trap for a rest index rewrites a later rest slot: read after it, like slice",
       S: S1(restT),
       make: proxied(["h", "a", "b"], (log) => {
@@ -2833,7 +3095,7 @@ head(
       }),
       expect: ["h", "a!", "M!"],
     });
-    check({
+    await check({
       label: "a has trap that denies a rest index: a hole under both",
       S: S1(restO),
       make: proxied(["h", "a", "b"], (log) => {
@@ -2847,7 +3109,7 @@ head(
       }),
       expect: ["h", "U", "b!"],
     });
-    check({
+    await check({
       label:
         "a length that grows once the first slot was read: the slice and the presence decision see the grown one",
       S: SO(opt),
@@ -2866,31 +3128,31 @@ head(
   }
 
   // 8. Holes and explicit `undefined` in the rest under the copy, and the reference on the clean path
-  check({
+  await check({
     label: "a rest hole comes out as an own undefined",
     S: S1(restO),
     make: () => arr("h", "a", HOLE, "c"),
     expect: ["h", "a!", "U", "c!"],
   });
-  check({
+  await check({
     label: "a rest hole under a validator rest",
     S: S1(opt),
     make: () => arr("h", HOLE),
     expect: ["h", undefined],
   });
-  check({
+  await check({
     label: "an explicit own undefined in the rest copies, like a hole (#95)",
     S: S1(opt),
     make: () => ["h", undefined],
     expect: ["h", undefined],
   });
-  check({
+  await check({
     label: "a dense rest keeps the reference",
     S: S1(z.string()),
     make: () => ["h", "a", "b"],
     ref: true,
   });
-  check({
+  await check({
     label: "a short input under the optional slot keeps the reference",
     S: SO(z.string()),
     make: () => ["h"],
@@ -2955,7 +3217,8 @@ head(
           holder.input = null;
         };
       };
-    check({
+    await check({
+      syncOnly: true,
       label: "a data-property array iterator that yields something else",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -2967,7 +3230,8 @@ head(
       })),
       expect: ["a", "changed"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an accessor array iterator that answers the native one to the prototype and another to an array (the review's repro)",
       S: S1(z.string()),
@@ -2984,7 +3248,8 @@ head(
       })),
       expect: ["a", "changed"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an accessor array iterator under a transform rest",
       S: S1(restT),
       make: logged(["a", "b"]),
@@ -3000,7 +3265,8 @@ head(
       })),
       expect: ["a", "changed!"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an accessor array iterator that answers the native one: read once, the input by reference",
       S: S1(z.string()),
@@ -3014,7 +3280,8 @@ head(
       expect: ["a", "b"],
       ref: true,
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an array iterator that stops after the first element",
       S: S1(restT),
       make: logged(["a", "b", "c"]),
@@ -3030,7 +3297,8 @@ head(
       })),
       expect: ["a", "b!"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an array iterator that yields one element more: stock's trailing loop walks past the items",
       S: S1(z.string()),
@@ -3048,7 +3316,8 @@ head(
       })),
       throws: "TypeError",
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an array iterator that yields the copy's elements and then rewrites the fixed slot and the length",
       S: SO(restT),
@@ -3067,7 +3336,8 @@ head(
       })),
       expect: ["h"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "a data-property next that rewrites every value",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3080,7 +3350,8 @@ head(
       })),
       expect: ["a", "changed"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an accessor next that answers the native one to the prototype and another to an iterator (the review's second case)",
       S: S1(z.string()),
@@ -3098,7 +3369,8 @@ head(
       })),
       expect: ["a", "changed"],
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an accessor next that answers the native one: read once, the input by reference",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3111,7 +3383,8 @@ head(
       expect: ["a", "b"],
       ref: true,
     });
-    check({
+    await check({
+      syncOnly: true,
       label:
         "an accessor next whose function shrinks the length below the optional slot after the rest",
       S: SO(restT),
@@ -3130,7 +3403,8 @@ head(
       expect: ["h"],
     });
     // The protocol's errors, the engine's own on both sides
-    check({
+    await check({
+      syncOnly: true,
       label: "an accessor array iterator that answers a number: not iterable",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3142,7 +3416,8 @@ head(
       })),
       throws: "TypeError",
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an array iterator that answers a non-object: the engine's TypeError",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3154,7 +3429,8 @@ head(
       })),
       throws: "TypeError",
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an array iterator that is a class: the engine's TypeError on the call",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3166,7 +3442,8 @@ head(
       })),
       throws: "TypeError",
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "an accessor next that answers a number: the engine's TypeError",
       S: S1(z.string()),
       make: logged(["a", "b"]),
@@ -3178,7 +3455,8 @@ head(
       })),
       throws: "TypeError",
     });
-    check({
+    await check({
+      syncOnly: true,
       label: "a next that answers a non-object result after one value: the engine's TypeError",
       S: S1(restT),
       make: logged(["a", "b", "c"]),
@@ -3221,7 +3499,8 @@ head(
         if (v === "b") throw new RangeError("rest");
         return `${v}!`;
       });
-      check({
+      await check({
+        syncOnly: true,
         label:
           "a return on the array iterator prototype under the native iteration: read and called on the throw",
         S: S1(throwing),
@@ -3229,7 +3508,8 @@ head(
         setup: withReturn(() => () => {}),
         throws: "RangeError",
       });
-      check({
+      await check({
+        syncOnly: true,
         label:
           "a return on the array iterator prototype under a replaced next: read and called on the throw",
         S: S1(throwing),
@@ -3250,7 +3530,8 @@ head(
         ),
         throws: "RangeError",
       });
-      check({
+      await check({
+        syncOnly: true,
         label: "a return on the array iterator prototype is not read when nothing throws",
         S: S1(restT),
         make: logged(["a", "b"]),

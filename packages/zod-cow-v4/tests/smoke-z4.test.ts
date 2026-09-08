@@ -2541,7 +2541,9 @@ import { compile } from "../src/index.js";
 
 /* ── 26. the undeclared-key walk tests the input's key order before membership (#102) ── */
 {
-  console.log("\n── the undeclared-key walk tests the input's key order before membership (#102) ──");
+  console.log(
+    "\n── the undeclared-key walk tests the input's key order before membership (#102) ──",
+  );
   // Every `for...in` over the input's keys (strip's clean-path probe, strict's rejection loop, the
   // loose append, and the same two loops of an enum-keyed record) compares each key against the
   // declared key at the walk's position before running the membership test (the comparison chain
@@ -2674,7 +2676,9 @@ import { compile } from "../src/index.js";
     assert.deepEqual(Object.keys(outR), [...keys, "z"], `looseRecord ${width}: stock's order`);
     assert.equal(outR.z, "z", `looseRecord ${width}: the undeclared key is kept as it is`);
   }
-  console.log("  strict and loose enum records of 3 / 40 keys accept every key order by reference and copy or reject like stock ✓");
+  console.log(
+    "  strict and loose enum records of 3 / 40 keys accept every key order by reference and copy or reject like stock ✓",
+  );
 }
 
 console.log("\nAll smoke assertions passed ✓");

@@ -37,7 +37,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx tests/canary-z4.test.ts && tsx tests/smoke-z4.test.ts && tsx tests/smoke-z4-containers.test.ts && tsx tests/smoke-z4-tuple-async.test.ts && tsx tests/differential-z4.test.ts",
+    "test": "tsx tests/canary-z4.test.ts && tsx tests/drift-versions.test.ts && tsx tests/smoke-z4.test.ts && tsx tests/smoke-z4-containers.test.ts && tsx tests/smoke-z4-tuple-async.test.ts && tsx tests/differential-z4.test.ts",
     "probe": "tsx src/probe-z4.ts",
     "smoke:pack": "pnpm run build && tsx scripts/pack-smoke.ts"
   },
@@ -45,6 +45,8 @@
     "zod": ">=4.5.4 <4.6.0"
   },
   "devDependencies": {
+    "@types/semver": "^7.8.0",
+    "semver": "^7.8.5",
     "zod": "4.5.4"
   }
 }

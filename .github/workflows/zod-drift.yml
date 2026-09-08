@@ -1,0 +1,208 @@
+name: zod drift check
+
+# Manual and weekly only, never on push or pull_request (#30). The published peer range of
+# zod-cow-v4 spans one verified zod minor and admits patch releases the suites have not run
+# against (ADR 0001 §3: trusted, not verified). This workflow is the monitoring behind that trust:
+# it runs the zod4 suites against every stable zod release the range admits, so a breaking patch
+# is caught by the next successful scheduled run even when a later patch has already fixed it (the
+# range still admits the broken one). It is monitoring after the fact, not protection before it: a
+# consumer can install a patch in the window before the next successful run, and the weekly
+# schedule bounds that window only as far as GitHub honors it (scheduled runs can be delayed,
+# skipped under load, or disabled after repository inactivity), so the wording is "checked weekly".
+#
+# Jobs:
+#   resolve  reads the peer range from packages/zod-cow-v4/package.json, lists the stable zod
+#            releases it admits and the informational target just above its upper bound
+#            (scripts/drift-versions.ts in that package: the newest release of the next minor, or
+#            after an emergency narrowing to a patch bound the same minor's newest later patch,
+#            falling through to the next minor), and builds the matrix.
+#   suites   one job per release: installs that zod into zod-cow-v4, then runs the typecheck, the
+#            stock-behavior probe, the package tests (canary, drift-versions, smoke, differential
+#            at the CI size) and the packed-tarball smoke, and writes the version, the publish
+#            time, the step outcomes and the differential reference-sharing rates to its job
+#            summary. A release inside the range fails the run; the informational target cannot
+#            (continue-on-error), it only shows the drift the next widening release would meet.
+#
+# Release age: minimumReleaseAge in pnpm-workspace.yaml (five days, ADR 0002) would refuse a zod
+# patch for its first five days, and pnpm's pre-script check ignores a per-command override, so
+# the suites job sets the age to 0 in its throwaway checkout after the policy-checked install of
+# everything else. The lockfile keeps every other entry as main verified it and `pnpm add` re-resolves
+# zod alone, so the one release the job runs without the age gate is the one it exists to test, on
+# the day a consumer can install it.
+on:
+  workflow_dispatch:
+  schedule:
+    # Tuesdays 04:23 UTC (off the hour, and a day after the Monday benchmark and Dependabot runs).
+    - cron: "23 4 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve zod releases inside the peer range
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve the releases to test
+        id: resolve
+        shell: bash
+        run: |
+          pnpm --filter zod-cow-v4 exec tsx scripts/drift-versions.ts > targets.json
+          cat targets.json
+          # One matrix entry per release: every release inside the range, then the informational
+          # target when one exists. `published` rides along for the job summaries.
+          matrix=$(jq -c '. as $t | { include: (
+            [ .inRange[] | { version: ., role: "in-range" } ]
+            + (if .next then [ { version: .next, role: "next" } ] else [] end)
+            | map(. + { published: ($t.published[.version] // "unknown") }) ) }' targets.json)
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "${matrix}"
+
+      - name: Write job summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          {
+            echo "## zod drift check"
+            echo
+            echo "> Monitoring after the fact, not protection before it: every stable zod release the published peer range admits is run through the zod4 suites; a consumer can install a release in the window before this run. Checked weekly."
+            echo
+            if [ -s targets.json ]; then
+              echo "- Peer range of \`zod-cow-v4\`: \`$(jq -r .range targets.json)\`"
+              echo "- Releases inside the range (each fails the run when red): $(jq -r '. as $t | [.inRange[] | "`\(.)` (published \($t.published[.] // "unknown"))"] | join(", ")' targets.json)"
+              next=$(jq -r '.next // empty' targets.json)
+              if [ -n "${next}" ]; then
+                echo "- Informational target just above the upper bound (cannot fail the run): \`${next}\` (published $(jq -r --arg v "${next}" '.published[$v] // "unknown"' targets.json)); $(jq -r .nextReason targets.json)"
+              else
+                echo "- Informational target just above the upper bound: none, $(jq -r .nextReason targets.json)"
+              fi
+            else
+              echo "_Resolution failed before writing targets.json; see the step log._"
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  suites:
+    name: zod ${{ matrix.version }} (${{ matrix.role }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The informational target shows drift; it never fails the run.
+    continue-on-error: ${{ matrix.role == 'next' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          # 24 = the README environment; the zod version is the variable here, not the Node one.
+          node-version: 24
+          cache: pnpm
+
+      # Under the repository's release-age policy: every entry of the lockfile is verified here.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The throwaway checkout drops the age gate for the one dependency this job varies. The
+      # exact version is asserted afterwards: `pnpm add` must not have resolved anything else.
+      - name: Install zod ${{ matrix.version }} into zod-cow-v4
+        id: install
+        shell: bash
+        run: |
+          pnpm config set --location project minimumReleaseAge 0
+          pnpm --filter zod-cow-v4 add --save-dev --save-exact "zod@${{ matrix.version }}"
+          installed=$(pnpm --filter zod-cow-v4 exec node -p 'require("zod/package.json").version')
+          echo "zod-cow-v4 now resolves zod ${installed}"
+          test "${installed}" = "${{ matrix.version }}"
+
+      - name: Typecheck zod-cow-v4 (tsc --noEmit)
+        id: typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm --filter zod-cow-v4 run typecheck
+
+      - name: Probe stock zod behavior (probe-z4)
+        id: probe
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm --filter zod-cow-v4 run probe
+
+      # canary, drift-versions, the smoke tests and the differential fuzzer at the CI size
+      # (SEEDS × CASES defaults). tee keeps the output for the summary; `shell: bash` enables
+      # pipefail, so a failing suite still fails the step.
+      - name: Test zod-cow-v4 (canary, smoke, differential)
+        id: test
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: bash
+        run: pnpm --filter zod-cow-v4 run test 2>&1 | tee test.txt
+
+      - name: Packed tarball smoke (zod-cow-v4)
+        id: pack
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: pnpm --filter zod-cow-v4 run smoke:pack
+
+      - name: Write job summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          ROLE: ${{ matrix.role }}
+          VERSION: ${{ matrix.version }}
+          PUBLISHED: ${{ matrix.published }}
+          OUTCOME_INSTALL: ${{ steps.install.outcome }}
+          OUTCOME_TYPECHECK: ${{ steps.typecheck.outcome }}
+          OUTCOME_PROBE: ${{ steps.probe.outcome }}
+          OUTCOME_TEST: ${{ steps.test.outcome }}
+          OUTCOME_PACK: ${{ steps.pack.outcome }}
+        run: |
+          if [ "${ROLE}" = "next" ]; then
+            what="informational target just above the peer range's upper bound (cannot fail the run)"
+          else
+            what="inside the peer range (fails the run when red)"
+          fi
+          {
+            echo "### zod ${VERSION}, ${what}"
+            echo
+            echo "Published ${PUBLISHED}; node $(node --version)."
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| install zod ${VERSION} | ${OUTCOME_INSTALL} |"
+            echo "| typecheck | ${OUTCOME_TYPECHECK} |"
+            echo "| probe | ${OUTCOME_PROBE} |"
+            echo "| tests (canary, drift-versions, smoke, differential) | ${OUTCOME_TEST} |"
+            echo "| packed-tarball smoke | ${OUTCOME_PACK} |"
+            echo
+            if [ -s test.txt ] && grep -q "top-level reference sharing" test.txt; then
+              echo "Differential run and reference-sharing rate per pass:"
+              echo
+              echo '```text'
+              grep -E "^zc-z4 differential test:|^  pass:|top-level reference sharing|differences in pass|agree with stock" test.txt
+              echo '```'
+            else
+              echo "_No differential summary captured (the tests did not reach the fuzzer)._"
+            fi
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"

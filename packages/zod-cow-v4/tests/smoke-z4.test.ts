@@ -2539,4 +2539,142 @@ import { compile } from "../src/index.js";
   }
 }
 
+/* ── 26. the undeclared-key walk tests the input's key order before membership (#102) ── */
+{
+  console.log("\n── the undeclared-key walk tests the input's key order before membership (#102) ──");
+  // Every `for...in` over the input's keys (strip's clean-path probe, strict's rejection loop, the
+  // loose append, and the same two loops of an enum-keyed record) compares each key against the
+  // declared key at the walk's position before running the membership test (the comparison chain
+  // up to `MAX_INLINE_KEY_COMPARISONS`, `Set.has` above it): an input in shape order costs one
+  // pointer comparison per key, any other order falls back to the membership test for the keys
+  // that diverge. A positional hit and a membership hit are the same proof, so every verdict and
+  // every output is stock's whichever path a key took, and the reference survives every order.
+  const widths = [3, 16, 33, 64];
+  const shapeOf = (width: number) => {
+    const shape: Record<string, z.ZodType> = {};
+    for (let i = 0; i < width; i++)
+      shape[`k${i}`] = i % 3 === 1 ? z.string().optional() : z.string();
+    return shape;
+  };
+  const recordOf = (keys: string[], patch: Record<string, string> = {}) => {
+    const o: Record<string, string> = {};
+    for (const k of keys) o[k] = `v-${k}`;
+    return Object.assign(o, patch);
+  };
+  const positional = /if \(k === c\d+\[x\d+\]\) x\d+\+\+;/;
+  for (const width of widths) {
+    const shape = shapeOf(width);
+    const keys = Object.keys(shape);
+    const inOrder = recordOf(keys);
+    const reversed = recordOf([...keys].reverse());
+    const gapped = recordOf(keys.filter((_, i) => i % 3 !== 1));
+    const swapped = recordOf([keys[1]!, keys[0]!, ...keys.slice(2)]);
+    const orders = { inOrder, reversed, gapped, swapped };
+    const withExtra = (at: "front" | "middle" | "end") =>
+      at === "front"
+        ? { extra: "e", ...inOrder }
+        : at === "end"
+          ? { ...inOrder, extra: "e" }
+          : recordOf([...keys.slice(0, width >> 1), "extra", ...keys.slice(width >> 1)]);
+    const inherited = Object.assign(Object.create({ inherited: "i" }), inOrder);
+    for (const [mode, S] of [
+      ["strip", z.object(shape)],
+      ["strict", z.strictObject(shape)],
+      ["loose", z.looseObject(shape)],
+    ] as const) {
+      const C = compile(S);
+      assert.ok(!C.stock, `${mode} ${width}: skeleton`);
+      assert.match(C.code!, positional, `${mode} ${width}: the walk tests the position first`);
+      const usesSet = C.code!.includes(".has(k)");
+      assert.equal(usesSet, width > 32, `${mode} ${width}: the fallback form follows the cap`);
+      for (const [order, input] of Object.entries(orders)) {
+        assert.deepEqual(S.parse(input), input, `stock ${mode} ${width} ${order}: accepted`);
+        assert.equal(C.parse(input), input, `${mode} ${width} ${order}: by reference`);
+      }
+      for (const at of ["front", "middle", "end"] as const) {
+        const input = withExtra(at);
+        const stock = S.safeParse(input);
+        const out = C.safeParse(input);
+        assert.equal(out.success, stock.success, `${mode} ${width} extra ${at}: same verdict`);
+        if (mode === "strict") {
+          assert.equal(stock.success, false, `stock strict ${width}: rejects the extra key`);
+          continue;
+        }
+        assert.ok(stock.success && out.success);
+        if (mode === "strip") {
+          assert.notEqual(out.data, input, `strip ${width} extra ${at}: a copy`);
+          assert.deepEqual(Object.keys(out.data as object), keys, `strip ${width}: shape order`);
+        } else {
+          assert.equal(out.data, input, `loose ${width} extra ${at}: kept by reference`);
+        }
+        assert.deepEqual(out.data, stock.data, `${mode} ${width} extra ${at}: stock's output`);
+      }
+      // An inherited enumerable undeclared key: stock's for...in sees it (strip copies, strict
+      // rejects, loose appends it as an own key where the clean path keeps it inherited, #48)
+      const stock = S.safeParse(inherited);
+      const out = C.safeParse(inherited);
+      assert.equal(out.success, stock.success, `${mode} ${width} inherited: same verdict`);
+      if (mode === "strip") {
+        assert.ok(stock.success && out.success);
+        assert.notEqual(out.data, inherited, `strip ${width} inherited: a copy`);
+        assert.deepEqual(out.data, stock.data);
+      } else if (mode === "strict") {
+        assert.equal(stock.success, false);
+      } else {
+        assert.equal(out.success && out.data, inherited, `loose ${width} inherited: by reference`);
+      }
+    }
+    // The loose copy path appends the undeclared keys in for...in order after the shape keys, like
+    // stock, whichever order the declared keys came in
+    const Loose = z.looseObject({ ...shape, k0: z.string().transform((s) => `${s}!`) });
+    const looseDirty = recordOf([...keys].reverse(), { z: "z", a: "a" });
+    const looseOut = compile(Loose).parse(looseDirty) as Record<string, string>;
+    assert.deepEqual(looseOut, Loose.parse(looseDirty), `loose ${width}: the copy is stock's`);
+    assert.deepEqual(Object.keys(looseOut), [...keys, "z", "a"], `loose ${width}: stock's order`);
+    assert.equal(looseOut.k0, "v-k0!");
+  }
+  console.log(
+    "  strip, strict and loose objects of 3 / 16 / 33 / 64 keys accept every key order by reference and copy or reject like stock ✓",
+  );
+
+  // Enum-keyed records: the strict loop and the loose append walk the same way
+  for (const width of [3, 40]) {
+    const keys = Array.from({ length: width }, (_, i) => `k${i}`);
+    const Enum = z.enum(keys as [string, ...string[]]);
+    const inOrder = recordOf(keys);
+    const reversed = recordOf([...keys].reverse());
+    const extra = recordOf([...keys.slice(0, 1), "extra", ...keys.slice(1)]);
+    for (const [label, S] of [
+      ["record", z.record(Enum, z.string())],
+      ["looseRecord", z.looseRecord(Enum, z.string())],
+    ] as const) {
+      const C = compile(S);
+      assert.ok(!C.stock);
+      assert.match(C.code!, positional, `${label} ${width}: the walk tests the position first`);
+      for (const input of [inOrder, reversed]) {
+        assert.deepEqual(S.parse(input), input);
+        assert.equal(C.parse(input), input, `${label} ${width}: by reference`);
+      }
+      const stock = S.safeParse(extra);
+      const out = C.safeParse(extra);
+      assert.equal(out.success, stock.success, `${label} ${width} extra: same verdict`);
+      if (label === "record") assert.equal(stock.success, false);
+      else assert.equal(out.success && out.data, extra, `${label} ${width}: kept by reference`);
+    }
+    // The loose record's copy path (here every value is rewritten) appends the undeclared keys
+    // after the declared ones in for...in order, like stock, whichever order the declared keys came in
+    const LooseR = z.looseRecord(
+      Enum,
+      z.string().transform((s) => `${s}!`),
+    );
+    const dirtyR = recordOf([...keys].reverse(), { z: "z" });
+    const outR = compile(LooseR).parse(dirtyR) as Record<string, unknown>;
+    assert.notEqual(outR, dirtyR);
+    assert.deepEqual(outR, LooseR.parse(dirtyR), `looseRecord ${width}: the copy is stock's`);
+    assert.deepEqual(Object.keys(outR), [...keys, "z"], `looseRecord ${width}: stock's order`);
+    assert.equal(outR.z, "z", `looseRecord ${width}: the undeclared key is kept as it is`);
+  }
+  console.log("  strict and loose enum records of 3 / 40 keys accept every key order by reference and copy or reject like stock ✓");
+}
+
 console.log("\nAll smoke assertions passed ✓");

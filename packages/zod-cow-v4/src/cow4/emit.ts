@@ -14,6 +14,7 @@ import { emitCoWTuple } from "./emit-tuple.js";
 import { emitCoWUnion } from "./emit-union.js";
 import {
   compileAssertOnlyRecording,
+  isSlotRestoreFailure,
   makeAsyncIsland,
   officialFn,
   pureSubtreeNeedsIsland,
@@ -503,6 +504,9 @@ export function emitNode(
         // a pure subtree that validates ⇒ output = input reference, so accessor is the output
         return needsValue ? accessor : null;
       }
+      // A slot that refused the write back holds the wrapper: a second install would read it as the caller's
+      // function, so the failure leaves `compile()` instead of falling through to `officialFn` (#112).
+      if (isSlotRestoreFailure(e)) throw e;
       v = null;
     }
     if (v) {

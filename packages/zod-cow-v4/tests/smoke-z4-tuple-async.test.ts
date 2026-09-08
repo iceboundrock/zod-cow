@@ -4107,7 +4107,8 @@ head(
   }
 
   // #80: a callback stock's generated code calls (a leaf `.refine`, `.check`, `.superRefine`, `z.custom`
-  // predicate, `overwrite` or `transform` inside an official product) reports its Promise signal from stock's own
+  // predicate, a custom string format's predicate, `overwrite` or `transform` inside an official product) reports
+  // its Promise signal from stock's own
   // hoisted `throwAsync`, so a `$ZodAsyncError` such a callback throws used to be indistinguishable from the fast
   // path's signal and took the fallback: the callback ran twice, and one that throws on the first call only passed
   // on the rerun where stock rejects. It is recorded now. Stock's compiler reads those callbacks off writable `def`
@@ -4163,6 +4164,27 @@ head(
         "x",
       ],
       ["z.custom predicate that throws", (fn) => z.custom<unknown>((v) => fn() && v === "x"), "x"],
+      // A custom string format is a `string` schema carrying its predicate on its own `def.fn` (third review of #112).
+      [
+        "custom string format (z.stringFormat) at the top level",
+        (fn) => z.stringFormat("fmt", (v) => fn() && v.length > 0),
+        "x",
+      ],
+      [
+        "custom string format under an object key",
+        (fn) => z.object({ a: z.stringFormat("fmt", (v) => fn() && v.length > 0) }),
+        { a: "x" },
+      ],
+      [
+        "custom string format in an array",
+        (fn) => z.array(z.stringFormat("fmt", (v) => fn() && v.length > 0)),
+        ["x"],
+      ],
+      [
+        "custom string format used as a check",
+        (fn) => z.string().check(z.stringFormat("fmt", (v) => fn() && v.length > 0)),
+        "x",
+      ],
       [
         "leaf refine under a coercion (stock runtime-islands it)",
         (fn) =>
@@ -4319,6 +4341,204 @@ head(
         () => CK.parse({ a: "", b: 1 }),
         "the frozen leaf still validates through the island",
       );
+    }
+    // The install refuses a slot that fights the write in any way, with nothing leaked, and the restore puts every
+    // slot back as it was, not only its value (third review of #112). Proxy traps on the second check's `def`: a
+    // `set` that throws, a `set` that swallows the write, a `get` that throws on the read verifying the write, a
+    // `getOwnPropertyDescriptor` that throws. The first check's `def` is plain, so a leak would show there.
+    {
+      const keep = (v: string) => v.length > 0;
+      const zodOf = (s: z.ZodType, i: number): any => (s as any)._zod.def.checks[i]._zod;
+      const refusals: [string, () => ProxyHandler<any>][] = [
+        [
+          "a set trap that throws",
+          () => ({
+            set: () => {
+              throw new Error("no write");
+            },
+          }),
+        ],
+        ["a set trap that swallows the write", () => ({ set: () => true })],
+        [
+          "a get trap that throws on the read after the write",
+          () => {
+            let armed = false;
+            return {
+              set: (t, k, v) => {
+                t[k] = v;
+                if (k === "fn") armed = true;
+                return true;
+              },
+              get: (t, k) => {
+                if (k === "fn" && armed) {
+                  armed = false;
+                  throw new Error("no read");
+                }
+                return t[k];
+              },
+            };
+          },
+        ],
+        [
+          "a getOwnPropertyDescriptor trap that throws",
+          () => ({
+            getOwnPropertyDescriptor: () => {
+              throw new Error("no descriptor");
+            },
+          }),
+        ],
+      ];
+      for (const [name, handler] of refusals) {
+        const make = (cb: () => boolean): z.ZodType => {
+          const s = z.string().refine(keep).refine(cb);
+          const z1 = zodOf(s, 1);
+          z1.def = new Proxy(z1.def, handler());
+          return s;
+        };
+        const plain = make(() => true);
+        const f0 = zodOf(plain, 0).def.fn;
+        assert.equal(plain.parse("x"), "x", `${name}: stock parses the schema`);
+        const C = compile(plain);
+        assert.ok(!C.async && !C.stock, `${name}: compiles`);
+        assert.ok(
+          zodOf(plain, 0).def.fn === f0,
+          `${name}: the plain slot reads back as the caller's function`,
+        );
+        assert.equal(C.parse("x"), "x");
+        assert.throws(
+          () => C.parse(""),
+          `${name}: the refined leaf still validates through the island`,
+        );
+        const log: string[] = [];
+        const CA = compile(make(always(log)));
+        await assert.rejects(CA.safeParseAsync("x"), $ZodAsyncError, `${name}: the same rejection`);
+        assert.equal(log.length, 1, `${name}: one call through the island`);
+        const onceLog: string[] = [];
+        const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+        await assert.rejects(CO.safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(onceLog.length, 1, `${name}: a first-call-only throw rejects`);
+      }
+      // An inherited slot is inherited again after the compile, not an own property; the wrapper was in force.
+      {
+        const inherit = (cust: z.ZodType): { def: any; fn: unknown } => {
+          const def = (cust as any)._zod.def;
+          const fn = def.fn;
+          delete def.fn;
+          Object.setPrototypeOf(def, { fn });
+          return { def, fn };
+        };
+        const cust = z.custom<string>((v) => typeof v === "string");
+        const { def, fn } = inherit(cust);
+        assert.ok(
+          cust.safeParse("x").success && !cust.safeParse(1).success,
+          "stock reads the inherited slot",
+        );
+        const C = compile(cust);
+        assert.ok(!C.stock);
+        assert.equal(C.parse("x"), "x");
+        assert.throws(() => C.parse(1));
+        assert.ok(
+          !Object.hasOwn(def, "fn") && def.fn === fn,
+          "an inherited slot is inherited again after compile, not an own property",
+        );
+        const onceLog: string[] = [];
+        const custOnce = z.custom<unknown>(once(onceLog, () => nested.parse("x")));
+        inherit(custOnce);
+        await assert.rejects(compile(custOnce).safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(
+          onceLog.length,
+          1,
+          "inherited slot: a first-call-only throw rejects after one call",
+        );
+      }
+      // An accessor slot keeps its getter and setter and answers the caller's function; a non-enumerable data slot
+      // keeps its attributes.
+      {
+        const accessor = (
+          s: z.ZodType,
+        ): { def: any; get: () => unknown; set: (v: unknown) => void } => {
+          const def = zodOf(s, 0).def;
+          let store: unknown = def.fn;
+          const get = (): unknown => store;
+          const set = (v: unknown): void => {
+            store = v;
+          };
+          Object.defineProperty(def, "fn", { get, set, configurable: true, enumerable: true });
+          return { def, get, set };
+        };
+        const s = z.string().refine(keep);
+        const { def, get, set } = accessor(s);
+        const C = compile(s);
+        assert.ok(!C.stock);
+        assert.equal(C.parse("x"), "x");
+        assert.throws(() => C.parse(""));
+        const d = Object.getOwnPropertyDescriptor(def, "fn")!;
+        assert.ok(
+          d.get === get && d.set === set && def.fn === keep,
+          "an accessor slot keeps its getter and setter and answers the caller's function",
+        );
+        const onceLog: string[] = [];
+        const sOnce = z.string().refine(once(onceLog, () => nested.parse("x")));
+        accessor(sOnce);
+        await assert.rejects(compile(sOnce).safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(
+          onceLog.length,
+          1,
+          "accessor slot: a first-call-only throw rejects after one call",
+        );
+
+        const t = z.string().refine(keep);
+        const tdef = zodOf(t, 0).def;
+        Object.defineProperty(tdef, "fn", {
+          value: keep,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+        const CT = compile(t);
+        assert.equal(CT.parse("x"), "x");
+        assert.deepEqual(
+          Object.getOwnPropertyDescriptor(tdef, "fn"),
+          { value: keep, writable: true, enumerable: false, configurable: true },
+          "a non-enumerable data slot keeps its attributes",
+        );
+      }
+      // A trap that accepted the wrapper but refuses the write back: the other slots are restored first, then a
+      // `TypeError` with the trap's error as `cause` surfaces from `compile()` (the slot it guards still holds the
+      // transparent wrapper, and a second install would read it as the caller's function).
+      {
+        const s = z
+          .string()
+          .refine(keep)
+          .refine(() => true);
+        const z1 = zodOf(s, 1);
+        const refused = new Error("restore refused");
+        let n = 0;
+        z1.def = new Proxy(z1.def, {
+          defineProperty: (t, k, d) => {
+            if (k === "fn" && ++n === 2) throw refused;
+            return Reflect.defineProperty(t, k, d);
+          },
+        });
+        const f0 = zodOf(s, 0).def.fn;
+        assert.throws(
+          () => compile(s),
+          (e: unknown) =>
+            e instanceof TypeError &&
+            (e as { cause?: unknown }).cause === refused &&
+            /refused the write back/.test(e.message),
+          "a trap that refuses the write back surfaces a TypeError with its error as cause from compile()",
+        );
+        assert.ok(
+          zodOf(s, 0).def.fn === f0,
+          "the other slot was restored before the error surfaced",
+        );
+        assert.equal(
+          s.parse("x"),
+          "x",
+          "the schema still parses on stock (the wrapper is transparent)",
+        );
+      }
     }
     // A plain function that returns a Promise is still the fast path's own signal (unrecorded), so it reaches
     // stock's async runtime and the parse succeeds; the callback runs on the fast path and again in stock's

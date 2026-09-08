@@ -257,13 +257,13 @@ function childrenOf(schema: Node): Node[] {
  * own call sites see (a container / wrapper / union `.refine`, an awaited predicate, an island's run) in a WeakSet
  * so the async entries reject after one call instead of rerunning (`rethrowCallerError` / `isPromiseSignal`).
  *
- * A callback stock's generated code calls — a leaf `.refine`, `.check`, `.superRefine`, `z.custom` predicate,
- * `overwrite` or `transform` inside an official product — was not recorded (#80): stock calls the hoisted `def.fn`
- * / `_zod.check` / `def.tx` / `def.transform` directly and reports a `Promise` from its own `throwAsync`. But those
+ * A callback stock's generated code calls — a leaf `.refine`, `.check`, `.superRefine`, `z.custom` predicate, a
+ * custom string format's predicate, `overwrite` or `transform` inside an official product — was not recorded (#80):
+ * stock calls the hoisted `def.fn` / `_zod.check` / `def.tx` / `def.transform` directly and reports a `Promise` from its own `throwAsync`. But those
  * slots are plain, writable data properties that stock's compiler reads only at compile time (`addConstant` hoists
  * the reference into the generated closure). So a wrapper installed on each such slot for the duration of the
  * `compileFn` call is captured by the generated code as a constant and stays in force at parse time, while the
- * slot itself is restored immediately, leaving the caller's schema byte-for-byte as it was. The wrapper records a
+ * slot itself is restored immediately, descriptor and all, leaving the caller's schema as it was. The wrapper records a
  * thrown `$ZodAsyncError` (and rethrows every throw unchanged), so a callback's own throw inside an official
  * product now rejects after one call like stock, and a returned `Promise` still reaches stock's `throwAsync` as
  * the unrecorded signal it is.
@@ -273,6 +273,8 @@ function childrenOf(schema: Node): Node[] {
  * value factory is a getter, not a writable slot, so its throw stays the one documented residual.
  */
 type CallbackSlot = { obj: Record<string, unknown>; key: string; fn: unknown };
+/** A slot with the wrapper installed: `desc` is the own descriptor it had before the write, `undefined` for an inherited one. */
+type InstalledSlot = CallbackSlot & { desc: PropertyDescriptor | undefined };
 
 function wrapCallback(orig: unknown): (this: unknown, ...args: unknown[]) => unknown {
   return function (this: unknown, ...args: unknown[]): unknown {
@@ -323,6 +325,11 @@ function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Nod
       add(def, "transform", def.transform);
     if (def.type === "custom" && typeof def.fn === "function" && !isAsyncFn(def.fn))
       add(def, "fn", def.fn);
+    // A custom string format (`z.stringFormat(name, fn)`, and the regex closures of `z.hostname()` / `z.hex()` /
+    // `z.hash()`) is a `string` schema whose predicate sits on its own `def.fn`, which stock's
+    // `generateStringFormatCheck` hoists like a check's (third review of #112).
+    if (def.type === "string" && typeof def.fn === "function" && !isAsyncFn(def.fn))
+      add(def, "fn", def.fn);
     if (hasCb) nodes.push(node);
     // A shape getter that throws (the #82 / #100 case) is contained like every other walk here: stock's own
     // `compileFn` reads the shape in its cycle check and counts the throw as recursion, so `officialFn`'s compile
@@ -341,31 +348,86 @@ function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Nod
 
 /**
  * Install the recording wrappers, all or none. A slot that refuses the write (a frozen or sealed `def`, a
- * non-writable property, an accessor that swallows the write, a Proxy trap) undoes the slots already wrapped and
- * answers `null`, so the caller's schema is never left partly wrapped and the caller takes the island instead,
- * whose `runIsland` records the throw without writing the schema (review of #112). Stock's `compileFn` never
- * writes a schema, so a frozen one parses on stock and must keep compiling and parsing here.
+ * non-writable property, an accessor that swallows the write, a Proxy trap that throws on the write or on the read
+ * that verifies it) undoes the slots already wrapped and answers `null`, so the caller's schema is never left partly
+ * wrapped and the caller takes the island instead, whose `runIsland` records the throw without writing the schema
+ * (review of #112). Stock's `compileFn` never writes a schema, so a frozen one parses on stock and must keep
+ * compiling and parsing here.
+ *
+ * The restore puts the slot back as it was, not only its value (third review of #112): an own data property gets
+ * its original descriptor back through `defineProperty` (value and attributes), an own accessor is handed the
+ * original through its setter (the descriptor itself was never replaced), and a slot the schema inherited is deleted
+ * again so it does not become an own property. Every slot is restored even when one of them throws (a Proxy trap
+ * that accepted the wrapper and refuses the write back): the others are put back first, then a `TypeError` naming
+ * the slot, with the trap's error as `cause`, surfaces from `compile()` (`isSlotRestoreFailure` lets it through the
+ * pure branch of `emitNode`, which swallows a refused compile), since the slot it guards holds the wrapper and
+ * silence would hide the mutation; a later install would otherwise read that wrapper as the caller's function. The
+ * wrapper is transparent to every call (it applies the original with the same receiver and arguments), so such a
+ * schema still parses like stock.
  */
+const slotRestoreFailures = new WeakSet<TypeError>();
+
+/** Whether `e` is the `TypeError` `installWrappers` throws when a slot refused the write back after the compile. */
+export function isSlotRestoreFailure(e: unknown): boolean {
+  return e instanceof TypeError && slotRestoreFailures.has(e);
+}
+
 function installWrappers(slots: CallbackSlot[]): (() => void) | null {
-  const done: CallbackSlot[] = [];
+  const done: InstalledSlot[] = [];
   const restore = (): void => {
-    for (const s of done) s.obj[s.key] = s.fn;
+    let failure: TypeError | null = null;
+    for (const s of done) {
+      try {
+        restoreSlot(s);
+      } catch (e) {
+        if (failure === null) {
+          failure = new TypeError(
+            `zod-cow: the callback slot "${s.key}" refused the write back of the caller's function after the compile; the schema still holds the recording wrapper`,
+            { cause: e },
+          );
+          slotRestoreFailures.add(failure);
+        }
+      }
+    }
+    done.length = 0;
+    if (failure) throw failure;
   };
   for (const s of slots) {
     const w = wrapCallback(s.fn);
+    let desc: PropertyDescriptor | undefined;
     try {
-      s.obj[s.key] = w;
+      desc = Object.getOwnPropertyDescriptor(s.obj, s.key);
     } catch {
       restore();
       return null;
     }
-    if (s.obj[s.key] !== w) {
+    // Recorded before the write: a write that throws or a read-back that refuses may still have taken effect.
+    done.push({ ...s, desc });
+    try {
+      s.obj[s.key] = w;
+      if (s.obj[s.key] !== w) {
+        restore();
+        return null;
+      }
+    } catch {
       restore();
       return null;
     }
-    done.push(s);
   }
   return restore;
+}
+
+function restoreSlot(s: InstalledSlot): void {
+  if (s.desc === undefined) {
+    // Inherited before the write (or absent): the write created an own property, so delete it; an inherited
+    // accessor that stored the wrapper elsewhere still answers it, so hand the original back through it then.
+    delete s.obj[s.key];
+    if (s.obj[s.key] !== s.fn) s.obj[s.key] = s.fn;
+  } else if ("get" in s.desc || "set" in s.desc) {
+    s.obj[s.key] = s.fn;
+  } else {
+    Object.defineProperty(s.obj, s.key, s.desc);
+  }
 }
 
 /**
@@ -440,7 +502,7 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // route the whole subtree to this layer's island so its `runIsland` records the throw.
   if (nodes.some(wouldRuntimeIslandCallback)) return island();
   const restore = installWrappers(slots);
-  // A slot refused the write (a frozen `def`): the island records the throw without writing the schema.
+  // A slot refused the write (a frozen `def`, a Proxy trap): the island records the throw without writing the schema.
   if (restore === null) return island();
   try {
     if (pure) {

@@ -905,17 +905,26 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    core transform node's site only under a falsy `async`, and the async island runs under `async: true`, the context
    stock's async runtime hands the subtree), so a synchronous throw of that class out of `_zod.run` is a callback's.
    A callback that stock's generated code calls (a leaf `.refine` / `.check` / `.superRefine` / `z.custom` predicate,
-   `overwrite` or `transform` inside an official product) reports its `Promise` from stock's own hoisted `throwAsync`,
-   which this layer cannot mark, so its `$ZodAsyncError` used to be indistinguishable from the signal and took the
-   fallback, running twice (#80). Stock's compiler reads those callbacks off writable `def` slots (`def.fn`,
-   `_zod.check`, `def.tx`, `def.transform`) at compile time only — it hoists the reference into the generated closure
-   with `addConstant` — so `officialFn` and `compileAssertOnlyRecording` wrap each non-async callback for the duration
-   of the `compileFn` call (`collectCallbackSlots` / `installWrappers` in `official.ts`): the generated code captures
-   the recording wrapper as its constant, the slot is restored the moment the compile returns, and the caller's schema
-   is left byte-for-byte as it was. The install is all or none: a slot that refuses the write (a frozen `def`, a
-   non-writable or accessor property, a Proxy trap) undoes the slots already wrapped and the subtree takes one of this
-   layer's islands instead, so a frozen schema, which stock's `compileFn` never writes, compiles and parses here too
-   (review of #112). The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a
+   a custom string format's predicate, `overwrite` or `transform` inside an official product) reports its `Promise`
+   from stock's own hoisted `throwAsync`, which this layer cannot mark, so its `$ZodAsyncError` used to be
+   indistinguishable from the signal and took the fallback, running twice (#80). Stock's compiler reads those
+   callbacks off writable `def` slots (`def.fn` of a check, a `custom` node or a custom string format such as
+   `z.stringFormat`, `_zod.check`, `def.tx`, `def.transform`) at compile time only — it hoists the reference into the
+   generated closure with `addConstant` — so `officialFn` and `compileAssertOnlyRecording` wrap each non-async
+   callback for the duration of the `compileFn` call (`collectCallbackSlots` / `installWrappers` in `official.ts`):
+   the generated code captures the recording wrapper as its constant, the slot is restored the moment the compile
+   returns, and the caller's schema is left as it was. The install is all or none: a slot that refuses the write (a
+   frozen `def`, a non-writable property, an accessor that swallows the write, a Proxy trap that throws on the
+   descriptor read, the write or the read that verifies it) undoes the slots already wrapped and the subtree takes one
+   of this layer's islands instead, so a frozen schema, which stock's `compileFn` never writes, compiles and parses
+   here too (review of #112). The restore puts each slot back as it was, not only its value: an own data property
+   gets its descriptor back (value and attributes), an own accessor is handed the original through its setter, and a
+   slot the schema inherited is deleted again instead of becoming an own property; every slot is restored even when
+   one throws on the write back (a Proxy trap that accepted the wrapper), and a `TypeError` naming the slot, with the
+   trap's error as `cause`, then surfaces from `compile()` (through the pure branch of `emitNode` too, which swallows
+   a refused compile but not this), since the slot it guards still holds the wrapper and a later install would read
+   it as the caller's function; the wrapper is transparent to every call, so the schema parses like stock either way
+   (third review of #112). The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a
    callback's own throw inside an official product now rejects after one call like stock, while a returned `Promise`
    still reaches stock's unrecorded `throwAsync` as the signal it is. Only a non-async callback is wrapped, so stock's
    `isAsyncFunction` still sees an async one and routes the subtree to an async island. A callback stock would run

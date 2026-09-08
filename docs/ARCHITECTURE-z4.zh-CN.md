@@ -679,14 +679,20 @@ return out;
    自己从不抛 `$ZodAsyncError`（它 check 与 parse 链上的三处抛出点只在 `async: false` 下触发，同步岛的空 context 会把
    Promise 链起来；core transform 节点的那一处只在 `async` 为假值时触发，而 async 岛以 `async: true` 运行，即 stock 的
    async runtime 交给子树的 context），所以同步地从 `_zod.run` 抛出的这个类必然来自回调。由 stock 生成代码调用的回调
-   （官方产物内部的叶子 `.refine` / `.check` / `.superRefine` / `z.custom` 谓词、`overwrite` 或 `transform`）遇到
-   `Promise` 时从 stock 自己提升（hoist）的 `throwAsync` 报告，本层无法标记它，所以那里抛出的 `$ZodAsyncError` 过去与信号
-   无法区分、走回退、回调跑两次（#80）。stock 的编译器只在编译期从可写的 `def` 槽位（`def.fn`、`_zod.check`、`def.tx`、
-   `def.transform`）读取这些回调——用 `addConstant` 把引用提升进生成的闭包——所以 `officialFn` 与
-   `compileAssertOnlyRecording` 在 `compileFn` 调用期间包装每个非 async 回调（`official.ts` 的 `collectCallbackSlots` /
-   `installWrappers`）：生成代码把记录用的包装当作常量捕获，编译一返回槽位即被恢复，调用方的 schema 逐字节保持原样。安装是
-   全有或全无的：拒绝写入的槽位（冻结的 `def`、不可写或访问器属性、Proxy 陷阱）会撤销已包装的槽位，子树改走本层的岛屿，
-   因此 stock 的 `compileFn` 从不写入的冻结 schema 在这里同样能编译和 parse（#112 review）。包装通过 `rethrowCallerError`
+   （官方产物内部的叶子 `.refine` / `.check` / `.superRefine` / `z.custom` 谓词、自定义字符串格式的谓词、`overwrite` 或
+   `transform`）遇到 `Promise` 时从 stock 自己提升（hoist）的 `throwAsync` 报告，本层无法标记它，所以那里抛出的
+   `$ZodAsyncError` 过去与信号无法区分、走回退、回调跑两次（#80）。stock 的编译器只在编译期从可写的 `def` 槽位（check、
+   `custom` 节点或 `z.stringFormat` 这类自定义字符串格式的 `def.fn`、`_zod.check`、`def.tx`、`def.transform`）读取这些
+   回调——用 `addConstant` 把引用提升进生成的闭包——所以 `officialFn` 与 `compileAssertOnlyRecording` 在 `compileFn`
+   调用期间包装每个非 async 回调（`official.ts` 的 `collectCallbackSlots` / `installWrappers`）：生成代码把记录用的包装
+   当作常量捕获，编译一返回槽位即被恢复，调用方的 schema 保持原样。安装是全有或全无的：拒绝写入的槽位（冻结的 `def`、
+   不可写属性、吞掉写入的访问器、在读描述符、写入或写后验证读取时抛出的 Proxy 陷阱）会撤销已包装的槽位，子树改走本层的
+   岛屿，因此 stock 的 `compileFn` 从不写入的冻结 schema 在这里同样能编译和 parse（#112 review）。恢复把每个槽位放回原样
+   而不只是值：自有数据属性恢复原描述符（值与特性），自有访问器通过其 setter 交回原函数，schema 继承来的槽位被再次删除
+   而不会变成自有属性；即使某个槽位在写回时抛出（接受了包装却拒绝写回的 Proxy 陷阱），其余槽位也全部恢复，然后一个点名该槽位、
+   以陷阱的错误为 `cause` 的 `TypeError` 从 `compile()` 抛出（也穿过 `emitNode` 的 pure 分支，那里吞掉被拒绝的编译但不吞
+   它），因为它守着的槽位仍持有包装，再一次安装会把这个包装当成调用方的函数读走；包装对每次调用都是透明的，所以 schema
+   无论如何都像 stock 一样 parse（#112 第三轮 review）。包装通过 `rethrowCallerError`
    记录抛出的 `$ZodAsyncError`，于是官方产物内部回调自己的抛出现在像 stock 一样在调用一次后拒绝，而返回的 `Promise` 仍到达
    stock 未记录的 `throwAsync`，保持它作为信号的身份。只包装非 async 回调，stock 的 `isAsyncFunction` 仍能看到 async 回调并把
    子树送往 async 岛。stock 会放进它自己生成代码的 runtime 岛屿里运行的回调（其上或其所在节点有 islandable 的

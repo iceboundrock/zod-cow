@@ -12,13 +12,16 @@
  *      key, an own symbol key, a counting getter, an inherited enumerable key, a present-undefined
  *      value, an own `__proto__`, a logging Proxy) or an accessor at an index with an effect on the
  *      input (a throw, a rewrite of another index, a shrink or growth of the length), an own
- *      `Symbol.iterator` or a replaced array-iterator `next`. Every read the input can observe is
- *      logged per container and compared with stock's before anything reads the outputs (tuples
- *      exactly; arrays and records through the documented prefix re-read of the copy path, the
- *      array log without stock's iterator reads, #65 and #116; objects on the `get` reads of their
- *      declared keys, and of their undeclared keys on the copy path). Where the compiled output is
- *      a copy, its key set and descriptors are compared with stock's exactly; where it is the input
- *      reference, the documented alias rule applies and only the assembly view is compared.
+ *      `Symbol.iterator` or the array iterator protocol replaced on its prototypes for the case,
+ *      each `iterator` and `next` call logged on the container the iterator walks (so a tuple's
+ *      spread matches stock's call for call and an array skeleton reaching the prototype's
+ *      iterator in any way is flagged). Every read the input can observe is logged per container
+ *      and compared with stock's before anything reads the outputs (tuples exactly; arrays and
+ *      records through the documented prefix re-read of the copy path, the array log without
+ *      stock's iterator reads, #65 and #116; objects on the `get` reads of their declared keys,
+ *      and of their undeclared keys on the copy path). Where the compiled output is a copy, its
+ *      key set and descriptors are compared with stock's exactly; where it is the input reference,
+ *      the documented alias rule applies and only the assembly view is compared.
  *   6. The `.pure` contract: when `compiled.pure` is true, the parse succeeded and the input carries
  *      no undeclared key that forces stock's assembly to copy, the output must be the input reference.
  * Extra statistics: top-level reference sharing rate (CoW hit rate) and the share of cases carrying
@@ -1260,6 +1263,62 @@ function checkOracle(): void {
     !assertDeepEqual(snapshotInput(inst.root, inst), before),
     "the state snapshot sees a freeze",
   );
+  // The replaced array iterator protocol: attributed to the decorated container the iterator
+  // walks (through a Proxy too), by every route to the prototype's iterator, silent on a fresh
+  // array and on the other instance's containers, and restored afterwards
+  const nativeValues = Array.prototype.values;
+  const plainArray = [1, 2];
+  register(plainArray, { id: 1, kind: "array", decorations: [{ kind: "replacedNext" }] });
+  const arrayInst = instantiate(plainArray, false);
+  const otherInst = instantiate(plainArray, true);
+  const array = arrayInst.root as number[];
+  const arrayLog = arrayInst.logs.get(1)!;
+  const walk = ["iterator", "next", "next", "next"];
+  withReplacedNext(arrayInst, () => {
+    assert.deepEqual([...array], [1, 2], "the spread yields the values");
+    assert(sameList(arrayLog, walk), "a spread is logged on its container");
+    for (const _ of array) {
+    }
+    Array.from(array);
+    const values = Array.prototype.values.call(array);
+    while (!values.next().done) {}
+    assert(
+      sameList(arrayLog, [...walk, ...walk, ...walk, ...walk]),
+      "for...of, Array.from and Array.prototype.values.call reach the wrapper",
+    );
+    for (const _ of [3, 4]) {
+    }
+    for (const _ of otherInst.root as number[]) {
+    }
+    assert(arrayLog.length === 16 && otherInst.logs.get(1)!.length === 0, "unattributed walks");
+  });
+  [...array];
+  assert(arrayLog.length === 16, "restored: a spread outside the install logs nothing");
+  assert(
+    Array.prototype[Symbol.iterator] === nativeValues && Array.prototype.values === nativeValues,
+    "restored: the native function object is back on both keys",
+  );
+  const proxyLog: string[] = [];
+  const proxied = new Proxy(array, {
+    get(t, k, r) {
+      proxyLog.push(`get ${String(k)}`);
+      return Reflect.get(t, k, r);
+    },
+  });
+  arrayInst.infos.set(proxied, arrayInst.infos.get(array)!);
+  withReplacedNext(arrayInst, () => [...proxied]);
+  assert(sameList(arrayLog.slice(16), walk), "a Proxy receiver is attributed to its container");
+  assert(
+    sameList(proxyLog, [
+      "get Symbol(Symbol.iterator)",
+      "get length",
+      "get 0",
+      "get length",
+      "get 1",
+      "get length",
+    ]),
+    "the traps see stock's spread reads around the wrapper",
+  );
 }
 checkOracle();
 
@@ -1335,13 +1394,16 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     const cowInst = instantiate(plain, false);
     const input = cowInst.root;
     const pristine = cowInst.effectful ? null : snapshotInput(input, cowInst, false);
-    const run = <T>(fn: () => T): T => (stockInst.replacedNext ? withReplacedNext(fn) : fn());
+    // A case with a `replacedNext` decoration parses under the replaced array iterator protocol,
+    // whose calls are attributed to the decorated containers of the instance under parse
+    const run = <T>(inst: Instance, fn: () => T): T =>
+      inst.replacedNext ? withReplacedNext(inst, fn) : fn();
 
     let stock: z.SafeParseReturnType<unknown, unknown> | null = null;
     let stockThrew: unknown = null;
     let stockDidThrow = false;
     try {
-      stock = run(() => built.schema.safeParse(stockInst.root as never));
+      stock = run(stockInst, () => built.schema.safeParse(stockInst.root as never));
     } catch (e) {
       stockThrew = e;
       stockDidThrow = true;
@@ -1351,7 +1413,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     let oursThrew: unknown = null;
     let oursDidThrow = false;
     try {
-      const r = run(() => compiled.safeParse(input));
+      const r = run(cowInst, () => compiled.safeParse(input));
       ours = r.success ? { success: true, data: r.data } : { success: false, error: r.error };
     } catch (e) {
       oursThrew = e;

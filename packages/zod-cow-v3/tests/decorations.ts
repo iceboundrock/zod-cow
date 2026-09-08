@@ -6,13 +6,14 @@
  * keys, a record, an array, a tuple) and which decorations it carries (a declared key defined
  * non-enumerable, an own symbol key, a counting getter, an inherited enumerable key, an own
  * `__proto__` data property, a logging Proxy, an accessor at an array index with an effect on the
- * input, an own `Symbol.iterator`, a replaced array-iterator `next`). The plain tree is then
- * instantiated twice, once for stock and once for the compiled parser (`instantiate`): an
- * accessor or a Proxy does not survive `structuredClone`, and both parsers must see the same
- * decorations. Each instance keeps one ordered event log per decorated container (the reads of
- * its accessors and Proxy traps, its iterator calls), which the runner compares against stock's
- * before anything reads the outputs, since the compiled output may hold an input container by
- * reference and every later inspection would log again.
+ * input, an own `Symbol.iterator`, the array iterator protocol replaced on its prototypes for the
+ * case with wrappers that log each `iterator` and `next` call on the container the iterator
+ * walks). The plain tree is then instantiated twice, once for stock and once for the compiled
+ * parser (`instantiate`): an accessor or a Proxy does not survive `structuredClone`, and both
+ * parsers must see the same decorations. Each instance keeps one ordered event log per decorated
+ * container (the reads of its accessors and Proxy traps, its iterator calls), which the runner
+ * compares against stock's before anything reads the outputs, since the compiled output may hold
+ * an input container by reference and every later inspection would log again.
  *
  * The module also holds the two views the comparison needs: `snapshotInput` (the descriptor-level
  * state of an instance, for the mutation check; a Proxy is snapshotted through its target, an
@@ -138,7 +139,11 @@ export interface Instance {
   prototypes: WeakSet<object>;
   /** Whether a getter or trap effect may have mutated the instance during a parse */
   effectful: boolean;
-  /** Whether the case replaces the array iterator's `next` around each parse */
+  /**
+   * Whether the case replaces the array iterator protocol on its prototypes around each parse
+   * (`withReplacedNext`), logging `iterator` and `next` on the decorated container each iterator
+   * walks
+   */
   replacedNext: boolean;
   /**
    * Whether accessor and trap effects are live: the runner disarms both instances after the
@@ -150,24 +155,56 @@ export interface Instance {
 
 const AIP = Object.getPrototypeOf([][Symbol.iterator]()) as { next: () => IteratorResult<unknown> };
 const NATIVE_NEXT_DESC = Object.getOwnPropertyDescriptor(AIP, "next")!;
-const NATIVE_NEXT = NATIVE_NEXT_DESC.value as () => IteratorResult<unknown>;
+const NATIVE_NEXT = NATIVE_NEXT_DESC.value as (this: unknown) => IteratorResult<unknown>;
+// `Array.prototype[Symbol.iterator]` and `Array.prototype.values` are one function object
+const NATIVE_ITERATOR_DESC = Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator)!;
+const NATIVE_VALUES_DESC = Object.getOwnPropertyDescriptor(Array.prototype, "values")!;
+const NATIVE_VALUES = NATIVE_VALUES_DESC.value as (this: unknown) => object;
 
 /**
- * Replace `%ArrayIteratorPrototype%.next` with a delegating wrapper for the duration of `fn`.
- * Stock's spread and the tuple skeleton's spread (stock's own) consult it, and so does stock's
- * `for...of` over its own results, so the count is not comparable; the outcome is.
+ * Replace the array iterator protocol on its prototypes for the duration of `fn`, attributing
+ * every call to the decorated container of `inst` it walks: `Array.prototype[Symbol.iterator]`
+ * (and `values`, the same function) hands out the native iterator and, when its receiver is a
+ * decorated container (a Proxy included, since the receiver is what the call was made on), logs
+ * `iterator` on that container and remembers which container the iterator belongs to;
+ * `%ArrayIteratorPrototype%.next` logs `next` on the container whose iterator it advances and
+ * delegates. Stock's spread of an array or tuple and the tuple skeleton's spread (stock's own)
+ * run through both, so a tuple's log holds the same `iterator` and `next` entries on both sides,
+ * while the array skeleton reads by index (#116): an array skeleton that reached the prototype's
+ * iterator in any way (a spread, a `for...of`, `Array.from`, `Array.prototype.values.call`, which
+ * an own `Symbol.iterator` does not see) logs on the compiled side, where the runner flags it.
+ * Stock's `for...of` over its own result arrays and the engine's loops walk fresh arrays no
+ * instance knows, so they log nothing. A `next` on an iterator over a container of the other
+ * instance is not logged either: the two parses run under separate installs.
  */
-export function withReplacedNext<T>(fn: () => T): T {
-  Object.defineProperty(AIP, "next", {
-    ...NATIVE_NEXT_DESC,
-    value: function next(this: unknown) {
-      return NATIVE_NEXT.call(this);
-    },
+export function withReplacedNext<T>(inst: Instance, fn: () => T): T {
+  const owners = new WeakMap<object, string[]>();
+  const values = function values(this: unknown) {
+    const iterator = NATIVE_VALUES.call(this);
+    const info = typeof this === "object" && this !== null ? inst.infos.get(this) : undefined;
+    if (info !== undefined) {
+      info.log.push("iterator");
+      owners.set(iterator, info.log);
+    }
+    return iterator;
+  };
+  const next = function next(this: unknown) {
+    const log = typeof this === "object" && this !== null ? owners.get(this) : undefined;
+    if (log !== undefined) log.push("next");
+    return NATIVE_NEXT.call(this);
+  };
+  Object.defineProperty(Array.prototype, Symbol.iterator, {
+    ...NATIVE_ITERATOR_DESC,
+    value: values,
   });
+  Object.defineProperty(Array.prototype, "values", { ...NATIVE_VALUES_DESC, value: values });
+  Object.defineProperty(AIP, "next", { ...NATIVE_NEXT_DESC, value: next });
   try {
     return fn();
   } finally {
     Object.defineProperty(AIP, "next", NATIVE_NEXT_DESC);
+    Object.defineProperty(Array.prototype, "values", NATIVE_VALUES_DESC);
+    Object.defineProperty(Array.prototype, Symbol.iterator, NATIVE_ITERATOR_DESC);
   }
 }
 
@@ -375,6 +412,8 @@ function decorateArray(
         break;
       }
       case "replacedNext":
+        // Installed around the parse (`withReplacedNext`): the replacement is global, so every
+        // decorated container of the instance is attributed, this one included
         inst.replacedNext = true;
         break;
       case "arrayProxy": {

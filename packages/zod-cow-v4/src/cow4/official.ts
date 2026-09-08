@@ -339,11 +339,33 @@ function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Nod
   return { slots, nodes };
 }
 
-function installWrappers(slots: CallbackSlot[]): () => void {
-  for (const s of slots) s.obj[s.key] = wrapCallback(s.fn);
-  return () => {
-    for (const s of slots) s.obj[s.key] = s.fn;
+/**
+ * Install the recording wrappers, all or none. A slot that refuses the write (a frozen or sealed `def`, a
+ * non-writable property, an accessor that swallows the write, a Proxy trap) undoes the slots already wrapped and
+ * answers `null`, so the caller's schema is never left partly wrapped and the caller takes the island instead,
+ * whose `runIsland` records the throw without writing the schema (review of #112). Stock's `compileFn` never
+ * writes a schema, so a frozen one parses on stock and must keep compiling and parsing here.
+ */
+function installWrappers(slots: CallbackSlot[]): (() => void) | null {
+  const done: CallbackSlot[] = [];
+  const restore = (): void => {
+    for (const s of done) s.obj[s.key] = s.fn;
   };
+  for (const s of slots) {
+    const w = wrapCallback(s.fn);
+    try {
+      s.obj[s.key] = w;
+    } catch {
+      restore();
+      return null;
+    }
+    if (s.obj[s.key] !== w) {
+      restore();
+      return null;
+    }
+    done.push(s);
+  }
+  return restore;
 }
 
 /**
@@ -369,12 +391,14 @@ function wouldRuntimeIslandCallback(node: Node): boolean {
 /**
  * The pure-subtree assertOnly validator (`emitNode`'s pure branch) with the same callback recording (#80).
  * Throws whatever `compileFn` throws, so the caller keeps its `ZodCompileAsyncError` handling; the wrappers are
- * always restored. A pure subtree that compiles here has no islandable refusal (it compiled), so no island check
- * is needed on the success path; a callback stock would runtime-island is caught by `pureSubtreeNeedsIsland`,
- * which the caller consults first.
+ * always restored. Answers `null` when a slot refuses the wrapper (a frozen `def`), so the caller falls through to
+ * `officialFn`, which islands the subtree. A pure subtree that compiles here has no islandable refusal (it
+ * compiled), so no island check is needed on the success path; a callback stock would runtime-island is caught by
+ * `pureSubtreeNeedsIsland`, which the caller consults first.
  */
-export function compileAssertOnlyRecording(schema: Node): Fn {
+export function compileAssertOnlyRecording(schema: Node): Fn | null {
   const restore = installWrappers(collectCallbackSlots(schema).slots);
+  if (restore === null) return null;
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } finally {
@@ -416,6 +440,8 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // route the whole subtree to this layer's island so its `runIsland` records the throw.
   if (nodes.some(wouldRuntimeIslandCallback)) return island();
   const restore = installWrappers(slots);
+  // A slot refused the write (a frozen `def`): the island records the throw without writing the schema.
+  if (restore === null) return island();
   try {
     if (pure) {
       try {
@@ -451,6 +477,7 @@ export function officialValidator(schema: Node): Fn | null {
   // Record a plain-function callback's own `$ZodAsyncError` in the validator too (#80); `validate` is sync,
   // so the result parity here is a thrown error either way, but the wrapper keeps the two paths consistent.
   const restore = installWrappers(collectCallbackSlots(schema).slots);
+  if (restore === null) return null; // a frozen `def`: `validate` runs the skeleton, whose subtree islands
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } catch {

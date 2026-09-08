@@ -46,8 +46,11 @@ export function throwAsync(): never {
  * public, so a callback can throw it itself (a nested sync parse of an async schema does), and such a throw is the
  * caller's: stock rejects with it after one call. The async entries of `compile()` rethrow a recorded error and
  * treat only an unrecorded one as the fast path's Promise signal (fifth review of #76). A callback that stock's own
- * generated code calls (inside an official product) is not recorded: its Promise signal comes from stock's `throwAsync`,
- * which this layer cannot mark, so both stay the signal there (#80).
+ * generated code calls (inside an official product) reports a returned Promise from stock's `throwAsync`, which this
+ * layer cannot mark, so that stays the signal; its own throw is recorded too, through the wrapper
+ * `collectCallbackSlots` / `installWrappers` (`official.ts`) put on the callback's `def` slot for the duration of the
+ * compile (#80). The one callback throw still unrecorded is a `.default()` / `.prefault()` value factory, a getter
+ * no wrapper reaches, which still takes the fallback.
  */
 const callerAsyncErrors = new WeakSet<object>();
 

@@ -4208,6 +4208,118 @@ head(
       );
       assert.equal(log.length, 1, "superRefine: one call, no rerun (#80)");
     }
+    // The wrappers live for the duration of the compile only: every slot stock's compiler reads (`def.fn`,
+    // `_zod.check`, `def.tx`, `def.transform`) reads back as the caller's own function once `compile()` returned,
+    // while the compiled product keeps recording through the wrapper it captured (review of #112).
+    {
+      const f = (v: string) => v.length > 0;
+      const g = (_v: unknown) => {};
+      const tx = (v: string) => v;
+      const tr = (v: string) => v;
+      const cust = (v: unknown) => typeof v === "string";
+      const S = z.object({
+        a: z.string().refine(f).superRefine(g).overwrite(tx),
+        b: z.string().transform(tr),
+        c: z.custom<string>(cust),
+      });
+      const slotsOf = (): unknown[] => {
+        const a = (S.shape.a as any)._zod.def.checks;
+        return [
+          a[0]._zod.def.fn,
+          a[1]._zod.check,
+          a[2]._zod.def.tx,
+          (S.shape.b as any)._zod.def.out._zod.def.transform,
+          (S.shape.c as any)._zod.def.fn,
+        ];
+      };
+      const before = slotsOf();
+      // superRefine stores a closure of its own around `g` on `_zod.check`; the other slots hold the functions as given
+      assert.ok(before.every((x) => typeof x === "function"));
+      assert.ok(before[0] === f && before[2] === tx && before[3] === tr && before[4] === cust);
+      const C = compile(S);
+      assert.ok(!C.async && !C.stock);
+      assert.deepEqual(C.parse({ a: "x", b: "x", c: "x" }), { a: "x", b: "x", c: "x" });
+      assert.deepEqual(C.validate({ a: "x", b: "x", c: "x" }), { a: "x", b: "x", c: "x" });
+      const after = slotsOf();
+      for (let i = 0; i < before.length; i++)
+        assert.ok(
+          after[i] === before[i],
+          `slot ${i} reads back as the caller's function after compile`,
+        );
+    }
+    // The install is all or none (review of #112): a slot that refuses the wrapper (a frozen `def`, which stock's
+    // `compileFn` never writes, so such a schema parses on stock) undoes the slots already wrapped, nothing leaks
+    // into the caller's schema, `compile()` does not throw, and the subtree takes this layer's island, whose
+    // `runIsland` records the callback's own throw. Both orders: the frozen slot after a writable one (the
+    // writable one is wrapped, then undone) and before it (nothing was wrapped).
+    {
+      const keep = (v: string) => v.length > 0;
+      const frozenPair = (cb: () => boolean, frozenAt: 0 | 1): z.ZodType => {
+        const s =
+          frozenAt === 0 ? z.string().refine(cb).refine(keep) : z.string().refine(keep).refine(cb);
+        Object.freeze((s as any)._zod.def.checks[frozenAt]._zod.def);
+        return s;
+      };
+      for (const frozenAt of [0, 1] as const) {
+        const plain = frozenPair(() => true, frozenAt);
+        const fns = (plain as any)._zod.def.checks.map((c: any) => c._zod.def.fn);
+        const C = compile(plain);
+        assert.ok(!C.async && !C.stock, `frozen def at ${frozenAt}: compiles like stock`);
+        assert.deepEqual(
+          (plain as any)._zod.def.checks.map((c: any) => c._zod.def.fn),
+          fns,
+          `frozen def at ${frozenAt}: no wrapper leaks into the schema`,
+        );
+        assert.equal(C.parse("x"), "x");
+        assert.equal(C.validate("x"), "x");
+        assert.equal(plain.parse("x"), "x", "stock parses the frozen schema too");
+        const positions: [string, (s: z.ZodType) => z.ZodType, unknown][] = [
+          ["top level", (s) => s, "x"],
+          ["under an object key", (s) => z.object({ a: s }), { a: "x" }],
+          ["in an array", (s) => z.array(s), ["x"]],
+        ];
+        for (const [name, make, input] of positions) {
+          const log: string[] = [];
+          const CA = compile(make(frozenPair(always(log), frozenAt)));
+          await assert.rejects(
+            CA.safeParseAsync(input),
+            $ZodAsyncError,
+            `${name}: the same rejection`,
+          );
+          assert.equal(
+            log.length,
+            1,
+            `${name}, frozen def at ${frozenAt}: one call through the island`,
+          );
+          const onceLog: string[] = [];
+          const CO = compile(
+            make(
+              frozenPair(
+                once(onceLog, () => nested.parse("x")),
+                frozenAt,
+              ),
+            ),
+          );
+          await assert.rejects(CO.safeParseAsync(input), $ZodAsyncError);
+          assert.equal(
+            onceLog.length,
+            1,
+            `${name}, frozen def at ${frozenAt}: a first-call-only throw rejects`,
+          );
+        }
+      }
+      // The container above a frozen leaf keeps its skeleton and the CoW reference.
+      const CK = compile(z.object({ a: frozenPair(() => true, 1), b: z.number() }));
+      const input = { a: "x", b: 1 };
+      assert.ok(
+        CK.parse(input) === input,
+        "the object above a frozen leaf keeps the CoW reference",
+      );
+      assert.throws(
+        () => CK.parse({ a: "", b: 1 }),
+        "the frozen leaf still validates through the island",
+      );
+    }
     // A plain function that returns a Promise is still the fast path's own signal (unrecorded), so it reaches
     // stock's async runtime and the parse succeeds; the callback runs on the fast path and again in stock's
     // runtime (the documented failure-path duplicate), which is deliberately unchanged.

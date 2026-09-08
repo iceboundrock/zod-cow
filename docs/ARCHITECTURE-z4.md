@@ -912,7 +912,10 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    with `addConstant` — so `officialFn` and `compileAssertOnlyRecording` wrap each non-async callback for the duration
    of the `compileFn` call (`collectCallbackSlots` / `installWrappers` in `official.ts`): the generated code captures
    the recording wrapper as its constant, the slot is restored the moment the compile returns, and the caller's schema
-   is left byte-for-byte as it was. The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a
+   is left byte-for-byte as it was. The install is all or none: a slot that refuses the write (a frozen `def`, a
+   non-writable or accessor property, a Proxy trap) undoes the slots already wrapped and the subtree takes one of this
+   layer's islands instead, so a frozen schema, which stock's `compileFn` never writes, compiles and parses here too
+   (review of #112). The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a
    callback's own throw inside an official product now rejects after one call like stock, while a returned `Promise`
    still reaches stock's unrecorded `throwAsync` as the signal it is. Only a non-async callback is wrapped, so stock's
    `isAsyncFunction` still sees an async one and routes the subtree to an async island. A callback stock would run

@@ -36,6 +36,9 @@ export interface Compiled<T extends z.ZodTypeAny> {
   /**
    * Static purity: true means this schema always returns the input reference when validation succeeds
    * (strip-mode objects assume the input carries no extra keys; at runtime the reference comparison is always what counts).
+   * A tuple is never pure (its output is the fresh array of stock's own spread, #65), nor is an array
+   * whose element schema admits `undefined` (an element that reads as `undefined` is copied, #117),
+   * nor a `readonly` over a schema that may rebuild in stock (the frozen value is then a copy, #27).
    */
   readonly pure: boolean;
   /**

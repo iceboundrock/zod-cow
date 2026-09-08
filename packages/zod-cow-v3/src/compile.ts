@@ -1709,6 +1709,65 @@ function build(def: any): Validator {
 /* ════════════════════════════ Static purity analysis ════════════════════════════ */
 
 /**
+ * Whether `undefined` may pass this schema's validation, decided from the structure alone (a
+ * `refine` predicate is never run at compile time, so a refinement answers as its inner schema;
+ * an unknown node kind answers yes). Used by `isStaticPure` for the element of an array: the
+ * array skeleton copies at an element that reads as `undefined` (#117), so an array whose element
+ * admits `undefined` cannot promise the input reference (#66).
+ */
+function mayAcceptUndefined(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>()): boolean {
+  if (seen.has(schema)) return false; // a z.lazy cycle runs through a container, which rejects undefined
+  seen.add(schema);
+  const def: any = (schema as any)._def;
+  switch (def.typeName) {
+    case "ZodUndefined":
+    case "ZodVoid":
+    case "ZodAny":
+    case "ZodUnknown":
+    case "ZodOptional":
+    case "ZodDefault":
+    case "ZodCatch":
+      return true;
+    case "ZodLiteral":
+      return def.value === undefined;
+    case "ZodString":
+    case "ZodNumber":
+    case "ZodBoolean":
+    case "ZodBigInt":
+    case "ZodSymbol":
+    case "ZodNull":
+    case "ZodNever":
+    case "ZodNaN":
+    case "ZodDate":
+    case "ZodEnum":
+    case "ZodNativeEnum":
+    case "ZodObject":
+    case "ZodArray":
+    case "ZodTuple":
+    case "ZodRecord":
+    case "ZodMap":
+    case "ZodSet":
+      return false;
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return (def.options as z.ZodTypeAny[]).some((o) => mayAcceptUndefined(o, seen));
+    case "ZodEffects":
+      return def.effect.type === "refinement" ? mayAcceptUndefined(def.schema, seen) : true;
+    case "ZodNullable":
+    case "ZodReadonly":
+      return mayAcceptUndefined(def.innerType, seen);
+    case "ZodPipeline":
+      return mayAcceptUndefined(def.in, seen);
+    case "ZodBranded":
+      return mayAcceptUndefined(def.type, seen);
+    case "ZodLazy":
+      return mayAcceptUndefined(resolveLazy(def), seen);
+    default:
+      return true;
+  }
+}
+
+/**
  * Static purity: whether this schema "can never possibly produce a new value".
  * A pure schema's parse always returns the input reference (strip mode assumes the input carries no extra keys).
  * Used for documentation and test assertions, not part of the runtime logic (at runtime the reference comparison is what counts).
@@ -1745,7 +1804,10 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
         isStaticPure(c, seen),
       );
     case "ZodArray":
-      return isStaticPure(def.type, seen);
+      // An element that reads as `undefined` is copied (a hole and an explicit member are told
+      // apart only by a `has` stock never makes, #117), so the promise holds only where
+      // `undefined` cannot pass the element schema (#66)
+      return !mayAcceptUndefined(def.type) && isStaticPure(def.type, seen);
     case "ZodTuple":
       // The tuple skeleton's output is the fresh array of stock's own spread, never the input (#65)
       return false;

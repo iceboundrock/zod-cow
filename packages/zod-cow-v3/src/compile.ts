@@ -1576,10 +1576,11 @@ const cache = new WeakMap<z.ZodTypeAny, Validator>();
  * schema, and no parse calls the getter. Stock calls it on every parse; zod 4's own compiler
  * resolves it once as well (on the first parse) and caches the result. The getter is the one piece
  * of user code `compile()` runs, once, and a getter whose answer changes over time is pinned to
- * its first answer (documented under known limitations).
+ * its first answer (documented under known limitations). Exported for the differential fuzzer,
+ * whose `.pure` oracle must judge the schema the answer was decided on.
  */
 const lazyMemo = new WeakMap<object, z.ZodTypeAny>();
-function resolveLazy(def: any): z.ZodTypeAny {
+export function resolveLazy(def: any): z.ZodTypeAny {
   let inner = lazyMemo.get(def);
   if (inner === undefined) {
     inner = (def.getter as () => z.ZodTypeAny)();

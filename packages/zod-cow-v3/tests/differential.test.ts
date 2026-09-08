@@ -56,6 +56,7 @@ import {
 const noCodegen = process.argv.includes("--no-codegen");
 if (noCodegen) process.env.ZC_V3_CODEGEN = "0";
 const { compile } = await import("../src/index.js");
+const { resolveLazy } = await import("../src/compile.js");
 
 /* ─────────────────────────── deterministic RNG ─────────────────────────── */
 
@@ -286,7 +287,9 @@ function compareOutputs(
  * enumerable key (own or inherited, stock's `for...in`), an own `__proto__` data property on an
  * object or record (dropped by stock's assembly), an inherited enumerable key on a record
  * (written as own). Judged from the schema and the parsed input, every union option included,
- * since an option earlier than the one the input was generated for may accept it.
+ * since an option earlier than the one the input was generated for may accept it. A `z.lazy` node
+ * is read through the engine's memoized `resolveLazy`, so the oracle judges the schema `.pure` was
+ * decided on and the getter is not called again (the generator emits no lazy node today).
  */
 function mayForceCopy(schema: z.ZodTypeAny, value: unknown): boolean {
   const def: any = (schema as any)._def;
@@ -340,7 +343,7 @@ function mayForceCopy(schema: z.ZodTypeAny, value: unknown): boolean {
     case "ZodBranded":
       return mayForceCopy(def.type, value);
     case "ZodLazy":
-      return mayForceCopy(def.getter(), value);
+      return mayForceCopy(resolveLazy(def), value);
     default:
       return false;
   }
@@ -1489,7 +1492,7 @@ if (refSharedSuccess > 0) {
  * The share of cases whose input carries each decoration. At the default size or above every
  * kind must reach the floor, so a generator change cannot silently stop producing one (#66).
  */
-const DECORATION_KINDS: (DecorationKind | "ownProto")[] = [
+const DECORATION_KINDS: DecorationKind[] = [
   "nonEnumDeclared",
   "symbolKey",
   "getter",

@@ -440,15 +440,13 @@ test("object copy path: stock's output assembly from the validated values (non-e
     assert.deepEqual(Object.keys(C.parse(presentUndef) as any), ["a", "b", "c"]);
     assert.deepEqual(Object.keys(M.parse(presentUndef) as any), ["a", "b", "c"]);
     assert.deepEqual(Object.keys(C.parse({ a: "x" }) as any), ["a", "b"]);
-    // An undeclared own symbol key is dropped by the copy like stock; a clean input carrying one
-    // is copied as well since #65 (the own-symbol probe, tested on its own below)
+    // An undeclared own symbol key is dropped by the copy like stock (the clean path keeps it by reference)
     const sym = Symbol("s");
     const withSym: any = { a: "x", [sym]: 1 };
     assert.deepEqual(Object.getOwnPropertySymbols(C.parse(withSym) as any), []);
     assert.deepEqual(Object.getOwnPropertySymbols(M.parse(withSym) as any), []);
     const cleanSym: any = { a: "x", b: "y", [sym]: 1 };
-    assert.notEqual(C.parse(cleanSym), cleanSym);
-    assert.deepEqual(C.parse(cleanSym), { a: "x", b: "y" });
+    assert.equal(C.parse(cleanSym), cleanSym);
     // A getter is read once on the copy path, as stock reads each shape key once
     let reads = 0;
     const g: any = {
@@ -1352,7 +1350,7 @@ test("array / tuple copy path: the copy is assembled from the element results, a
   assert.equal(compile(A).parse(clean), clean);
 });
 
-test("own-symbol probe: a clean object or record with an undeclared own symbol key is copied without it, like stock's rebuild", () => {
+test("no own-symbol probe (documented): a clean object or record keeps an undeclared own symbol key by reference, the copy path drops it like stock", () => {
   const sym = Symbol("s");
   const withEnum = () => ({ a: "x", [sym]: 1 });
   const withHidden = () => {
@@ -1369,41 +1367,29 @@ test("own-symbol probe: a clean object or record with an undeclared own symbol k
   ];
   for (const [label, S] of schemas) {
     for (const mk of [withEnum, withHidden]) {
-      const stockOut = S.parse(mk());
-      assert.deepEqual(Object.getOwnPropertySymbols(stockOut), [], label);
+      // Stock's assembly never sees a symbol key
+      assert.deepEqual(Object.getOwnPropertySymbols(S.parse(mk())), [], label);
+      // The clean path returns the input as it is, symbol key included: the divergence the
+      // README documents for this line (the probe would cost about 40 ns per clean object)
       const input = mk();
-      const out = compile(S).parse(input);
-      assert.notEqual(out, input, label);
+      assert.equal(compile(S).parse(input), input, label);
+      // A copy made for any other reason is stock's assembly and drops the key
+      const dirtyIn = Object.assign(mk(), { a: "  x  " });
+      const T = z.object({ a: z.string().trim() });
+      const D =
+        S instanceof z.ZodRecord
+          ? z.record(S._def.keyType, z.string().trim())
+          : S._def.unknownKeys === "strict"
+            ? T.strict()
+            : S._def.unknownKeys === "passthrough"
+              ? T.passthrough()
+              : T;
+      const out = compile(D).parse(dirtyIn);
+      assert.notEqual(out, dirtyIn, label);
       assert.deepEqual(Object.getOwnPropertySymbols(out), [], label);
-      assert.deepEqual(out, stockOut, label);
-      assert.equal(input[sym], 1, label); // input lossless
+      assert.deepEqual(out, D.parse(dirtyIn), label);
     }
-    // Without a symbol key the clean input keeps its reference
-    const plain = { a: "x" };
-    assert.equal(compile(S).parse(plain), plain, label);
-    assert.equal(compile(S).pure, true, label);
   }
-  // The symbol key on a nested object makes the parent dirty too; the sibling stays shared
-  const N = z.object({ n: z.object({ a: z.string() }), m: z.object({ a: z.string() }) });
-  const nin = { n: withEnum(), m: { a: "y" } };
-  const nout = compile(N).parse(nin);
-  assert.notEqual(nout, nin);
-  assert.notEqual(nout.n, nin.n);
-  assert.equal(nout.m, nin.m);
-  assert.deepEqual(nout, N.parse(nin));
-  // A record whose probe fires writes every pair from a single read of its getter
-  let reads = 0;
-  const rin = {
-    get a() {
-      reads++;
-      return "x";
-    },
-    b: "y",
-    [sym]: 1,
-  };
-  const rout = compile(z.record(z.string())).parse(rin);
-  assert.deepEqual(rout, { a: "x", b: "y" });
-  assert.equal(reads, 1);
 });
 
 test("record: an own __proto__ is dropped, a key transformed to __proto__ is skipped, an inherited enumerable key is written as own", () => {

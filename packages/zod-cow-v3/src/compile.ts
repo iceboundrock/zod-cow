@@ -857,9 +857,7 @@ function makeObject(def: any): Validator {
       }
     }
     if (anyFailed) return FAILED;
-    // Pure case: === data, the original reference goes straight through, once the input is proven
-    // to carry no own symbol key, which the assembly below drops as stock's does (#65)
-    if (!dirty && Object.getOwnPropertySymbols(data).length === 0) return data;
+    if (!dirty) return data; // Pure case: === data, the original reference goes straight through
 
     // Stock's output assembly (`mergeObjectSync`): the shape keys in shape order, a key written when
     // its value is defined or the key is present on the input (`in`, as stock tests it; the flags
@@ -1074,9 +1072,8 @@ function makeRecord(def: any): Validator {
     // path returns the input by reference; the first forced change rebuilds the clean prefix in
     // order and every later pair is written after it, so a transformed key that collides with a
     // later entry is overwritten by that entry as in stock. Stock's rebuild mode starts out dirty
-    // and writes every pair, and so does an input carrying an own symbol key, which `for...in`
-    // never sees and stock's assembly therefore drops (#65).
-    let dirty = ctx.force || Object.getOwnPropertySymbols(data).length !== 0;
+    // and writes every pair. No own-symbol probe runs (see `genObject` in codegen.ts, #65).
+    let dirty = ctx.force;
     let out: any = dirty ? {} : data;
     let anyFailed = false;
     for (const k in data) {

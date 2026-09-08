@@ -38,7 +38,6 @@ export const CODEGEN_AVAILABLE: boolean = (() => {
 })();
 
 const hop = Object.prototype.hasOwnProperty;
-const ownSymbols = Object.getOwnPropertySymbols;
 
 /** Compile-time environment of one generated function: named constants handed in as parameters */
 class Gen {
@@ -256,9 +255,10 @@ function slotBlock(
  * does (inherited enumerable keys included, an `undefined` value dropped). The strip / strict
  * probe is stock's `for...in` as well, so an inherited enumerable key counts as undeclared. In
  * stock's rebuild mode (`ctx.force`, below a readonly or a fired default) the skeleton starts out
- * dirty and always takes that assembly. The clean path returns the input only after proving it
- * carries no own symbol key (`Object.getOwnPropertySymbols`), which the assembly drops as stock's
- * does (#65); a copy needs no probe, since it is built from the locals.
+ * dirty and always takes that assembly. The clean path runs no own-symbol probe: an undeclared own
+ * symbol key survives it by reference where stock's assembly drops it, a documented divergence of
+ * this line (#65; `Object.getOwnPropertySymbols` costs about 40 ns per object, the whole clean
+ * cost of a small object, and a symbol key cannot come from a serialized input).
  */
 export function genObject(spec: ObjectSpec): Validator {
   const g = new Gen();
@@ -324,7 +324,7 @@ export function genObject(spec: ObjectSpec): Validator {
     ${dropOwnProto}
     ${probe}
     ${spec.mode === "strict" ? "if (anyFailed) return FAILED;" : ""}
-    if (!dirty && ownSymbols(data).length === 0) return data;
+    if (!dirty) return data;
     const out = {};
     ${assembly.join("\n    ")}
     ${extrasAppend}
@@ -456,7 +456,6 @@ function build(
   const factory = new Function(
     "FAILED",
     "hop",
-    "ownSymbols",
     "isObjectType",
     "pushIssue",
     "pushInvalidType",
@@ -467,7 +466,6 @@ function build(
   return factory(
     FAILED,
     hop,
-    ownSymbols,
     isObjectType,
     pushIssue,
     pushInvalidType,

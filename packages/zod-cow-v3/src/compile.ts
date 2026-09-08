@@ -1009,14 +1009,15 @@ function makeTuple(def: any): Validator {
       });
       return FAILED;
     }
-    // Same algorithm as the generated skeleton: every slot's result is held in `vals` (the
-    // generated skeleton holds them in locals) and `vals` is the output whenever the tuple is
-    // dirty, so no element is read twice on any path (#65)
+    // Same algorithm as the generated skeleton: every element is read into `vals` (the generated
+    // skeleton reads it into a local) before any slot is parsed, `vals[i]` then takes the slot's
+    // result and `vals` is the output whenever the tuple is dirty, so no element is read twice on
+    // any path (#65)
     const vals: any[] = new Array(n);
     let dirty = ctx.force; // stock's rebuild mode: the copy from the start
-    if (data.length > n) {
-      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to
-      // them; stock's spread reads the extra elements once, so they are read here too
+    const tooBig = data.length > n;
+    if (tooBig) {
+      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
       pushIssue(ctx, data, em, {
         code: "too_big",
         maximum: n,
@@ -1025,11 +1026,16 @@ function makeTuple(def: any): Validator {
         type: "array",
       });
       dirty = true;
-      for (let i = n; i < data.length; i++) data[i];
     }
+    // Every element is read here, in ascending order and the excess elements of a too-long input
+    // included, where stock's `[...ctx.data]` reads them (after the length check and its issue,
+    // before any item runs), so a getter that runs while a slot is parsed cannot change what a
+    // later slot sees (review of #115)
+    for (let i = 0; i < n; i++) vals[i] = data[i];
+    if (tooBig) for (let i = n; i < data.length; i++) data[i];
     let anyFailed = false;
     for (let i = 0; i < n; i++) {
-      const inVal = data[i];
+      const inVal = vals[i];
       let outVal: any;
       if (eager) {
         ctx.path.push(i);

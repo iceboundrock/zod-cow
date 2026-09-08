@@ -412,11 +412,14 @@ export interface TupleSpec {
 
 /**
  * Generated tuple skeleton (the closure `makeTuple` in compile.ts), one unrolled block per slot.
- * Every slot's result is held in a local (`v0`, `v1`, …) and the copy is an array literal of
- * those locals, so no element is read twice on any path (#65): a too-long input (too_big, dirty
- * like stock, whose spread reads the extra elements once too) and stock's rebuild mode take the
- * same assembly. A hole reads as undefined, is parsed as such and makes the tuple dirty, since
- * stock's spread turns it into an own `undefined` slot.
+ * Every element is read into a local (`v0`, `v1`, …) before any slot is parsed, in ascending
+ * order and the excess elements of a too-long input included, where stock's `[...ctx.data]` reads
+ * them (after the length check and its too_big issue, before any item runs), so a getter that
+ * runs while a slot is parsed cannot change what a later slot sees (review of #115). Each local
+ * then takes its slot's result and the copy is an array literal of the locals, so no element is
+ * read twice on any path (#65): a too-long input (too_big, dirty like stock) and stock's rebuild
+ * mode take the same assembly. A hole reads as undefined, is parsed as such and makes the tuple
+ * dirty, since stock's spread turns it into an own `undefined` slot.
  */
 export function genTuple(spec: TupleSpec): Validator {
   const g = new Gen();
@@ -425,12 +428,12 @@ export function genTuple(spec: TupleSpec): Validator {
   const slots = spec.items.map((item, i) => {
     const V = `v${i}`;
     const hole = `if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;`;
-    return `{ const inVal = data[${i}]; ${slotBlock(
+    return `{ const inVal = ${V}; ${slotBlock(
       g,
       item,
       spec,
       String(i),
-      (holeTest) => `${V} = inVal;${holeTest ? ` ${hole}` : ""}`,
+      (holeTest) => (holeTest ? hole : ""),
       `if (outVal === FAILED) anyFailed = true; else { ${V} = outVal; if (outVal !== inVal) dirty = true; else ${hole} }`,
     )} }`;
   });
@@ -438,8 +441,10 @@ export function genTuple(spec: TupleSpec): Validator {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
     let dirty = ctx.force, anyFailed = false;
-    if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; for (let i = ${n}; i < data.length; i++) data[i]; }
-    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i}`).join(", ")};`}
+    const tooBig = data.length > ${n};
+    if (tooBig) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; }
+    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i} = data[${i}]`).join(", ")};`}
+    if (tooBig) for (let i = ${n}; i < data.length; i++) data[i];
     ${slots.join("\n    ")}
     if (anyFailed) return FAILED;
     if (!dirty) return data;

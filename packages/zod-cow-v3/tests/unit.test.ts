@@ -1350,6 +1350,85 @@ test("array / tuple copy path: the copy is assembled from the element results, a
   assert.equal(compile(A).parse(clean), clean);
 });
 
+test("tuple: every element is read before any slot is parsed, in ascending order, as stock's spread reads them (review of #115)", () => {
+  // Stock's `_parse` spreads the input (`[...ctx.data]`: every index ascending, the excess
+  // elements of a too-long input included) after the length check and before any item runs, so a
+  // getter that runs while a slot is parsed cannot change what a later slot sees. The skeleton
+  // makes the same reads at the same point.
+  const issues = (
+    r:
+      | { success: true }
+      | { success: false; error: { issues: { code: string; path: (string | number)[] }[] } },
+  ) => (r.success ? [] : r.error.issues.map((i) => `${i.code}@${i.path.join(".")}`));
+  // An accessor on an excess entry rewrites slot 0: stock read slot 0 before it ran, so the only
+  // issue is too_big; the accessor still runs once (the reviewer's row)
+  const T1 = z.tuple([z.string()]);
+  const excess = () => {
+    const reads: number[] = [];
+    const input: any[] = ["ok"];
+    Object.defineProperty(input, 1, {
+      enumerable: true,
+      get() {
+        reads.push(1);
+        input[0] = 1;
+        return "extra";
+      },
+    });
+    return { input, reads };
+  };
+  const s1 = excess();
+  const stock1 = issues(T1.safeParse(s1.input));
+  assert.deepEqual(stock1, ["too_big@"]);
+  const c1 = excess();
+  assert.deepEqual(issues(compile(T1).safeParse(c1.input)), stock1);
+  assert.deepEqual(c1.reads, s1.reads);
+  // The read order of a too-long input: every index ascending, the excess ones included
+  const ordered = (n: number, reads: number[]) => {
+    const a: any[] = [];
+    for (let i = 0; i < n; i++) {
+      Object.defineProperty(a, i, {
+        get() {
+          reads.push(i);
+          return `v${i}`;
+        },
+        enumerable: true,
+      });
+    }
+    return a;
+  };
+  const so: number[] = [];
+  assert.equal(T1.safeParse(ordered(3, so)).success, false);
+  assert.deepEqual(so, [0, 1, 2]);
+  const co: number[] = [];
+  assert.equal(compile(T1).safeParse(ordered(3, co)).success, false);
+  assert.deepEqual(co, so);
+  // A getter inside slot 0's object rewrites slot 1 (whose default fires on the undefined stock
+  // read there): stock parses the value it read before the getter ran, and so does the skeleton
+  const T2 = z.tuple([z.object({ a: z.string() }), z.string().default("d")]);
+  const inner = () => {
+    const reads: string[] = [];
+    const input: any[] = [null, undefined];
+    input[0] = {
+      get a() {
+        reads.push("0.a");
+        input[1] = 42;
+        return "a";
+      },
+    };
+    return { input, reads };
+  };
+  const s2 = inner();
+  const stock2 = T2.safeParse(s2.input);
+  const c2 = inner();
+  const cow2 = compile(T2).safeParse(c2.input);
+  // The read logs are compared before the outputs are inspected: the compiled output holds the
+  // input's slot-0 object by reference, getter included, and inspecting it would read `a` again
+  assert.deepEqual(c2.reads, s2.reads);
+  assert.deepEqual(stock2, { success: true, data: [{ a: "a" }, "d"] });
+  assert.deepEqual(cow2, { success: true, data: [{ a: "a" }, "d"] });
+  assert.equal(cow2.success && cow2.data[0], c2.input[0]);
+});
+
 test("no own-symbol probe (documented): a clean object or record keeps an undeclared own symbol key by reference, the copy path drops it like stock", () => {
   const sym = Symbol("s");
   const withEnum = () => ({ a: "x", [sym]: 1 });

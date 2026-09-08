@@ -703,10 +703,18 @@ function bObject(rng: RNG, depth: number): Built {
     desc,
     gen: (r) => {
       const out: Record<string | symbol, unknown> = {};
+      const entries: [string | symbol, unknown][] = [];
       for (const f of fields) {
         const v = f.built.gen(r);
-        if (v !== ABSENT) out[f.key] = v;
+        if (v !== ABSENT) entries.push([f.key, v]);
       }
+      // One input in five writes its declared keys in reverse order (#102): the undeclared-key walk
+      // tests each key against its declared position first and falls back to the membership test
+      // (the comparison chain, the `Set` on a padded shape) for a key that misses it, so a reversed
+      // input runs the fallback for every key and a shape-order input with an absent optional key
+      // for the keys after the gap; both must give stock's verdict and keep the reference
+      if (r.chance(0.2)) entries.reverse();
+      for (const [k, v] of entries) out[k] = v;
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
       // The reserved key, inherited and own, independent of mode and symbol policy (an own key may
       // shadow an inherited one). An object whose schema carries the undeclared property check is

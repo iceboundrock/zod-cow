@@ -1,6 +1,6 @@
 /** Record skeleton: key-name/value double reference comparison + ordered rebuild of the clean prefix at the first change; the async value loop follows stock's settlement order. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
+import { type CodeCtx, emitDeclaredKeyWalk, emitOwnSymbolProbe, escKey } from "./codectx.js";
 import { type ChildProduct, childProduct, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
@@ -127,19 +127,17 @@ export function emitCoWRecord(
       for (const s of started) emitKeyResult(s.p, s.settledVar ?? s.resVar);
     }
 
-    // Undeclared keys, the official for...in template: strict rejects them on every path; loose keeps
-    // them, so its probe runs only on the copy path, where the copy has to carry them.
-    // `for...in` yields strings only, so declared symbol keys never reach the probe and the known-key
+    // Undeclared keys, the official for...in template, each key tested against its declared position
+    // before the membership test (`emitDeclaredKeyWalk`, #102): strict rejects them on every path; loose
+    // keeps them, so its walk runs only on the copy path, where the copy has to carry them.
+    // `for...in` yields strings only, so declared symbol keys never reach the walk and the known-key
     // Set is hoisted only when the declared string keys exceed the inline comparison cap.
     let known: string | null = null;
     const knownSet = () => (known ??= ctx.addConst(new Set(inputKeys)));
-    const unknownKey = unknownStringKeyExpr(stringKeys, knownSet);
     if (!loose) {
-      ctx.write(`for (const k in ${accessor}) {`);
-      ctx.indented(() => {
-        ctx.write(`if (${unknownKey}) return INVALID;`);
+      emitDeclaredKeyWalk(ctx, accessor, stringKeys, knownSet, (unknown) => {
+        ctx.write(`if (${unknown}) return INVALID;`);
       });
-      ctx.write(`}`);
     } else {
       // An own enumerable `__proto__` (JSON.parse) is enumerated by stock's `for...in` append and
       // skipped there, so it is missing from stock's output; strict rejected it above as unknown,
@@ -168,11 +166,9 @@ export function emitCoWRecord(
       ctx.write(`${out} = {};`);
       for (const w of writebacks) ctx.write(`${out}[${w.keyExpr}] = ${w.valueVar};`);
       if (loose) {
-        ctx.write(`for (const k in ${accessor}) {`);
-        ctx.indented(() => {
-          ctx.write(`if (${unknownKey} && k !== "__proto__") ${out}[k] = ${accessor}[k];`);
+        emitDeclaredKeyWalk(ctx, accessor, stringKeys, knownSet, (unknown) => {
+          ctx.write(`if (${unknown} && k !== "__proto__") ${out}[k] = ${accessor}[k];`);
         });
-        ctx.write(`}`);
       }
     });
     ctx.write(`}`);

@@ -64,11 +64,15 @@ export function escKey(k: string): string {
 }
 
 /**
- * Containers with at most this many declared string keys probe undeclared keys with a generated
- * `k !== "a" && k !== "b" …` chain; larger ones fall back to `Set.has(k)`. `for...in` hands V8
- * internalized strings, so each comparison is a pointer compare, while `Set.has` hashes and
- * probes per key. The chain is quadratic in the key count (a declared key at position i costs
- * i + 1 comparisons), the Set linear, so the two cross.
+ * Containers with at most this many declared string keys test membership of an undeclared key with
+ * a generated `k !== "a" && k !== "b" …` chain; larger ones fall back to `Set.has(k)`. `for...in`
+ * hands V8 internalized strings, so each comparison is a pointer compare, while `Set.has` hashes
+ * and probes per key. The chain is quadratic in the key count (a declared key at position i costs
+ * i + 1 comparisons), the Set linear, so the two cross. Since #102 the membership test runs only
+ * for a key that is not at its declared position (`emitDeclaredKeyWalk`), so the cap decides the
+ * cost of an input whose key order diverges from the shape's; an input in shape order pays one
+ * comparison per key whichever form the fallback takes. The numbers below were taken before #102,
+ * when every key paid the membership test, and still describe the divergent case.
  *
  * Measured through the real skeleton (#34; the S11 rows of `bench-v4`, single-record hot loops of
  * flat objects of string keys built with `JSON.parse`, the whole parse timed): against the Set at
@@ -90,20 +94,81 @@ export function escKey(k: string): string {
 export const MAX_INLINE_KEY_COMPARISONS = 32;
 
 /**
- * Expression over a `for...in` loop variable `k` that is true when `k` is none of `stringKeys`.
- * Shared by the object and record skeletons (#33, #37): the comparison chain up to
- * `MAX_INLINE_KEY_COMPARISONS` keys, `!<set>.has(k)` above it, where `knownSet` hoists the
- * caller's known-key `Set` on first use (a small shape never references it). `for...in` yields
- * strings only, so declared symbol keys never reach this probe; a shape without a string key
- * treats every string key as undeclared (#35).
+ * Expression over a `for...in` loop variable `k` that is true when `k` is none of `stringKeys`:
+ * the comparison chain up to `MAX_INLINE_KEY_COMPARISONS` keys, `!<set>.has(k)` above it, where
+ * `knownSet` hoists the caller's known-key `Set` on first use (a small shape never references
+ * it). A shape without a string key treats every string key as undeclared (#35). The membership
+ * test of `emitDeclaredKeyWalk`, which is the one caller.
  */
-export function unknownStringKeyExpr(
-  stringKeys: readonly string[],
-  knownSet: () => string,
-): string {
+function unknownStringKeyExpr(stringKeys: readonly string[], knownSet: () => string): string {
   return stringKeys.length <= MAX_INLINE_KEY_COMPARISONS
     ? stringKeys.map((key) => `k !== ${escKey(key)}`).join(" && ") || "true"
     : `!${knownSet()}.has(k)`;
+}
+
+/**
+ * The `for...in` walk over the enumerable string keys of `accessor` (own and inherited, the keys
+ * stock's `for...in` templates see) that every undeclared-key loop of the object and record
+ * skeletons runs (#33, #37): strip's clean-path probe, strict's rejection loop and the loose append
+ * of an object, and the same two loops of an enum-keyed record. `for...in` yields strings only, so
+ * declared symbol keys never reach it.
+ *
+ * Each key is first compared with the declared string key at the walk's position, and a hit
+ * advances the position (#102): an input whose keys come in shape order, the order `JSON.parse`
+ * of a payload produced from the same shape gives, costs one pointer comparison per key (`for...in`
+ * hands V8 internalized strings), where the membership test costs a walk down the comparison chain
+ * (i + 1 comparisons for the declared key at position i) or a `Set` hash probe. Only a key that
+ * misses its position reaches `onOther`, which receives the membership expression
+ * (`unknownStringKeyExpr`) and emits what the loop does with an undeclared key; the position stays
+ * where it was, so a walk that diverged (a missing optional key, a producer's own key order) pays
+ * the membership test for the keys that follow, plus the one failed comparison, and re-synchronizes
+ * only when the input's order meets the declared one again. A positional hit and a membership hit
+ * are the same proof, so the loop's verdict is the membership test's for every key order. The
+ * position is bound-checked before the read, and the list holds nothing but the declared keys: a
+ * trailing sentinel that is not a string (the form first measured, one comparison cheaper in
+ * isolation) reaches the comparison as soon as one input carries a key past the last declared
+ * one, and that single string-to-`null` comparison turns the site's type feedback from
+ * "internalized string" into "any", after which TurboFan emits a generic equality call instead of
+ * a pointer comparison for every key of every later parse (measured through `bench-v4`'s gate,
+ * whose extra-key fixture runs before the timing: 499 instead of 296 ns for the 64-key strip
+ * clean row, against 353 with the bound check).
+ *
+ * Measured in isolation on Node 24 (a 1 000 000-operation hot loop over a `JSON.parse` object of
+ * optional and required string keys, the validation reads included; the script and the full table
+ * are on #102): against the membership test alone an input in shape order costs 152 instead of
+ * 476 ns at 64 keys, 78 instead of 130 at 32, 44 instead of 48 at 16, and about 2 ns more at 4 to
+ * 8 keys (19 against 17, 28 against 27); a reversed or shuffled input costs 5 to 10% more at 64
+ * keys and 15 to 25% more at 16 to 32, the failed comparison per key. The forms that re-synchronize
+ * after a gap (a one-key lookahead, a forward scan, an index-returning membership test) were
+ * measured and rejected: they win only on inputs with missing keys and lose 10 to 80% on every
+ * other divergent order. The whole parse is measured by the S11 rows of `bench-v4`.
+ */
+export function emitDeclaredKeyWalk(
+  ctx: CodeCtx,
+  accessor: string,
+  stringKeys: readonly string[],
+  knownSet: () => string,
+  onOther: (unknown: string) => void,
+): void {
+  const unknown = unknownStringKeyExpr(stringKeys, knownSet);
+  if (stringKeys.length === 0) {
+    // Nothing to be in order with: every string key is undeclared (#35)
+    ctx.write(`for (const k in ${accessor}) {`);
+    ctx.indented(() => onOther(unknown));
+    ctx.write(`}`);
+    return;
+  }
+  const order = ctx.addConst([...stringKeys]);
+  const pos = ctx.var();
+  ctx.write(`let ${pos} = 0;`);
+  ctx.write(`for (const k in ${accessor}) {`);
+  ctx.indented(() => {
+    ctx.write(`if (${pos} < ${stringKeys.length} && k === ${order}[${pos}]) ${pos}++;`);
+    ctx.write(`else {`);
+    ctx.indented(() => onOther(unknown));
+    ctx.write(`}`);
+  });
+  ctx.write(`}`);
 }
 
 /**

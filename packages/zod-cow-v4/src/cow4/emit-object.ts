@@ -4,7 +4,7 @@
  * own assembly rules).
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, emitOwnSymbolProbe, escKey, unknownStringKeyExpr } from "./codectx.js";
+import { type CodeCtx, emitDeclaredKeyWalk, emitOwnSymbolProbe, escKey } from "./codectx.js";
 import { containerChecksCall, containerChildFn } from "./emit.js";
 
 import { officialFn } from "./official.js";
@@ -200,22 +200,18 @@ export function emitCoWObject(
     }
   }
 
-  // Undeclared-key predicate (official for...in template: inherited keys participate, matching the runtime).
+  // Undeclared-key walk (official for...in template: inherited keys participate, matching the runtime),
+  // each key tested against its declared position before the membership test (`emitDeclaredKeyWalk`, #102).
   // `for...in` yields string keys only, so the string probe never sees a symbol; own symbols get a probe of their own.
   // The known-key Set is hoisted lazily: a small shape without declared symbols never references it.
   let known: string | null = null;
   const knownSet = () => (known ??= ctx.addConst(new Set(allKeys)));
-  let unknownStringKeyProbe: string | null = null;
-  const unknownStringKey = () =>
-    (unknownStringKeyProbe ??= unknownStringKeyExpr(stringKeys, knownSet));
 
   if (mode === "strict") {
     // Validation, not output shaping: runs on every path (the official template)
-    ctx.write(`for (const k in ${accessor}) {`);
-    ctx.indented(() => {
-      ctx.write(`if (${unknownStringKey()}) return INVALID;`);
+    emitDeclaredKeyWalk(ctx, accessor, stringKeys, knownSet, (unknown) => {
+      ctx.write(`if (${unknown}) return INVALID;`);
     });
-    ctx.write(`}`);
   }
 
   // The container's own checks (.refine/.min and friends): a standalone validation subroutine,
@@ -297,11 +293,9 @@ export function emitCoWObject(
       const extra = ctx.var();
       ctx.write(`let ${extra} = false;`);
       if (mode === "strip") {
-        ctx.write(`for (const k in ${accessor}) {`);
-        ctx.indented(() => {
-          ctx.write(`if (${unknownStringKey()}) { ${extra} = true; break; }`);
+        emitDeclaredKeyWalk(ctx, accessor, stringKeys, knownSet, (unknown) => {
+          ctx.write(`if (${unknown}) { ${extra} = true; break; }`);
         });
-        ctx.write(`}`);
       }
       if (probeSymbols) {
         if (mode === "strip") {
@@ -357,12 +351,10 @@ export function emitCoWObject(
   if (mode === "loose") {
     // Undeclared string keys are copied after the shape keys (official passthrough template:
     // for...in so inherited enumerables participate, `__proto__` skipped)
-    ctx.write(`for (const k in ${accessor}) {`);
-    ctx.indented(() => {
+    emitDeclaredKeyWalk(ctx, accessor, stringKeys, knownSet, (unknown) => {
       ctx.write(`if (k === "__proto__") continue;`);
-      ctx.write(`if (${unknownStringKey()}) out[k] = ${accessor}[k];`);
+      ctx.write(`if (${unknown}) out[k] = ${accessor}[k];`);
     });
-    ctx.write(`}`);
   }
 
   if (checksCall) ctx.write(`if ((${checksCall.expr("out")}) === INVALID) return INVALID;`);

@@ -2,7 +2,7 @@
  * Official-product wrappers: assertOnly validator, parser, runtime island and async island
  * (the per-subtree degradation chain).
  */
-import { INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
+import { INVALID, compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
 import {
   type Fn,
   isAsyncFn,
@@ -247,11 +247,158 @@ function childrenOf(schema: Node): Node[] {
   return kids;
 }
 
+/* ═══════════════════ #80: recording the $ZodAsyncError a plain-function callback throws ═══════════════════ */
+
+/**
+ * A plain function that returns a `Promise` reaches the synchronous fast path as stock's `$ZodAsyncError`,
+ * thrown by the `throwAsync` stock hoists into an official product's generated code (§5.5 item 6). A callback
+ * can throw the same public class itself (a nested sync `parse` of an async schema does, or `new $ZodAsyncError()`),
+ * and that throw is the caller's: stock rejects the parse with it after one call. This layer records the ones its
+ * own call sites see (a container / wrapper / union `.refine`, an awaited predicate, an island's run) in a WeakSet
+ * so the async entries reject after one call instead of rerunning (`rethrowCallerError` / `isPromiseSignal`).
+ *
+ * A callback stock's generated code calls — a leaf `.refine`, `.check`, `.superRefine`, `z.custom` predicate,
+ * `overwrite` or `transform` inside an official product — was not recorded (#80): stock calls the hoisted `def.fn`
+ * / `_zod.check` / `def.tx` / `def.transform` directly and reports a `Promise` from its own `throwAsync`. But those
+ * slots are plain, writable data properties that stock's compiler reads only at compile time (`addConstant` hoists
+ * the reference into the generated closure). So a wrapper installed on each such slot for the duration of the
+ * `compileFn` call is captured by the generated code as a constant and stays in force at parse time, while the
+ * slot itself is restored immediately, leaving the caller's schema byte-for-byte as it was. The wrapper records a
+ * thrown `$ZodAsyncError` (and rethrows every throw unchanged), so a callback's own throw inside an official
+ * product now rejects after one call like stock, and a returned `Promise` still reaches stock's `throwAsync` as
+ * the unrecorded signal it is.
+ *
+ * Only a non-async callback is wrapped: an async function must stay visible to stock's `isAsyncFunction`, which
+ * decides the `ZodCompileAsyncError` that routes the subtree to an async island. A `.default()` / `.prefault()`
+ * value factory is a getter, not a writable slot, so its throw stays the one documented residual.
+ */
+type CallbackSlot = { obj: Record<string, unknown>; key: string; fn: unknown };
+
+function wrapCallback(orig: unknown): (this: unknown, ...args: unknown[]) => unknown {
+  return function (this: unknown, ...args: unknown[]): unknown {
+    try {
+      return (orig as (...a: unknown[]) => unknown).apply(this, args);
+    } catch (e) {
+      rethrowCallerError(e); // records a $ZodAsyncError, rethrows everything
+    }
+  };
+}
+
+/**
+ * Walk the subtree stock's `compileFn` would inline (never a `lazy`, which is already island-routed by
+ * `subtreeFollowsRuntime` before this runs) and collect every non-async user-callback slot stock's compiler
+ * reads, plus the set of nodes that carry one. `childrenOf` supplies the structural descent, including the shape
+ * a `z.property` / `z.properties` check carries, which stock compiles inline.
+ */
+function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Node[] } {
+  const slots: CallbackSlot[] = [];
+  const nodes: Node[] = [];
+  const seen = new Set<Node>();
+  const visit = (node: Node): void => {
+    if (!node?._zod || seen.has(node)) return;
+    seen.add(node);
+    const def = node._zod.def;
+    if (!def || def.type === "lazy") return;
+    let hasCb = false;
+    const add = (obj: unknown, key: string, fn: unknown): void => {
+      slots.push({ obj: obj as Record<string, unknown>, key, fn });
+      hasCb = true;
+    };
+    const checks: Node[] = Array.isArray(def.checks) ? def.checks : [];
+    for (const c of checks) {
+      const cz = c?._zod;
+      if (!cz) continue;
+      const cdef = cz.def ?? {};
+      // refine / z.custom predicate / string_format all live on def.fn (stock reads it first); superRefine and
+      // .check() carry a check function on _zod.check; overwrite carries its transform on def.tx.
+      if (typeof cdef.fn === "function" && !isAsyncFn(cdef.fn)) add(cdef, "fn", cdef.fn);
+      else if (typeof cz.check === "function" && !isAsyncFn(cz.check)) add(cz, "check", cz.check);
+      if (typeof cdef.tx === "function" && !isAsyncFn(cdef.tx)) add(cdef, "tx", cdef.tx);
+    }
+    if (
+      (def.type === "transform" || def.type === "pipe") &&
+      typeof def.transform === "function" &&
+      !isAsyncFn(def.transform)
+    )
+      add(def, "transform", def.transform);
+    if (def.type === "custom" && typeof def.fn === "function" && !isAsyncFn(def.fn))
+      add(def, "fn", def.fn);
+    if (hasCb) nodes.push(node);
+    // A shape getter that throws (the #82 / #100 case) is contained like every other walk here: stock's own
+    // `compileFn` reads the shape in its cycle check and counts the throw as recursion, so `officialFn`'s compile
+    // below throws and islands the subtree; the slots gathered so far are harmless (the island uses the schema).
+    let kids: Node[];
+    try {
+      kids = childrenOf(node);
+    } catch {
+      return;
+    }
+    for (const k of kids) visit(k);
+  };
+  visit(schema);
+  return { slots, nodes };
+}
+
+function installWrappers(slots: CallbackSlot[]): () => void {
+  for (const s of slots) s.obj[s.key] = wrapCallback(s.fn);
+  return () => {
+    for (const s of slots) s.obj[s.key] = s.fn;
+  };
+}
+
+/**
+ * Whether stock would run this callback-bearing node inside a runtime island of its own generated code (an
+ * islandable `ZodCompileUnsupportedError` at the node: a coercion, an unsupported format, a custom-`when` check,
+ * …). A compile-time wrapper cannot reach such a callback — the island reads the schema through `runtimeRun` at
+ * parse time, after the slot is restored — so the whole subtree is routed to this layer's island instead, whose
+ * `runIsland` records the throw. A non-islandable refusal (a `catch` callback) and an async throw are left to the
+ * whole-subtree `compileFn` below, which throws and lets `officialFn` island the tree the usual way.
+ */
+function wouldRuntimeIslandCallback(node: Node): boolean {
+  try {
+    compileFn(node);
+    return false;
+  } catch (e) {
+    return (
+      e instanceof ZodCompileUnsupportedError &&
+      (e as { islandable?: boolean }).islandable !== false
+    );
+  }
+}
+
+/**
+ * The pure-subtree assertOnly validator (`emitNode`'s pure branch) with the same callback recording (#80).
+ * Throws whatever `compileFn` throws, so the caller keeps its `ZodCompileAsyncError` handling; the wrappers are
+ * always restored. A pure subtree that compiles here has no islandable refusal (it compiled), so no island check
+ * is needed on the success path; a callback stock would runtime-island is caught by `pureSubtreeNeedsIsland`,
+ * which the caller consults first.
+ */
+export function compileAssertOnlyRecording(schema: Node): Fn {
+  const restore = installWrappers(collectCallbackSlots(schema).slots);
+  try {
+    return compileFn(schema, { assertOnly: true }) as Fn;
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * Whether a pure subtree holds a callback stock would run inside a runtime island (#80): the validator baked from
+ * `compileFn` cannot record such a callback's throw, so the caller sends the subtree down the island path instead.
+ */
+export function pureSubtreeNeedsIsland(schema: Node): boolean {
+  return collectCallbackSlots(schema).nodes.some(wouldRuntimeIslandCallback);
+}
+
 /**
  * Get the official product for a subtree. pure → assertOnly validator (validation semantics intact, output = input);
  * otherwise → parser (stock output semantics). On product generation failure it degrades step by step.
  * async is no longer rethrown upwards (Task 6): a subtree for which the official compileFn throws ZodCompileAsyncError
  * is routed to an async island instead (returns a Promise, awaited at the call site); lazy(async·…) is covered by the static detection.
+ *
+ * Callbacks stock's generated code calls are wrapped for the duration of the compile so a `$ZodAsyncError` they throw
+ * is recorded like this layer's own (#80); a callback stock would run in a runtime island is unreachable that way, so
+ * the subtree takes an island instead.
  */
 export function officialFn(schema: Node, pure: boolean): Fn {
   // A subtree stock's compiled product would answer differently from its runtime takes one of this layer's islands
@@ -264,23 +411,32 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // on such a subtree. The static walk decides which island: inner async raises no compile-time error inside a lazy.
   const island = (): Fn => (inspectSubtree(schema) ? makeAsyncIsland(schema) : makeIsland(schema));
   if (subtreeFollowsRuntime(schema)) return island();
-  if (pure) {
-    try {
-      return compileFn(schema, { assertOnly: true }) as Fn;
-    } catch (e) {
-      if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema); // the isPure whitelist already blocks async; this is defensive
-      // everything else → fall through to the parser (harmless when nobody reads the output value, just extra construction)
-    }
-  }
+  const { slots, nodes } = collectCallbackSlots(schema);
+  // #80: a callback stock would run inside a runtime island cannot be reached by a compile-time wrapper;
+  // route the whole subtree to this layer's island so its `runIsland` records the throw.
+  if (nodes.some(wouldRuntimeIslandCallback)) return island();
+  const restore = installWrappers(slots);
   try {
-    return compileFn(schema) as Fn;
-  } catch (e) {
-    if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema);
-    // Any other failure (a symbol literal, coercion, `z.xor`, a `catch` callback) was thrown before stock's
-    // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
-    // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
-    // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
-    return island();
+    if (pure) {
+      try {
+        return compileFn(schema, { assertOnly: true }) as Fn;
+      } catch (e) {
+        if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema); // the isPure whitelist already blocks async; this is defensive
+        // everything else → fall through to the parser (harmless when nobody reads the output value, just extra construction)
+      }
+    }
+    try {
+      return compileFn(schema) as Fn;
+    } catch (e) {
+      if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema);
+      // Any other failure (a symbol literal, coercion, `z.xor`, a `catch` callback) was thrown before stock's
+      // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
+      // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
+      // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
+      return island();
+    }
+  } finally {
+    restore(); // the generated closure captured the wrappers as constants; the caller's schema is left as it was
   }
 }
 
@@ -292,9 +448,14 @@ export function officialFn(schema: Node, pure: boolean): Fn {
  */
 export function officialValidator(schema: Node): Fn | null {
   if (subtreeFollowsRuntime(schema)) return null;
+  // Record a plain-function callback's own `$ZodAsyncError` in the validator too (#80); `validate` is sync,
+  // so the result parity here is a thrown error either way, but the wrapper keeps the two paths consistent.
+  const restore = installWrappers(collectCallbackSlots(schema).slots);
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } catch {
     return null;
+  } finally {
+    restore();
   }
 }

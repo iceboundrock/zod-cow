@@ -4106,46 +4106,166 @@ head(
     ok("the fast path's own Promise signal still reaches stock's async runtime");
   }
 
-  // Residual: a callback that stock's generated code calls (a leaf refine, a custom check or a superRefine inside
-  // an official product) reports its Promise signal with the same class from a throw site this layer cannot mark,
-  // so a `$ZodAsyncError` such a callback throws is handed to stock's async runtime like the signal: a callback that
-  // throws on every call rejects with the same error after running twice (the documented failure-path duplicate),
-  // one that throws on the first call only passes on the rerun where stock rejects. Pinned here; tracked in #80.
+  // #80: a callback stock's generated code calls (a leaf `.refine`, `.check`, `.superRefine`, `z.custom`
+  // predicate, `overwrite` or `transform` inside an official product) reports its Promise signal from stock's own
+  // hoisted `throwAsync`, so a `$ZodAsyncError` such a callback throws used to be indistinguishable from the fast
+  // path's signal and took the fallback: the callback ran twice, and one that throws on the first call only passed
+  // on the rerun where stock rejects. It is recorded now. Stock's compiler reads those callbacks off writable `def`
+  // slots at compile time only (it hoists the reference into the generated closure), so `officialFn` /
+  // `compileAssertOnlyRecording` wrap each non-async callback for the duration of the compile: the generated code
+  // captures the recording wrapper as a constant and the slot is restored at once, leaving the caller's schema
+  // untouched. A callback stock would run inside a runtime island (an islandable refusal at or above it, e.g. a
+  // coercion sibling) cannot be reached that way, so the whole subtree is routed to this layer's island, whose
+  // `runIsland` records the throw. Both a throw on every call and a throw on the first call only now reject after
+  // one call, like stock.
   {
     const always = (log: string[]) => () => {
       log.push("c");
       nested.parse("x");
       return true;
     };
+    const superRefineOnce = (log: string[]) => (_v: unknown) => {
+      log.push("c");
+      if (log.length === 1) nested.parse("x");
+    };
+    // Every position: the callback is inlined into an official product (compiled fast path) or, for the coercion
+    // case, run inside a runtime island of one. The last row is the one position stock runtime-islands the
+    // callback (`z.coerce.string()` refuses islandable), so it exercises the `wouldRuntimeIslandCallback` route.
     const leafCases: [string, (fn: () => boolean) => z.ZodType, unknown][] = [
+      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
       [
         "leaf refine under an object key",
         (fn) => z.object({ a: z.string().refine(fn) }),
         { a: "x" },
       ],
-      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
+      ["leaf refine in an array", (fn) => z.array(z.string().refine(fn)), ["x"]],
+      [
+        "leaf refine in a union of leaves",
+        (fn) => z.union([z.string().refine(fn), z.number()]),
+        "x",
+      ],
+      [
+        "leaf overwrite (tx) that throws",
+        (fn) =>
+          z.string().overwrite((v) => {
+            fn();
+            return v;
+          }),
+        "x",
+      ],
+      [
+        "leaf transform that throws",
+        (fn) =>
+          z.string().transform((v) => {
+            fn();
+            return v;
+          }),
+        "x",
+      ],
+      ["z.custom predicate that throws", (fn) => z.custom<unknown>((v) => fn() && v === "x"), "x"],
+      [
+        "leaf refine under a coercion (stock runtime-islands it)",
+        (fn) =>
+          z.object({ a: z.coerce.string().refine(fn) as unknown as z.ZodType }).overwrite((v) => v),
+        { a: "x" },
+      ],
     ];
     for (const [name, make, input] of leafCases) {
-      const stockLog: string[] = [];
-      await assert.rejects(make(always(stockLog)).safeParseAsync(input), $ZodAsyncError);
-      assert.equal(stockLog.length, 1);
+      // throws on every call → both sides reject after one call
+      const stockAlways: string[] = [];
+      await assert.rejects(make(always(stockAlways)).safeParseAsync(input), $ZodAsyncError);
+      assert.equal(stockAlways.length, 1, `${name}: stock runs the callback once`);
       const log: string[] = [];
       const C = compile(make(always(log)));
-      assert.ok(!C.async && !C.stock);
+      assert.ok(!C.async && !C.stock, `${name}: sync compiled product`);
       await assert.rejects(C.safeParseAsync(input), $ZodAsyncError, `${name}: the same rejection`);
-      assert.equal(
-        log.length,
-        2,
-        `${name}: the fast path and stock's async runtime each ran the callback`,
-      );
+      assert.equal(log.length, 1, `${name}: the callback ran once, no rerun (#80)`);
+      // throws on the first call only → the parse rejects, not the pre-#80 success on the rerun
       const onceLog: string[] = [];
       const CO = compile(make(once(onceLog, () => nested.parse("x"))));
-      const r = await CO.safeParseAsync(input);
-      assert.ok(r.success, `${name}: a first-call-only throw passes on the rerun (known, #80)`);
-      assert.equal(onceLog.length, 2);
+      await assert.rejects(
+        CO.safeParseAsync(input),
+        $ZodAsyncError,
+        `${name}: a first-call-only throw rejects, no rerun (#80)`,
+      );
+      assert.equal(onceLog.length, 1, `${name}: one call`);
+    }
+    // superRefine carries its callback on `_zod.check`, not `def.fn`; pinned separately
+    {
+      const stockLog: string[] = [];
+      await assert.rejects(
+        z.string().superRefine(superRefineOnce(stockLog)).safeParseAsync("x"),
+        $ZodAsyncError,
+      );
+      assert.equal(stockLog.length, 1);
+      const log: string[] = [];
+      const C = compile(z.string().superRefine(superRefineOnce(log)));
+      assert.ok(!C.async && !C.stock);
+      await assert.rejects(
+        C.safeParseAsync("x"),
+        $ZodAsyncError,
+        "superRefine: the same rejection",
+      );
+      assert.equal(log.length, 1, "superRefine: one call, no rerun (#80)");
+    }
+    // A plain function that returns a Promise is still the fast path's own signal (unrecorded), so it reaches
+    // stock's async runtime and the parse succeeds; the callback runs on the fast path and again in stock's
+    // runtime (the documented failure-path duplicate), which is deliberately unchanged.
+    {
+      const log: string[] = [];
+      const C = compile(
+        z.string().refine((v) => {
+          log.push("c");
+          return Promise.resolve(v === "x") as unknown as boolean;
+        }),
+      );
+      const r = await C.safeParseAsync("x");
+      assert.ok(r.success, "a returned Promise still reaches stock's async runtime");
+      assert.equal(log.length, 2, "a returned Promise runs the callback on both paths (unchanged)");
     }
     ok(
-      "inside an official product the callback's $ZodAsyncError still takes the fallback (pinned, #80)",
+      "a callback's own $ZodAsyncError inside an official product rejects after one call, like stock (#80)",
+    );
+  }
+
+  // The one residual left, tracked in #80: a `.default()` / `.prefault()` value factory is a getter, not a
+  // writable slot, so this layer cannot wrap it. A factory that throws `$ZodAsyncError` on the shortcut still
+  // takes the fallback and runs twice, and a first-call-only throw passes on the rerun where stock rejects.
+  {
+    const stockLog: string[] = [];
+    let sn = 0;
+    await assert.rejects(
+      z
+        .object({
+          a: z.string().default(() => {
+            sn++;
+            if (sn === 1) nested.parse("x");
+            return "d";
+          }),
+        })
+        .safeParseAsync({}),
+      $ZodAsyncError,
+    );
+    assert.equal(stockLog.length + sn, 1, "stock runs the default factory once and rejects");
+    let n = 0;
+    const C = compile(
+      z.object({
+        a: z.string().default(() => {
+          n++;
+          if (n === 1) nested.parse("x");
+          return "d";
+        }),
+      }),
+    );
+    assert.ok(!C.async && !C.stock);
+    const r = await C.safeParseAsync({});
+    assert.ok(
+      r.success,
+      "a first-call-only throw in a default factory passes on the rerun (known residual, #80)",
+    );
+    assert.equal(n, 2, "the default factory ran on the fast path and again in stock's runtime");
+    ok(
+      "a .default() value factory's $ZodAsyncError is the one residual (getter, not a writable slot, #80)",
     );
   }
 }

@@ -3,7 +3,7 @@
  * subroutines. Forms an import cycle with the emit-*.ts skeletons (mutual recursion through
  * hoisted function declarations only; nothing in the cycle runs at module load).
  */
-import { compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
+import { ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
 import { buildFn, CodeCtx, escKey } from "./codectx.js";
 import { emitCoWArray } from "./emit-array.js";
 import { emitCoWMap } from "./emit-map.js";
@@ -12,7 +12,14 @@ import { emitCoWRecord } from "./emit-record.js";
 import { emitCoWSet } from "./emit-set.js";
 import { emitCoWTuple } from "./emit-tuple.js";
 import { emitCoWUnion } from "./emit-union.js";
-import { makeAsyncIsland, officialFn, type RunPayload, runCarried } from "./official.js";
+import {
+  compileAssertOnlyRecording,
+  makeAsyncIsland,
+  officialFn,
+  pureSubtreeNeedsIsland,
+  type RunPayload,
+  runCarried,
+} from "./official.js";
 import { DEFAULT_OPTIONS } from "./options.js";
 import { aborted } from "./predicates.js";
 import {
@@ -477,13 +484,17 @@ export function emitNode(
   }
   // every other type: black-box call into the official product
   const pure = isPure(schema);
-  if (pure) {
+  // A pure subtree holding a callback stock would run inside a runtime island cannot record that callback's own
+  // `$ZodAsyncError` through the assertOnly validator (#80), so skip the pure branch and let `officialFn` below
+  // route the whole subtree to an island, whose `runIsland` records the throw.
+  if (pure && !pureSubtreeNeedsIsland(schema)) {
     // Pure subtree: the official assertOnly product answers pass/fail only, output = input reference (the definition of purity).
     // When no validator product is available, fall to the official parser (the value may be ≠ input, taking the impure path);
     // a pure subtree has no async in theory (the whitelist blocks it), and defensively it becomes an async island.
+    // The callbacks stock's generated code calls are recorded for the duration of the compile (#80).
     let v: Fn | null = null;
     try {
-      v = compileFn(schema, { assertOnly: true }) as Fn;
+      v = compileAssertOnlyRecording(schema);
     } catch (e) {
       if (e instanceof ZodCompileAsyncError) {
         const f = ctx.addConst(makeAsyncIsland(schema));

@@ -21,15 +21,10 @@ import type { z, ZodErrorMap } from "zod";
 import {
   type Ctx,
   FAILED,
-  NATIVE_ARRAY_ITERATOR,
-  NATIVE_ARRAY_NEXT,
-  callArrayIterator,
   isObjectType,
   pushInvalidType,
   pushIssue,
-  spreadFromIterator,
-  spreadFromMethod,
-  toLength,
+  stockSpread,
   type Validator,
 } from "./internal.js";
 
@@ -190,8 +185,6 @@ const lit = (s: string): string => JSON.stringify(s);
 /**
  * The closure call of one child slot: `outVal` receives the closure's result for `inVar`; the
  * issues it left are prefixed lazily with the key, or the call is bracketed by push/pop (eager).
- * `onIssues` is a statement run when the child left an issue (the array and tuple skeletons clear
- * their `noIssue` flag there); the eager call then reads the issue count around the call too.
  */
 function childCall(
   g: Gen,
@@ -199,16 +192,11 @@ function childCall(
   eager: boolean,
   keyExpr: string,
   inVar: string,
-  onIssues = "",
 ): string {
   const c = g.hoist(child.validator, "c");
-  if (eager) {
-    const call = `ctx.path.push(${keyExpr}); const outVal = ${c}(${inVar}, ctx); ctx.path.pop();`;
-    return onIssues === ""
-      ? call
-      : `const before = ctx.issues.length; ${call} if (ctx.issues.length !== before) { ${onIssues} }`;
-  }
-  return `const before = ctx.issues.length; const outVal = ${c}(${inVar}, ctx); if (ctx.issues.length !== before) { prefixIssues(ctx, before, ${keyExpr}); ${onIssues} }`;
+  return eager
+    ? `ctx.path.push(${keyExpr}); const outVal = ${c}(${inVar}, ctx); ctx.path.pop();`
+    : `const before = ctx.issues.length; const outVal = ${c}(${inVar}, ctx); if (ctx.issues.length !== before) prefixIssues(ctx, before, ${keyExpr});`;
 }
 
 /**
@@ -240,7 +228,7 @@ function predicateAcceptsUndefined(schema: z.ZodTypeAny): boolean {
  * One slot of an array or tuple: `inVal` holds the value read. When the leaf has an inline
  * predicate, `onPass` runs when it holds (the value is then the output) and the closure runs only
  * when it fails; `onResult` runs after the closure with `outVal` holding its result (a value or
- * FAILED). The closure call clears the skeleton's `noIssue` flag when the child left an issue.
+ * FAILED).
  */
 function slotBlock(
   g: Gen,
@@ -251,9 +239,10 @@ function slotBlock(
   onResult: string,
 ): string {
   const pred = inlinePredicate(child.schema, g, "inVal", spec.regexOf);
-  const call = `${childCall(g, child, spec.eager, keyExpr, "inVal", "noIssue = false;")} ${onResult}`;
+  const call = `${childCall(g, child, spec.eager, keyExpr, "inVal")} ${onResult}`;
   if (pred === null) return call;
-  return `if (${pred}) { ${onPass(predicateAcceptsUndefined(child.schema))} } else { ${call} }`;
+  const pass = onPass(predicateAcceptsUndefined(child.schema));
+  return pass === "" ? `if (!(${pred})) { ${call} }` : `if (${pred}) { ${pass} } else { ${call} }`;
 }
 
 /**
@@ -360,12 +349,15 @@ export interface ArraySpec {
 /**
  * Generated array skeleton (the closure `makeArray` in compile.ts). Stock reads every element
  * once (`[...data]`) and builds a fresh array from the results; here the clean path returns the
- * input by reference, the first forced change (a changed element, or a hole, which stock's spread
- * turns into an own `undefined` slot) rebuilds the clean prefix from the input into a fresh array
- * (the one second read, of the elements before the change) and every later element is written
- * from the loop's single read, so a getter at or after the change is read once, as stock reads it
- * (#65). In stock's rebuild mode (`ctx.force`) the fresh array is allocated up front and every
- * element is written once.
+ * input by reference, the first forced change (a changed element, or an element that reads as
+ * `undefined`: a hole, which stock's spread turns into an own `undefined` slot, or an explicit
+ * `undefined`, which the skeleton cannot tell from a hole without a read stock does not make)
+ * rebuilds the clean prefix from the input into a fresh array (the one second read, of the
+ * elements before the change) and every later element is written from the loop's single read, so
+ * a getter at or after the change is read once, as stock reads it (#65). In stock's rebuild mode
+ * (`ctx.force`) the fresh array is allocated up front and every element is written once. The
+ * elements are read as the loop reaches them, after the previous element was parsed, where stock
+ * reads them all in its spread before any element runs (#116, documented).
  */
 export function genArray(spec: ArraySpec): Validator {
   const g = new Gen();
@@ -375,7 +367,8 @@ export function genArray(spec: ArraySpec): Validator {
     const v = spec.exact.value;
     const m = g.hoist(spec.exact.message, "msg");
     checks.push(
-      `if (data.length !== ${v}) { const tooBig = data.length > ${v}; pushIssue(ctx, data, ${em}, { code: tooBig ? "too_big" : "too_small", minimum: tooBig ? undefined : ${v}, maximum: tooBig ? ${v} : undefined, type: "array", inclusive: true, exact: true, message: ${m} }); }`,
+      // Stock's two reads of the length, in its order (`>` then `<`), so a Proxy sees stock's log
+      `{ const tooBig = data.length > ${v}; const tooSmall = data.length < ${v}; if (tooBig || tooSmall) pushIssue(ctx, data, ${em}, { code: tooBig ? "too_big" : "too_small", minimum: tooSmall ? ${v} : undefined, maximum: tooBig ? ${v} : undefined, type: "array", inclusive: true, exact: true, message: ${m} }); }`,
     );
   }
   if (spec.min !== null) {
@@ -390,16 +383,15 @@ export function genArray(spec: ArraySpec): Validator {
       `if (data.length > ${spec.max.value}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${spec.max.value}, type: "array", inclusive: true, exact: false, message: ${m} });`,
     );
   }
-  // The first forced change: a fresh array of the input's length takes the clean prefix. The hole
-  // probe (`i in data`) decides only whether the input can be returned by reference, which a parse
-  // holding an issue never is (an aborted or dirty element, a length check of this array, an issue
-  // a sibling left before entry; a union truncates a discarded option's issues, a catch its inner's,
-  // so a recorded issue always ends the parse or discards this output), so it runs only while
-  // `ctx.issues` is empty: stock validates its spread and never performs a `has` on the input, and
-  // a Proxy trap there would run user code stock never runs (third and fourth reviews of #115).
-  // `noIssue` tracks that emptiness in a local: read once after the length checks, cleared by the
-  // closure call when the child left an issue (an inline predicate that holds adds none), so the
-  // clean path costs what it did.
+  // The first forced change: a fresh array of the input's length takes the clean prefix (the one
+  // second read of the input, documented, #65) and every later element is written from the loop's
+  // single read. An element that reads as `undefined` and comes back unchanged is a forced change
+  // too, whether the input holds an own `undefined` or a hole: stock's spread turns a hole into an
+  // own `undefined` slot, and the own-ness test that would tell them apart (`i in data`) is a
+  // `has` stock never performs on the input (a Proxy trap there ran user code stock never runs,
+  // third and fourth reviews of #115; #117), so an input holding an explicit `undefined` member is
+  // copied, the decision the zod4 line took in #95. No copy runs once a slot has failed: the parse
+  // returns FAILED and the prefix read would be a read stock does not make.
   const copy =
     "dirty = true; out = new Array(data.length); for (let j = 0; j < i; j++) out[j] = data[j];";
   const slot = slotBlock(
@@ -408,15 +400,15 @@ export function genArray(spec: ArraySpec): Validator {
     spec,
     "i",
     (holeTest) =>
-      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && noIssue && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
+      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined) { ${copy} out[i] = inVal; }` : ""}`,
     `if (outVal === FAILED) anyFailed = true;
       else if (dirty) out[i] = outVal;
-      else if (!anyFailed && (outVal !== inVal || (inVal === undefined && noIssue && !(i in data)))) { ${copy} out[i] = outVal; }`,
+      else if (!anyFailed && (outVal !== inVal || inVal === undefined)) { ${copy} out[i] = outVal; }`,
   );
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false, noIssue = ctx.issues.length === 0;
+    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false;
     for (let i = 0; i < data.length; i++) { const inVal = data[i]; ${slot} }
     if (anyFailed) return FAILED;
     return out;
@@ -434,85 +426,46 @@ export interface TupleSpec {
 
 /**
  * Generated tuple skeleton (the closure `makeTuple` in compile.ts), one unrolled block per slot.
- * The elements are captured as stock's `[...ctx.data]` captures them, after the length checks and
- * the too_big issue and before any item runs (review of #115): `Symbol.iterator` is read off the
- * input and, when it answered the native array iterator, `next` off the iterator that iterator
- * creates (the reads stock's spread makes, with stock's receivers); when both answered the natives
- * the walk is inline, reading the live length (converted as `ToLength` converts it) before each
- * element and the element into its local (`v0`, `v1`, …), the excess elements of a too-long input
- * included, until the index reaches the length, so a getter that moves the length changes how
- * many elements are read and parsed exactly as it does in stock (second review of #115); any other
- * answer continues through a real spread from the values already read (`spreadFromMethod`,
- * `spreadFromIterator`), whose elements fill the locals and whose output is always a fresh array.
- * Each local then takes its slot's result, the slots past the captured count never run, and the
- * copy is an array literal of the locals cut to that count, so no element is read twice on any
- * path (#65): a too-long input (too_big, dirty like stock) and stock's rebuild mode take the same
- * assembly. The clean path returns the input when every captured slot came back unchanged and the
- * length the last step read is the captured count (an input that grew or shrank after a read
- * holds elements stock's output does not, or lacks some). A hole reads as undefined, is parsed as
- * such and makes the tuple dirty, since stock's spread turns it into an own `undefined` slot.
+ *
+ * The capture is stock's own: after the length checks and the `too_big` issue and before any slot
+ * runs, `stockSpread` evaluates `[...ctx.data]` as `ZodTuple._parse` does, so every read the
+ * capture makes on the input, every piece of user code it runs, every intrinsic it consults and
+ * every engine error it throws are stock's by identity (#65, reviews of #115). The fresh array it
+ * returns is the output: each slot is validated from it and its result written back into it, the
+ * slots past the captured count never run (an input whose accessors shrank it during the capture
+ * is parsed as stock parses it, from what the capture holds), a too-long input is truncated to the
+ * declared slots after its excess elements were read, and a hole is an own `undefined` slot. The
+ * skeleton makes no read of the input of its own, so it never returns the input by reference: the
+ * only proof that the input still holds what the capture yielded would be reads stock does not
+ * make (the reviews of #115), and the output stock builds is a fresh array in every case.
  */
 export function genTuple(spec: TupleSpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
   const n = spec.items.length;
-  const nativeIter = g.hoist(NATIVE_ARRAY_ITERATOR, "nativeIter");
-  const nativeNext = g.hoist(NATIVE_ARRAY_NEXT, "nativeNext");
-  const callIter = g.hoist(callArrayIterator, "callIter");
-  const toLen = g.hoist(toLength, "toLength");
-  const fromMethod = g.hoist(spreadFromMethod, "spreadFromMethod");
-  const fromIterator = g.hoist(spreadFromIterator, "spreadFromIterator");
-  // The live length as the array iterator reads it: `ToLength` of the read, the conversion inline
-  // for the answer a real array gives (a non-negative integer)
-  const liveLength = `(len = data.length, typeof len === "number" && (len | 0) === len && len >= 0 ? len : (len = ${toLen}(len)))`;
-  const walk = [
-    ...spec.items.map(
-      (_, i) => `if (!(${i} < ${liveLength})) { k = ${i}; break cap; } v${i} = data[${i}];`,
-    ),
-    `k = ${n};`,
-    `for (let i = ${n}; i < ${liveLength}; i++) data[i];`,
-  ].join("\n        ");
-  const fill = spec.items.map((_, i) => `v${i} = cap[${i}];`).join(" ");
-  const slots = spec.items.map((item, i) => {
-    const V = `v${i}`;
-    // The probe runs only while the parse holds no issue (`noIssue`, as in the array skeleton):
-    // stock never performs a `has` on the input, and a parse holding an issue never returns it by
-    // reference
-    const hole = `if (!dirty && inVal === undefined && noIssue && !(${i} in data)) dirty = true;`;
-    return `if (k === ${i}) break slots; { const inVal = ${V}; ${slotBlock(
-      g,
-      item,
-      spec,
-      String(i),
-      (holeTest) => (holeTest ? hole : ""),
-      `if (outVal === FAILED) anyFailed = true; else { ${V} = outVal; if (outVal !== inVal) dirty = true; else ${hole} }`,
-    )} }`;
-  });
+  const spread = g.hoist(stockSpread, "stockSpread");
+  const slots = spec.items.map(
+    (item, i) =>
+      `if (k > ${i}) { const inVal = items[${i}]; ${slotBlock(
+        g,
+        item,
+        spec,
+        String(i),
+        () => "",
+        `if (outVal === FAILED) anyFailed = true; else items[${i}] = outVal;`,
+      )} }`,
+  );
   const src = `return function generatedTuple(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
-    let dirty = ctx.force, anyFailed = false;
-    if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; }
-    let noIssue = ctx.issues.length === 0;
-    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i}`).join(", ")};`}
-    let k, len, cap;
-    const iter = data[Symbol.iterator];
-    if (iter === ${nativeIter}) {
-      const it = ${callIter}(data);
-      const next = it.next;
-      if (next === ${nativeNext}) { cap: {
-        ${walk}
-      } } else cap = ${fromIterator}(it, next);
-    } else cap = ${fromMethod}(iter, data);
-    if (cap !== undefined) { k = cap.length < ${n} ? cap.length : ${n}; ${fill} dirty = true; }
-    slots: {
+    if (data.length > ${n}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" });
+    const items = ${spread}(data);
+    let k = items.length;
+    if (k > ${n}) items.length = k = ${n};
+    let anyFailed = false;
     ${slots.join("\n    ")}
-    }
     if (anyFailed) return FAILED;
-    if (!dirty && len === k) return data;
-    const out = [${spec.items.map((_, i) => `v${i}`).join(", ")}];
-    if (k !== ${n}) out.length = k;
-    return out;
+    return items;
   };`;
   return build(g, spec.prefixIssues, src);
 }

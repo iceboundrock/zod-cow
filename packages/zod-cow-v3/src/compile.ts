@@ -29,20 +29,15 @@ import {
   floatSafeRemainder,
   type Issue,
   type IssueData,
-  NATIVE_ARRAY_ITERATOR,
-  NATIVE_ARRAY_NEXT,
   type PathSegment,
   type Validator,
   ZcError,
   ZcNotSupportedError,
-  callArrayIterator,
   parsedType,
   pushInvalidType,
   pushIssue,
   safeSet,
-  spreadFromIterator,
-  spreadFromMethod,
-  toLength,
+  stockSpread,
   isObjectType,
 } from "./internal.js";
 import { CODEGEN_AVAILABLE, genArray, genObject, genTuple } from "./codegen.js";
@@ -913,18 +908,22 @@ function makeArray(def: any): Validator {
       pushInvalidType(ctx, data, em, "array");
       return FAILED;
     }
-    // Length checks are dirty, not aborting: the elements are still parsed (same order as stock: exact, min, max)
-    if (exact !== null && data.length !== exact.value) {
+    // Length checks are dirty, not aborting: the elements are still parsed (same order as stock:
+    // exact, min, max; the exact check reads the length twice, `>` then `<`, as stock does)
+    if (exact !== null) {
       const tooBig = data.length > exact.value;
-      pushIssue(ctx, data, em, {
-        code: tooBig ? "too_big" : "too_small",
-        minimum: tooBig ? undefined : exact.value,
-        maximum: tooBig ? exact.value : undefined,
-        type: "array",
-        inclusive: true,
-        exact: true,
-        message: exact.message,
-      });
+      const tooSmall = data.length < exact.value;
+      if (tooBig || tooSmall) {
+        pushIssue(ctx, data, em, {
+          code: tooBig ? "too_big" : "too_small",
+          minimum: tooSmall ? exact.value : undefined,
+          maximum: tooBig ? exact.value : undefined,
+          type: "array",
+          inclusive: true,
+          exact: true,
+          message: exact.message,
+        });
+      }
     }
     if (min !== null && data.length < min.value) {
       pushIssue(ctx, data, em, {
@@ -947,32 +946,30 @@ function makeArray(def: any): Validator {
       });
     }
 
-    // Same algorithm as the generated skeleton: the clean path returns the input by reference, the
-    // first forced change (a changed element, or a hole, which stock's spread turns into an own
-    // undefined slot) rebuilds the clean prefix into a fresh array and every later element is
-    // written from the loop's single read, as stock reads it once (#65). Stock's rebuild mode
-    // (`ctx.force`) starts from a fresh array of the input's length and writes every element.
+    // Same algorithm as the generated skeleton (`genArray` in codegen.ts): the clean path returns
+    // the input by reference, the first forced change rebuilds the clean prefix into a fresh array
+    // (the one second read of the input, documented, #65) and every later element is written from
+    // the loop's single read. An element that reads as `undefined` and comes back unchanged is a
+    // forced change too, whether the input holds an own `undefined` or a hole: stock's spread turns
+    // a hole into an own `undefined` slot, and the own-ness test that would tell them apart is a
+    // `has` stock never performs on the input (#117, the decision of #95 on the zod4 line). Stock's
+    // rebuild mode (`ctx.force`) starts from a fresh array of the input's length and writes every
+    // element. No copy runs once an element has failed: the parse returns FAILED and the prefix read
+    // would be a read stock does not make.
     let dirty = ctx.force;
     let out: any[] = dirty ? new Array(data.length) : data;
     let anyFailed = false;
-    // Whether the parse holds no issue, the condition of the hole probe below (see `genArray` in
-    // codegen.ts): read once after the length checks, cleared when an element left an issue
-    let noIssue = ctx.issues.length === 0;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
       let outVal: any;
-      const before = ctx.issues.length;
       if (eager) {
         ctx.path.push(i);
         outVal = el(inVal, ctx);
         ctx.path.pop();
-        if (ctx.issues.length !== before) noIssue = false;
       } else {
+        const before = ctx.issues.length;
         outVal = el(inVal, ctx);
-        if (ctx.issues.length !== before) {
-          prefixIssues(ctx, before, i);
-          noIssue = false;
-        }
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
       }
       if (outVal === FAILED) {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
@@ -980,10 +977,7 @@ function makeArray(def: any): Validator {
       }
       if (dirty) {
         out[i] = outVal;
-      } else if (
-        !anyFailed &&
-        (outVal !== inVal || (inVal === undefined && noIssue && !(i in data)))
-      ) {
+      } else if (!anyFailed && (outVal !== inVal || inVal === undefined)) {
         dirty = true;
         out = new Array(data.length);
         for (let j = 0; j < i; j++) out[j] = data[j];
@@ -998,12 +992,12 @@ function makeArray(def: any): Validator {
 function makeTuple(def: any): Validator {
   if (def.rest) throw new ZcNotSupportedError("ZodTuple with rest schema");
   const em: ZodErrorMap | undefined = def.errorMap;
-  const items: Validator[] = def.items.map(go);
-  const n = items.length;
+  const slots: Validator[] = def.items.map(go);
+  const n = slots.length;
   const eager = (def.items as z.ZodTypeAny[]).some((it) => subtreeHasEffect(it));
   if (CODEGEN_AVAILABLE) {
     return genTuple({
-      items: (def.items as z.ZodTypeAny[]).map((it, i) => ({ schema: it, validator: items[i]! })),
+      items: (def.items as z.ZodTypeAny[]).map((it, i) => ({ schema: it, validator: slots[i]! })),
       eager,
       errorMap: em,
       regexOf: checkRegex,
@@ -1025,14 +1019,8 @@ function makeTuple(def: any): Validator {
       });
       return FAILED;
     }
-    // Same algorithm as the generated skeleton: the elements are captured into `vals` (the
-    // generated skeleton captures them into locals) as stock's `[...ctx.data]` captures them, after
-    // the length checks and before any item runs, `vals[i]` then takes the slot's result and `vals`
-    // is the output whenever the tuple is dirty, so no element is read twice on any path (#65)
-    const vals: any[] = new Array(n);
-    let dirty = ctx.force; // stock's rebuild mode: the copy from the start
+    // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
     if (data.length > n) {
-      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
       pushIssue(ctx, data, em, {
         code: "too_big",
         maximum: n,
@@ -1040,77 +1028,33 @@ function makeTuple(def: any): Validator {
         exact: false,
         type: "array",
       });
-      dirty = true;
     }
-    // Stock's spread is the array iterator (review of #115, second review): `Symbol.iterator` read
-    // off the input, `next` off the iterator the native method creates, and, when both are the
-    // natives, per step the live length (as ToLength converts it) and then the element at that
-    // index, the excess elements of a too-long input included, until the index reaches the length;
-    // so a getter that moves the length changes how many elements are read and parsed, as in
-    // stock. Any other answer continues through a real spread from the values already read, whose
-    // output is always fresh. `k` is the number of captured slots, `len` the length the last step
-    // read.
-    let k = 0;
-    let len = 0;
-    let cap: unknown[] | undefined;
-    const iter = data[Symbol.iterator];
-    if (iter === NATIVE_ARRAY_ITERATOR) {
-      const it = callArrayIterator(data);
-      const next = it.next;
-      if (next === NATIVE_ARRAY_NEXT) {
-        for (let i = 0; ; i++) {
-          len = toLength(data.length);
-          if (!(i < len)) {
-            k = i < n ? i : n;
-            break;
-          }
-          if (i < n) vals[i] = data[i];
-          else data[i];
-        }
-      } else cap = spreadFromIterator(it, next);
-    } else cap = spreadFromMethod(iter, data);
-    if (cap !== undefined) {
-      k = cap.length < n ? cap.length : n;
-      for (let i = 0; i < k; i++) vals[i] = cap[i];
-      dirty = true;
-    }
+    // Same algorithm as the generated skeleton (`genTuple` in codegen.ts): the capture is stock's
+    // own `[...ctx.data]`, made where stock makes it, and the fresh array it returns is the output;
+    // each captured slot is validated from it and its result written back, the slots past the
+    // captured count never run, and a too-long input is truncated to the declared slots after its
+    // excess elements were read. The skeleton never returns the input by reference (#65).
+    const items = stockSpread(data);
+    let k = items.length;
+    if (k > n) items.length = k = n;
     let anyFailed = false;
-    let noIssue = ctx.issues.length === 0; // as in `makeArray`, after the length checks
     for (let i = 0; i < k; i++) {
-      const inVal = vals[i];
+      const inVal = items[i];
       let outVal: any;
-      const before = ctx.issues.length;
       if (eager) {
         ctx.path.push(i);
-        outVal = items[i]!(inVal, ctx);
+        outVal = slots[i]!(inVal, ctx);
         ctx.path.pop();
-        if (ctx.issues.length !== before) noIssue = false;
       } else {
-        outVal = items[i]!(inVal, ctx);
-        if (ctx.issues.length !== before) {
-          prefixIssues(ctx, before, i);
-          noIssue = false;
-        }
+        const before = ctx.issues.length;
+        outVal = slots[i]!(inVal, ctx);
+        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
       }
-      if (outVal === FAILED) {
-        anyFailed = true;
-        continue;
-      }
-      vals[i] = outVal;
-      if (outVal !== inVal) dirty = true;
-      // A hole is materialized as an own slot, as stock's spread of the input does; the probe runs
-      // only while the parse holds no issue (see `genArray` in codegen.ts), since stock never
-      // performs a `has` on the input and a parse holding an issue never returns it by reference
-      // (third and fourth reviews of #115)
-      else if (!dirty && inVal === undefined && noIssue && !(i in data)) dirty = true;
+      if (outVal === FAILED) anyFailed = true;
+      else items[i] = outVal;
     }
     if (anyFailed) return FAILED;
-    // The clean path returns the input when every captured slot came back unchanged and the length
-    // the last step read is the captured count (an input that grew or shrank after a read holds
-    // elements stock's output does not, or lacks some)
-    if (!dirty && len === k) return data;
-    if (k !== n) vals.length = k;
-    return vals;
+    return items;
   };
 }
 
@@ -1803,7 +1747,8 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodArray":
       return isStaticPure(def.type, seen);
     case "ZodTuple":
-      return def.items.every((it: z.ZodTypeAny) => isStaticPure(it, seen));
+      // The tuple skeleton's output is the fresh array of stock's own spread, never the input (#65)
+      return false;
     case "ZodRecord":
       return isStaticPure(def.keyType, seen) && isStaticPure(def.valueType, seen);
     case "ZodMap":

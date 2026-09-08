@@ -134,7 +134,7 @@ zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock
 | S8 分配压力 / 驻留 | +28.2 MB / +11.6 MB | +11.2 MB / +10.8 MB | **+8.0 MB / +8.0 MB** | +157.5 MB / +66.6 MB |
 | S10 parse 失败，逐行 `safeParse`，1% / 10% / 50% / 100% 非法行 | 69 / 88 / 151 / 224 ms | 18 / 40 / 128 / 227 ms | **25 / 47 / 132 / 231 ms** | 30 / 91 / 287 / 426 ms |
 
-单记录热循环（同一个小输入，每轮 1 000 000 次操作，构建详细错误的 S10 行为 100 000 次，取每次操作的中位纳秒数；用于和公开的单对象基准形状对照，不是产品工作负载）。S11 各行来自同类 runner、同一 node 版本上的 [Benchmarks workflow run 34155317795](https://github.com/iceboundrock/zod-cow/actions/runs/34155317795)，`MAX_INLINE_KEY_COMPARISONS = 32`（#34；每轮操作数随宽度缩放，16 键 1 000 000 次到 64 键 250 000 次，ArkType 走 morph 的两行再取四分之一），同一场景在 Node 22 与 26 上的两次运行以及上限为 16 时的三次运行列在 CHANGELOG 条目里：
+单记录热循环（同一个小输入，每轮 1 000 000 次操作，构建详细错误的 S10 行为 100 000 次，取每次操作的中位纳秒数；用于和公开的单对象基准形状对照，不是产品工作负载）。S11 各行来自同类 runner、同一 node 版本上的 [Benchmarks workflow run 34186795526](https://github.com/iceboundrock/zod-cow/actions/runs/34186795526)，带未声明键遍历的位置测试（#102），`MAX_INLINE_KEY_COMPARISONS = 32`（#34；每轮操作数随宽度缩放，16 键 1 000 000 次到 64 键 250 000 次，ArkType 走 morph 的两行再取四分之一）；同一场景在 Node 22 与 26 上的运行、同日对旧引擎的运行以及 #102 之前的运行列在 CHANGELOG 条目里：
 
 | 场景 | stock zod4 | z.compile() | **zod-cow-v4** | ArkType |
 |---|---|---|---|---|
@@ -143,10 +143,10 @@ zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock
 | 校准 validate（同一记录） | N/A | 22 ns（`z.validate`） | **19 ns**（`validate()`） | 20 ns（`.allows()`） |
 | S9 纯校验失败：首字段 / 末字段 / 嵌套 / email / tuple 槽 | N/A | 1 550 / 1 689 / 1 807 / 2 490 / 869 ns | **17 / 166 / 165 / 92 / 31 ns** | 172 / 16 / 21 / 145 / 31 ns |
 | S10 带错误信息的 parse 失败：首键 / 末键 / 嵌套 / refine | 3 621 / 3 576 / 3 693 / 3 475 ns | 3 578 / 3 762 / 3 807 / 3 754 ns | **3 563 / 3 819 / 3 727 / 3 929 ns** | 6 859 / 11 886 / 7 161 / 5 843 ns |
-| S11 宽对象，strip 干净 parse，16 / 32 / 64 个字符串键（按引用返回输入） | 212 / 565 / 1 225 ns | 30 / 49 / 84 ns | **101 / 222 / 550 ns** | 45 / 122 / 378 ns |
-| S11 宽对象，strip parse 带一个多余键，16 / 32 / 64 键（剥离到副本） | 247 / 615 / 1 346 ns | 53 / 77 / 108 ns | **87 / 214 / 566 ns** | 9 161 / 18 180 / 36 786 ns（`onUndeclaredKey("delete")`） |
-| S11 宽对象，strip 脏 parse（末键带默认值且缺失），16 / 32 / 64 键 | 299 / 627 / 1 406 ns | 82 / 170 / 476 ns | **82 / 179 / 520 ns** | 6 901 / 14 873 / 31 650 ns（键默认值） |
-| S11 宽对象，strict 干净 parse，16 / 32 / 64 键（按引用返回输入） | 365 / 825 / 1 803 ns | 68 / 172 / 574 ns | **105 / 208 / 548 ns** | 403 / 742 / 1 643 ns（`onUndeclaredKey("reject")`） |
+| S11 宽对象，strip 干净 parse，16 / 32 / 64 个字符串键（按引用返回输入） | 200 / 572 / 1 270 ns | 29 / 51 / 89 ns | **89 / 137 / 268 ns** | 48 / 114 / 389 ns |
+| S11 宽对象，strip parse 带一个多余键，16 / 32 / 64 键（剥离到副本） | 244 / 620 / 1 390 ns | 31 / 60 / 109 ns | **82 / 149 / 301 ns** | 9 275 / 18 140 / 36 766 ns（`onUndeclaredKey("delete")`） |
+| S11 宽对象，strip 脏 parse（末键带默认值且缺失），16 / 32 / 64 键 | 300 / 650 / 1 408 ns | 80 / 186 / 534 ns | **86 / 195 / 540 ns** | 7 010 / 15 094 / 31 678 ns（键默认值） |
+| S11 宽对象，strict 干净 parse，16 / 32 / 64 键（按引用返回输入） | 359 / 834 / 1 814 ns | 67 / 177 / 587 ns | **97 / 135 / 268 ns** | 414 / 742 / 1 711 ns（`onUndeclaredKey("reject")`） |
 
 对 zod-cow-v4 的比值（大于 1 表示对方耗时更长，即 zod-cow 更快；N/A 单元不计算）：
 
@@ -163,10 +163,10 @@ zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock
 | S10 parse 失败，1% / 10% / 50% / 100% 非法 | 2.79x / 1.89x / 1.15x / 0.97x | 0.73x / 0.86x / 0.98x / 0.98x | 1.20x / 1.94x / 2.18x / 1.85x |
 | 校准 parse / validate | 3.39x / n/a | 0.42x / 1.16x | 0.59x / 1.09x |
 | 校准 parse，`ownSymbolKeys: "ignore"` | n/a | 0.89x | n/a |
-| S11 宽对象 strip 干净，16 / 32 / 64 键 | 2.10x / 2.55x / 2.23x | 0.30x / 0.22x / 0.15x | 0.45x / 0.55x / 0.69x |
-| S11 宽对象 strip 多余键，16 / 32 / 64 键 | 2.83x / 2.87x / 2.38x | 0.61x / 0.36x / 0.19x | 105.07x / 84.81x / 64.98x |
-| S11 宽对象 strip 脏，16 / 32 / 64 键 | 3.64x / 3.50x / 2.70x | 1.00x / 0.95x / 0.91x | 84.22x / 83.03x / 60.85x |
-| S11 宽对象 strict 干净，16 / 32 / 64 键 | 3.46x / 3.97x / 3.29x | 0.65x / 0.83x / 1.05x | 3.83x / 3.57x / 3.00x |
+| S11 宽对象 strip 干净，16 / 32 / 64 键 | 2.25x / 4.19x / 4.74x | 0.32x / 0.37x / 0.33x | 0.54x / 0.83x / 1.45x |
+| S11 宽对象 strip 多余键，16 / 32 / 64 键 | 2.98x / 4.17x / 4.61x | 0.38x / 0.40x / 0.36x | 113.03x / 121.89x / 122.04x |
+| S11 宽对象 strip 脏，16 / 32 / 64 键 | 3.48x / 3.34x / 2.61x | 0.93x / 0.95x / 0.99x | 81.30x / 77.50x / 58.65x |
+| S11 宽对象 strict 干净，16 / 32 / 64 键 | 3.72x / 6.18x / 6.77x | 0.70x / 1.31x / 2.19x | 4.28x / 5.49x / 6.38x |
 
 怎么读：
 
@@ -175,7 +175,7 @@ zod4 线，[Benchmarks workflow run 33948313612](https://github.com/iceboundrock
 - 对 ArkType：干净 parse 持平（S1 0.97x），纯校验领先（S4 1.25x，校准 validate 1.09x），tuple 落后（S6 0.40x，2 ms 对 5 ms：ArkType 预编译的检查直接返回输入、零分配，骨架每行还要付 strip 探测），单记录 parse 落后（0.59x）。S2/S3/S8 的差距（zod-cow 领先 30x～46x）是架构性的：任何 morph（包括键默认值和未声明键删除）都会让 ArkType 2.2.3 离开预编译的 `allows` 路径，走解释执行的遍历，先深拷贝整个输入再套用排队的 morph（S3 在 5 万条上分配 +90 MB，S8 +158 MB，每一行都重建），而 zod-cow 把 default 当普通叶子编译，只拷贝真正变化的行。S1 只是对干净 fixture 的公平比较：zod 默认的对象模式会 strip 未声明键，ArkType 按引用保留，所以 S8 才是两边做同样工作的场景。
 - 失败路径：`validate()` 只靠编译 validator 就回答 `null`（17～166 ns），公开的 `z.validate` 失败时回退到 runtime parser（0.9～2.5 µs），ArkType 的 `.allows()` 按自己的代价顺序检查键（便宜的 `active` 键失败时 16 ns，`id` 失败时 172 ns）。带错误信息时（S10）每条 zod 路径对每个非法记录都是 3.5～3.9 µs：两个编译变体的快路径只占构建 `ZodError` 的 runtime parse 的一小部分，所以它们的重复工作看不出来；失败的 refine 谓词在 `z.compile()`、zod-cow 和 ArkType 上都跑两次（成功 parse 时各跑一次）。混合数据集上 zod-cow 随非法比例从 2.79x（1%）滑到 0.97x（100%）对 stock。
 - validate 快路径：`validate()` 就是同一 array schema 的官方整树 `assertOnly` 产物，所以 S4 按构造与 `z.validate` 持平（18 ms 对 17 ms，0.93x）。它的价值是纯校验成本：18 ms / 50 000 = 每账户 360 ns，gc 后零驻留。
-- 宽对象（S11）：干净路径上的未声明键探测就是原始类型宽对象的全部成本。64 键时 zod-cow 的干净 strip parse（550 ns）约为 `z.compile()`（84 ns）的七倍，后者的输出字面量由 V8 从 boilerplate 一步分配；strict 行在 stock 同样跑这个循环时读出同样的差距（548 对 574 ns：成本在 `for...in` 本身，不在成员测试）；脏行没有探测、双方都逐键组装副本，二者持平（520 对 476 ns，0.91x）。到 `MAX_INLINE_KEY_COMPARISONS`（自 #34 起为 32）为止的比较链让 17～32 键的探测比 `Set` 便宜 20%～30%；更宽形状上更便宜的探测是另一个问题（#102）。
+- 宽对象（S11）：干净路径上的两个未声明键探测就是原始类型宽对象的全部成本。`for...in` 遍历先把每个键与它所在位置上的声明键比较，再做成员测试（#102），所以按 shape 顺序到来的输入（用同一 shape 写出的载荷经 `JSON.parse` 得到的顺序）每个键只付一次指针比较：64 键对象的干净 strip parse 从 550 ns 降到 268 ns（run 34155317795 对引用的这次运行，同类 runner），32 键从 222 降到 137，strict 行同样变化（548 到 268，208 到 135），而 `z.compile()`（其输出字面量由 V8 从 boilerplate 一步分配）在 32 / 64 键读出 51 / 89 ns，差距从 4.5x～7x 缩到 2.7x～3x。脏行没有探测、双方都逐键组装副本，仍然持平（540 对 534 ns，0.99x）。键序与 shape 不同的输入（生产方自己的顺序，或缺一个可选键之后其余键都错位）付的是原来的成员测试外加每键一次失败的比较。宽对象干净路径上剩下的是自有 symbol 探测，其成本随键数增长（`Object.getOwnPropertySymbols` 会遍历每个自有键：本地 Node 24 上 6 键约 80 ns，64 键约 190 ns）；数据确定不带 symbol 键的调用方可以用 `ownSymbolKeys: "ignore"` 去掉它。
 - S1 的 +3.1 MB 是 strip 模式探测产生的短命分配：每个对象恰好一个空的自有 symbol 数组（32 字节），这里是 10 万个对象，用来证明该对象可以按原引用返回。这个探测（`Object.getOwnPropertySymbols`）也是骨架每个对象的固定开销：引用的那次运行里一个 6 字段记录的骨架调用是 69 ns，其中约 31 ns 是它（默认校准行对跳过探测的可选行），`for...in` 探测约 9 ns，叶子 validator 调用测不出开销（这两项为本地 Node 24 实测），同一 schema 的编译 parser 是 29 ns。它默认保留，因为 stock 会丢弃自有 symbol 键，透传必须证明没有。数据确定不带 symbol 键的调用方可以用 `compile(schema, { ownSymbolKeys: "ignore" })` 关闭它（#43，见[包 README](packages/zod-cow-v4/README.md#compileoptions)）；基准把它作为 calibration 一节里单独标注的可选行来测量，各场景的 zod-cow-v4 列仍使用默认值。run 34069671088 里 calibration parse 带探测为 69 ns，不带为 38 ns，同两行里的 `z.compile()` 为 29 到 34 ns（0.42x 与 0.89x）。
 
 zod3 线有自己的套件 `bench-v3`（`pnpm run bench:v3`），方法相同，ArkType 按 zod3 的约束构建。数据来自 [Benchmarks workflow run 33998778811](https://github.com/iceboundrock/zod-cow/actions/runs/33998778811)（同类 runner，node 24，`BENCH_N=50 000`，zod3 线的生成骨架，#63 的最终提交；校准与 S9 热循环两行来自 [run 34069671088](https://github.com/iceboundrock/zod-cow/actions/runs/34069671088)，`BENCH_ITERS=1 000 000`，失败行为 100 000 次，#45）：

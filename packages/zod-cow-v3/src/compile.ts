@@ -29,14 +29,20 @@ import {
   floatSafeRemainder,
   type Issue,
   type IssueData,
+  NATIVE_ARRAY_ITERATOR,
+  NATIVE_ARRAY_NEXT,
   type PathSegment,
   type Validator,
   ZcError,
   ZcNotSupportedError,
+  callArrayIterator,
   parsedType,
   pushInvalidType,
   pushIssue,
   safeSet,
+  spreadFromIterator,
+  spreadFromMethod,
+  toLength,
   isObjectType,
 } from "./internal.js";
 import { CODEGEN_AVAILABLE, genArray, genObject, genTuple } from "./codegen.js";
@@ -1009,14 +1015,13 @@ function makeTuple(def: any): Validator {
       });
       return FAILED;
     }
-    // Same algorithm as the generated skeleton: every element is read into `vals` (the generated
-    // skeleton reads it into a local) before any slot is parsed, `vals[i]` then takes the slot's
-    // result and `vals` is the output whenever the tuple is dirty, so no element is read twice on
-    // any path (#65)
+    // Same algorithm as the generated skeleton: the elements are captured into `vals` (the
+    // generated skeleton captures them into locals) as stock's `[...ctx.data]` captures them, after
+    // the length checks and before any item runs, `vals[i]` then takes the slot's result and `vals`
+    // is the output whenever the tuple is dirty, so no element is read twice on any path (#65)
     const vals: any[] = new Array(n);
     let dirty = ctx.force; // stock's rebuild mode: the copy from the start
-    const tooBig = data.length > n;
-    if (tooBig) {
+    if (data.length > n) {
       // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
       pushIssue(ctx, data, em, {
         code: "too_big",
@@ -1027,14 +1032,40 @@ function makeTuple(def: any): Validator {
       });
       dirty = true;
     }
-    // Every element is read here, in ascending order and the excess elements of a too-long input
-    // included, where stock's `[...ctx.data]` reads them (after the length check and its issue,
-    // before any item runs), so a getter that runs while a slot is parsed cannot change what a
-    // later slot sees (review of #115)
-    for (let i = 0; i < n; i++) vals[i] = data[i];
-    if (tooBig) for (let i = n; i < data.length; i++) data[i];
+    // Stock's spread is the array iterator (review of #115, second review): `Symbol.iterator` read
+    // off the input, `next` off the iterator the native method creates, and, when both are the
+    // natives, per step the live length (as ToLength converts it) and then the element at that
+    // index, the excess elements of a too-long input included, until the index reaches the length;
+    // so a getter that moves the length changes how many elements are read and parsed, as in
+    // stock. Any other answer continues through a real spread from the values already read, whose
+    // output is always fresh. `k` is the number of captured slots, `len` the length the last step
+    // read.
+    let k = 0;
+    let len = 0;
+    let cap: unknown[] | undefined;
+    const iter = data[Symbol.iterator];
+    if (iter === NATIVE_ARRAY_ITERATOR) {
+      const it = callArrayIterator(data);
+      const next = it.next;
+      if (next === NATIVE_ARRAY_NEXT) {
+        for (let i = 0; ; i++) {
+          len = toLength(data.length);
+          if (!(i < len)) {
+            k = i < n ? i : n;
+            break;
+          }
+          if (i < n) vals[i] = data[i];
+          else data[i];
+        }
+      } else cap = spreadFromIterator(it, next);
+    } else cap = spreadFromMethod(iter, data);
+    if (cap !== undefined) {
+      k = cap.length < n ? cap.length : n;
+      for (let i = 0; i < k; i++) vals[i] = cap[i];
+      dirty = true;
+    }
     let anyFailed = false;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < k; i++) {
       const inVal = vals[i];
       let outVal: any;
       if (eager) {
@@ -1056,7 +1087,12 @@ function makeTuple(def: any): Validator {
       else if (!dirty && inVal === undefined && !(i in data)) dirty = true;
     }
     if (anyFailed) return FAILED;
-    return dirty ? vals : data;
+    // The clean path returns the input when every captured slot came back unchanged and the length
+    // the last step read is the captured count (an input that grew or shrank after a read holds
+    // elements stock's output does not, or lacks some)
+    if (!dirty && len === k) return data;
+    if (k !== n) vals.length = k;
+    return vals;
   };
 }
 

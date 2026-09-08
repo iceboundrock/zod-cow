@@ -21,9 +21,15 @@ import type { z, ZodErrorMap } from "zod";
 import {
   type Ctx,
   FAILED,
+  NATIVE_ARRAY_ITERATOR,
+  NATIVE_ARRAY_NEXT,
+  callArrayIterator,
   isObjectType,
   pushInvalidType,
   pushIssue,
+  spreadFromIterator,
+  spreadFromMethod,
+  toLength,
   type Validator,
 } from "./internal.js";
 
@@ -412,23 +418,49 @@ export interface TupleSpec {
 
 /**
  * Generated tuple skeleton (the closure `makeTuple` in compile.ts), one unrolled block per slot.
- * Every element is read into a local (`v0`, `v1`, …) before any slot is parsed, in ascending
- * order and the excess elements of a too-long input included, where stock's `[...ctx.data]` reads
- * them (after the length check and its too_big issue, before any item runs), so a getter that
- * runs while a slot is parsed cannot change what a later slot sees (review of #115). Each local
- * then takes its slot's result and the copy is an array literal of the locals, so no element is
- * read twice on any path (#65): a too-long input (too_big, dirty like stock) and stock's rebuild
- * mode take the same assembly. A hole reads as undefined, is parsed as such and makes the tuple
- * dirty, since stock's spread turns it into an own `undefined` slot.
+ * The elements are captured as stock's `[...ctx.data]` captures them, after the length checks and
+ * the too_big issue and before any item runs (review of #115): `Symbol.iterator` is read off the
+ * input and, when it answered the native array iterator, `next` off the iterator that iterator
+ * creates (the reads stock's spread makes, with stock's receivers); when both answered the natives
+ * the walk is inline, reading the live length (converted as `ToLength` converts it) before each
+ * element and the element into its local (`v0`, `v1`, …), the excess elements of a too-long input
+ * included, until the index reaches the length, so a getter that moves the length changes how
+ * many elements are read and parsed exactly as it does in stock (second review of #115); any other
+ * answer continues through a real spread from the values already read (`spreadFromMethod`,
+ * `spreadFromIterator`), whose elements fill the locals and whose output is always a fresh array.
+ * Each local then takes its slot's result, the slots past the captured count never run, and the
+ * copy is an array literal of the locals cut to that count, so no element is read twice on any
+ * path (#65): a too-long input (too_big, dirty like stock) and stock's rebuild mode take the same
+ * assembly. The clean path returns the input when every captured slot came back unchanged and the
+ * length the last step read is the captured count (an input that grew or shrank after a read
+ * holds elements stock's output does not, or lacks some). A hole reads as undefined, is parsed as
+ * such and makes the tuple dirty, since stock's spread turns it into an own `undefined` slot.
  */
 export function genTuple(spec: TupleSpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
   const n = spec.items.length;
+  const nativeIter = g.hoist(NATIVE_ARRAY_ITERATOR, "nativeIter");
+  const nativeNext = g.hoist(NATIVE_ARRAY_NEXT, "nativeNext");
+  const callIter = g.hoist(callArrayIterator, "callIter");
+  const toLen = g.hoist(toLength, "toLength");
+  const fromMethod = g.hoist(spreadFromMethod, "spreadFromMethod");
+  const fromIterator = g.hoist(spreadFromIterator, "spreadFromIterator");
+  // The live length as the array iterator reads it: `ToLength` of the read, the conversion inline
+  // for the answer a real array gives (a non-negative integer)
+  const liveLength = `(len = data.length, typeof len === "number" && (len | 0) === len && len >= 0 ? len : (len = ${toLen}(len)))`;
+  const walk = [
+    ...spec.items.map(
+      (_, i) => `if (!(${i} < ${liveLength})) { k = ${i}; break cap; } v${i} = data[${i}];`,
+    ),
+    `k = ${n};`,
+    `for (let i = ${n}; i < ${liveLength}; i++) data[i];`,
+  ].join("\n        ");
+  const fill = spec.items.map((_, i) => `v${i} = cap[${i}];`).join(" ");
   const slots = spec.items.map((item, i) => {
     const V = `v${i}`;
     const hole = `if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;`;
-    return `{ const inVal = ${V}; ${slotBlock(
+    return `if (k === ${i}) break slots; { const inVal = ${V}; ${slotBlock(
       g,
       item,
       spec,
@@ -441,14 +473,26 @@ export function genTuple(spec: TupleSpec): Validator {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
     let dirty = ctx.force, anyFailed = false;
-    const tooBig = data.length > ${n};
-    if (tooBig) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; }
-    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i} = data[${i}]`).join(", ")};`}
-    if (tooBig) for (let i = ${n}; i < data.length; i++) data[i];
+    if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; }
+    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i}`).join(", ")};`}
+    let k, len, cap;
+    const iter = data[Symbol.iterator];
+    if (iter === ${nativeIter}) {
+      const it = ${callIter}(data);
+      const next = it.next;
+      if (next === ${nativeNext}) { cap: {
+        ${walk}
+      } } else cap = ${fromIterator}(it, next);
+    } else cap = ${fromMethod}(iter, data);
+    if (cap !== undefined) { k = cap.length < ${n} ? cap.length : ${n}; ${fill} dirty = true; }
+    slots: {
     ${slots.join("\n    ")}
+    }
     if (anyFailed) return FAILED;
-    if (!dirty) return data;
-    return [${spec.items.map((_, i) => `v${i}`).join(", ")}];
+    if (!dirty && len === k) return data;
+    const out = [${spec.items.map((_, i) => `v${i}`).join(", ")}];
+    if (k !== ${n}) out.length = k;
+    return out;
   };`;
   return build(g, spec.prefixIssues, src);
 }

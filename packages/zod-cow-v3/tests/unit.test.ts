@@ -1429,6 +1429,226 @@ test("tuple: every element is read before any slot is parsed, in ascending order
   assert.equal(cow2.success && cow2.data[0], c2.input[0]);
 });
 
+test("tuple: the capture is stock's spread step by step: the live length before each element, ToLength, the iterator and its next read with stock's receivers (second review of #115)", () => {
+  // Stock's `[...ctx.data]` is the array iterator: `Symbol.iterator` read off the input, `next` off
+  // the iterator it answered, then per step the live length (converted as ToLength converts it)
+  // and the element at that index, until the index reaches the length. A getter that moves the
+  // length therefore changes how many elements stock reads and parses, and an input answering
+  // another iterator or another `next` is captured through it. The skeleton makes the same reads
+  // at the same points, so every case gives stock's value and stock's read log.
+  const T = z.tuple([z.string(), z.string()]);
+  const C = compile(T);
+  const logGetter = (arr: any[], i: number, log: string[], value: unknown, effect?: () => void) =>
+    Object.defineProperty(arr, i, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        log.push(`get ${i}`);
+        effect?.();
+        return value;
+      },
+    });
+  // The output snapshot reads by index and never spreads: the compiled output may alias an input
+  // whose iterator or getters are the case under test (so it is taken after the read logs were
+  // compared)
+  const snapshot = (r: any) => {
+    if (!r.success)
+      return `fail ${r.error.issues.map((i: any) => `${i.code}@${i.path.join(".")}`).join(",")}`;
+    const d = r.data;
+    const vals: unknown[] = [];
+    for (let i = 0; i < d.length; i++) vals.push(d[i]);
+    return `ok ${JSON.stringify(vals)} len=${d.length}`;
+  };
+  type Row = { name: string; make: () => { input: any; log: string[] }; alias: boolean };
+  const rows: Row[] = [
+    {
+      // The reviewer's row: stock stops after the first element and succeeds with one; the input
+      // then holds that one element, so the clean path may return it
+      name: "getter at 0 shrinks the input to one element",
+      alias: true,
+      make: () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        logGetter(input, 0, log, "a", () => {
+          input.length = 1;
+        });
+        return { input, log };
+      },
+    },
+    {
+      // Growth: the iterator reads the elements the new length covers (no issue, too_big was
+      // decided before), stock's output holds the two declared ones, the input holds four
+      name: "getter at 0 grows the input to four elements",
+      alias: false,
+      make: () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        logGetter(input, 0, log, "a", () => {
+          input.length = 4;
+          logGetter(input, 2, log, "c");
+          logGetter(input, 3, log, "d");
+        });
+        return { input, log };
+      },
+    },
+    {
+      // A shrink after the last read: stock's output holds both elements, the input none
+      name: "getter at 1 empties the input",
+      alias: false,
+      make: () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        logGetter(input, 1, log, "b", () => {
+          input.length = 0;
+        });
+        return { input, log };
+      },
+    },
+    {
+      // An own `Symbol.iterator` on the instance: stock captures what it yields
+      name: "own Symbol.iterator on the instance",
+      alias: false,
+      make: () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: function* () {
+            log.push("iter");
+            yield "x";
+            yield "y";
+          },
+        });
+        return { input, log };
+      },
+    },
+    {
+      // A Proxy: the trap log is stock's, the length converted as ToLength converts it (2.5 reads
+      // as two elements after the too_big issue its raw comparison raised)
+      name: "Proxy answering a fractional length",
+      alias: false,
+      make: () => {
+        const log: string[] = [];
+        const input = new Proxy(["a", "b", "c"], {
+          get(t, key, r) {
+            log.push(`get ${String(key)}`);
+            return key === "length" ? 2.5 : Reflect.get(t, key, r);
+          },
+          has(t, key) {
+            log.push(`has ${String(key)}`);
+            return Reflect.has(t, key);
+          },
+        });
+        return { input, log };
+      },
+    },
+    {
+      // A Proxy over a plain input: the same reads, the clean path returns it
+      name: "Proxy over a plain input",
+      alias: true,
+      make: () => {
+        const log: string[] = [];
+        const input = new Proxy(["a", "b"], {
+          get(t, key, r) {
+            log.push(`get ${String(key)}`);
+            return Reflect.get(t, key, r);
+          },
+        });
+        return { input, log };
+      },
+    },
+  ];
+  for (const row of rows) {
+    const s = row.make();
+    const stock = snapshot(T.safeParse(s.input));
+    const stockLog = s.log.join(" ");
+    const c = row.make();
+    const r = C.safeParse(c.input);
+    // The read logs are compared before the output is inspected (the snapshot reads getters)
+    assert.deepEqual(c.log.join(" "), stockLog, `${row.name}: reads`);
+    assert.equal(snapshot(r), stock, `${row.name}: value`);
+    if (r.success) assert.equal(r.data === c.input, row.alias, `${row.name}: reference`);
+  }
+  // A shrink with a defaulted slot: the one captured slot is parsed, the second never runs
+  const TD = z.tuple([z.string().default("d"), z.string()]);
+  const shrunk: any[] = [undefined, "b"];
+  Object.defineProperty(shrunk, 0, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      shrunk.length = 1;
+      return undefined;
+    },
+  });
+  assert.deepEqual(compile(TD).safeParse(shrunk), { success: true, data: ["d"] });
+  // `next` replaced on the array iterator prototype: stock's spread calls the replacement on the
+  // iterator, and so does the skeleton (the replacement rewrites the first value)
+  const proto = Object.getPrototypeOf([][Symbol.iterator]());
+  const nativeNext = proto.next;
+  const desc = Object.getOwnPropertyDescriptor(proto, "next")!;
+  try {
+    Object.defineProperty(proto, "next", {
+      configurable: true,
+      writable: true,
+      value: function (this: Iterator<unknown>) {
+        const r = nativeNext.call(this);
+        return r.value === "a" ? { done: r.done, value: "A" } : r;
+      },
+    });
+    assert.deepEqual(T.safeParse(["a", "b"]), { success: true, data: ["A", "b"] });
+    assert.deepEqual(C.safeParse(["a", "b"]), { success: true, data: ["A", "b"] });
+  } finally {
+    Object.defineProperty(proto, "next", desc);
+  }
+  // `next` as an accessor answering by its receiver: stock reads it off the iterator, so a read
+  // off the prototype (a guard's, the sixth review of #88 on the zod4 line) would get the throwing
+  // answer
+  try {
+    Object.defineProperty(proto, "next", {
+      configurable: true,
+      get() {
+        return this === proto
+          ? () => {
+              throw new Error("read off the prototype");
+            }
+          : nativeNext;
+      },
+    });
+    assert.deepEqual(T.safeParse(["a", "b"]), { success: true, data: ["a", "b"] });
+    const plain = ["a", "b"];
+    assert.equal(C.parse(plain), plain);
+  } finally {
+    Object.defineProperty(proto, "next", desc);
+  }
+  // The engine's own errors for a broken protocol, with stock's message
+  const broken = (iterator: unknown) => {
+    const input: any[] = ["a", "b"];
+    Object.defineProperty(input, Symbol.iterator, { value: iterator });
+    return input;
+  };
+  const thrown = (f: () => unknown) => {
+    try {
+      f();
+    } catch (e: any) {
+      return `${e.constructor.name}: ${e.message}`;
+    }
+    return "no throw";
+  };
+  for (const [name, iterator] of [
+    ["a non-callable Symbol.iterator", 1],
+    ["an iterator that is not an object", () => 1],
+    ["a non-callable next", () => ({ next: 1 })],
+    ["a next answering a non-object", () => ({ next: () => 1 })],
+  ] as const) {
+    const st = thrown(() => T.safeParse(broken(iterator)));
+    assert.notEqual(st, "no throw", name);
+    assert.equal(
+      thrown(() => C.safeParse(broken(iterator))),
+      st,
+      name,
+    );
+  }
+});
+
 test("no own-symbol probe (documented): a clean object or record keeps an undeclared own symbol key by reference, the copy path drops it like stock", () => {
   const sym = Symbol("s");
   const withEnum = () => ({ a: "x", [sym]: 1 });

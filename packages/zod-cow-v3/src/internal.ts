@@ -223,3 +223,62 @@ export function safeSet(obj: Record<string, unknown>, key: string, value: unknow
     obj[key] = value;
   }
 }
+
+/*
+ * Stock's spread of an array input (`[...ctx.data]` in `ZodArray._parse` and `ZodTuple._parse`)
+ * is the array iterator: `Symbol.iterator` is read off the input, called on it, `next` read off
+ * the iterator it answered, and each step reads the live `length` (converted as `ToLength`
+ * converts it) and then the element at the step's index, until the index reaches the length. A
+ * skeleton that captures the elements by hand makes those reads with stock's receivers at stock's
+ * points (the method off the input, `next` off the iterator the native method creates, which runs
+ * no user code) and walks the input inline only when both answered the natives; any other answer
+ * continues through a real spread from the values already read, so the call of the method, the
+ * object check on its result, the reads and calls of `next`, the reads of `done` and `value` and
+ * every `TypeError` are the engine's own (second review of #115; the zod4 line's rest layout
+ * follows the same rule, sixth review of #88).
+ */
+export const NATIVE_ARRAY_ITERATOR: unknown = Array.prototype[Symbol.iterator];
+export const NATIVE_ARRAY_NEXT: unknown = Object.getPrototypeOf([][Symbol.iterator]()).next;
+/** The native array iterator called on the input (stock's `Call(method, data)` once the read answered it) */
+export const callArrayIterator = Function.prototype.call.bind(
+  NATIVE_ARRAY_ITERATOR as (...args: unknown[]) => unknown,
+) as (data: unknown[]) => { next: unknown };
+
+/** `ToLength` of what a `length` read answered (the array iterator's `LengthOfArrayLike`) */
+export function toLength(value: unknown): number {
+  const n = +(value as number);
+  return n > 0 ? (n < 9007199254740991 ? Math.floor(n) : 9007199254740991) : 0;
+}
+
+/**
+ * The spread continued from the `Symbol.iterator` value the input answered, when it is not the
+ * native array iterator: the spread calls it on the input, checks that the result is an object,
+ * reads its `next` and drives the protocol.
+ */
+export function spreadFromMethod(method: unknown, data: unknown[]): unknown[] {
+  // The operand is spelled `ctx.data` as stock spells it, so the engine's "is not iterable"
+  // message carries stock's text
+  const ctx = {
+    data: (typeof method === "function"
+      ? { [Symbol.iterator]: () => Reflect.apply(method, data, []) }
+      : { [Symbol.iterator]: method }) as Iterable<unknown>,
+  };
+  return [...ctx.data];
+}
+
+/**
+ * The spread continued from the native array iterator over the input and the `next` it answered,
+ * when that is not the native one: the spread calls that `next` on the iterator per step and reads
+ * `done` and `value` off what it returned.
+ */
+export function spreadFromIterator(iterator: { next: unknown }, next: unknown): unknown[] {
+  const ctx = {
+    data: {
+      [Symbol.iterator]: () =>
+        (typeof next === "function"
+          ? { next: () => Reflect.apply(next, iterator, []) }
+          : { next }) as Iterator<unknown>,
+    },
+  };
+  return [...ctx.data];
+}

@@ -193,12 +193,16 @@ if (x7 === INVALID) return INVALID;
 if (x7 !== x6) x0 = true;
 if (!x0) {                                                 // strip probes, only while the input may still be returned
   let x8 = false;
+  let x9 = 0;
   for (const k in input) {
-    if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
-  }                                                         // fixed string keys are generated comparisons
+    if (x9 < 5 && k === c5[x9]) x9++;                      // the declared key at this position: one pointer comparison (#102)
+    else {
+      if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+    }                                                       // a key out of its declared position: the membership test, generated comparisons
+  }
   if (!x8) {
-    const x9 = Object.getOwnPropertySymbols(input);        // the clean path's only allocation: one empty array per object
-    if (x9.length !== 0) x8 = true;                        // no declared symbols: any own symbol is extra
+    const x10 = Object.getOwnPropertySymbols(input);       // the clean path's only allocation: one empty array per object
+    if (x10.length !== 0) x8 = true;                       // no declared symbols: any own symbol is extra
   }
   if (!x8) {
     return input;                                          // ═══ the one line the official template does not have ═══
@@ -216,15 +220,21 @@ Point-by-point correspondence with the official dump:
 | `const v5 = new Array(len)` | (inside the element loop) `out = new Array(len)` plus the clean prefix | Same for arrays: the prefix rebuild only on the first dirt, every later element written once (#70) |
 | `if (!c1.test(v2)) return INVALID` | same (inside the assertOnly product) | Leaf validation is 100% official |
 | `const v8 = { "id": v0, … }` in shape order, with the `mayOutputUndefined` / `dropsWhenAbsent` rules for conditional keys and a `for...in` append in passthrough mode | the same literal, from the captured locals, on the copy path | The copy is stock's output: shape order, the same key-presence rules, getters read once. Undeclared keys are dropped by construction, so the copy path needs no probe and no `delete` (the earlier `{ ...input }` plus `delete` copy kept the input's order, re-read every getter (#36) and turned the copy into a dictionary-mode object, which made strip parity (S8) slower than stock) |
-| `for (const k in …)` unknown probe | generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (32 since #34, 16 before) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found (strict and loose objects run the own-symbol probe alone, #42) | Same inherited-enumerable semantics with faster monomorphic small-object membership; both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap sits where the chain stops winning: measured through the real skeleton (the S11 rows of `bench-v4`, #34), the chain is 20 to 30% faster than the `Set` at 17 to 32 keys, level at 48 and slower from 64, since it is quadratic in the key count where the `Set` is linear (see the constant's comment for the numbers). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
+| `for (const k in …)` unknown probe | the same `for...in`, each key compared with the declared string key at the walk's position first (`emitDeclaredKeyWalk`, #102) and, on a miss, generated string comparisons for shapes up to `MAX_INLINE_KEY_COMPARISONS` (32 since #34, 16 before) keys, then a `Set` fallback; the own-symbol probe follows only when no undeclared string key was found (strict and loose objects run the own-symbol probe alone, #42) | Same inherited-enumerable semantics: a positional hit and a membership hit are the same proof, so the verdict is stock's for every key order, and an input in shape order (a `JSON.parse` of a payload written from the same shape) pays one pointer comparison per key instead of a walk down the chain or a hash probe; a divergent order pays the membership test plus that one comparison (the numbers are under the listing). Both probes run only when no key is dirty, since a dirty object is rebuilt from its declared keys anyway. The `Set` is hoisted only when something references it (large shapes, declared symbol keys, the loose append loop), and the cap sits where the chain stops winning: measured through the real skeleton (the S11 rows of `bench-v4`, #34), the chain is 20 to 30% faster than the `Set` at 17 to 32 keys, level at 48 and slower from 64, since it is quadratic in the key count where the `Set` is linear (see the constant's comment for the numbers). A strip shape declaring only symbol keys treats every string key as undeclared (#35) |
+
+The position test of the `for...in` walk (#102): the walk's cost was the membership test per key, not the loop (the strict row of S11 reads the same figure on stock's own `for...in`), and it grew with the key count where stock's output literal, allocated from a boilerplate in one step, does not, so at 64 keys the clean strip parse cost seven times `z.compile()`'s. The walk now holds the declared string keys and compares each enumerated key with the one at its position (bound-checked: a trailing non-string sentinel instead of the check was measured and rejected, since one comparison of a key with it, made by any input carrying a key past the last declared one, turns the site's type feedback from "internalized string" into "any" and V8 then emits a generic equality call instead of a pointer comparison for every later parse; `bench-v4`'s gate runs such a fixture before the timing, and the 64-key strip clean row read 499 instead of 353 ns with the sentinel), advancing on a hit; only a key that misses its position runs the membership test, and the position then stays where it was, so a walk that diverged (an absent optional key, a producer's own key order) pays the membership test for the keys that follow plus the one failed comparison, and re-synchronizes only when the input's order meets the declared one again. Measured in isolation on Node 24 (a 1 000 000-operation hot loop over a `JSON.parse` object, the validation reads included, the script and the full table on #102): an input in shape order costs 152 instead of 476 ns at 64 keys, 78 instead of 130 at 32 and 44 instead of 48 at 16, about 2 ns more at 4 to 8 keys; a reversed or shuffled input 5 to 10% more at 64 keys and 15 to 25% more at 16 to 32. The forms that re-synchronize after a gap (a one-key lookahead, a forward scan, a membership test that returns the key's index) win only on inputs with absent keys and lose 10 to 80% on every other divergent order, so they were rejected. `MAX_INLINE_KEY_COMPARISONS` keeps its value and now decides the fallback's form: on the divergent inputs the chain still beats the `Set` at 32 keys and loses at 64, the crossover #34 measured. The whole-parse numbers are the S11 rows of the README; every loop that tests membership takes the walk (the strip probe, the strict loop and the loose append of an object, the strict loop and the loose append of an enum-keyed record, §5.1), smoke group 26 pins every key order against stock in every mode and the differential fuzzer writes one object input in five in reverse key order (§8).
 
 Cost of the clean path, measured per object on a 6-key primitive record (the calibration scenario of `bench-v4`, single-record hot loop): the own-symbol probe is about 31 ns of a 69 ns skeleton call (run 34069671088, the default row against the opt-in row that skips the probe), the `for...in` probe about 9 ns (measured locally on Node 24); the official parser of the same schema costs 29 ns in that run, its validator 15 ns locally. The leaf validator calls are not a cost (V8 inlines them: one official validator call for all pure keys measured the same as six leaf calls). The symbol probe is what stock's object semantics cost: stock drops own symbol keys in every mode (strict's unknown-key loop sees string keys only, so it never rejects a symbol either), so a pass-through has to prove there are none, and `Object.getOwnPropertySymbols` is the only way to ask (`Reflect.ownKeys` allocates every key). It runs in every mode (strip since #33, strict and loose since #42; for strict and loose it is the clean path's only probe, since strict rejected undeclared string keys during validation and loose keeps them) and, since #51, on the clean path of an enum-keyed record as well (§5.1; the helper is `emitOwnSymbolProbe` in `codectx.ts`, shared by both skeletons), and stays on by default. `compile(schema, { ownSymbolKeys: "ignore" })` (#43) drops it: the options are resolved once in `compile`, carried by every `CodeCtx` of the tree (`subFn` creates a child context with its parent's options and its parent's `sources` list, so every nested object sees the same setting and lands in the debug dump, #46), and the strip skeleton then emits the `for...in` string probe alone (a strict or loose skeleton returns the input as soon as no key is dirty):
 
 ```js
 if (!x0) {
   let x8 = false;
+  let x9 = 0;
   for (const k in input) {
-    if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+    if (x9 < 5 && k === c5[x9]) x9++;
+    else {
+      if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+    }
   }
   if (!x8) {
     return input;                                          // no own-symbol probe: an own symbol key would survive here
@@ -553,10 +563,11 @@ Path A (enum, declaration-driven): the official output unconditionally materiali
 - a missing declared key is dirty (`!(k in input)` → stock materializes that key);
 - the unknown-key probe is the official `for...in` template over the declared keys *as `for...in` yields them*: numeric enum
   values are stringified (`z.enum({ A: 1 })` declares the key `"1"`; comparing against the raw `1` rejected every enumerated
-  key and sent every parse to stock, #37), symbol keys never take part. The probe expression is shared with the object skeleton
-  (`unknownStringKeyExpr` in `codectx.ts`): a `k !== "a" && k !== "b" …` chain up to `MAX_INLINE_KEY_COMPARISONS` (32
+  key and sent every parse to stock, #37), symbol keys never take part. The walk is the object skeleton's
+  (`emitDeclaredKeyWalk` in `codectx.ts`, #102): each key is compared with the declared string key at the walk's position
+  first and, on a miss, with the membership test, a `k !== "a" && k !== "b" …` chain up to `MAX_INLINE_KEY_COMPARISONS` (32
   since #34) declared string keys, a hoisted `Set` above (#33). Strict runs it on every path (`→ INVALID`); loose (`z.looseRecord`)
-  keeps unknown keys, so its probe runs only on the copy path;
+  keeps unknown keys, so its walk runs only on the copy path;
 - undeclared own symbol keys: `for...in` never yields one, so neither strict nor loose sees it while stock's rebuild drops it
   on every path, exactly the #42 case of the object skeleton. When no key is dirty the skeleton runs the same
   `Object.getOwnPropertySymbols` probe as the object skeleton (`emitOwnSymbolProbe`, #51) and marks the record dirty on an

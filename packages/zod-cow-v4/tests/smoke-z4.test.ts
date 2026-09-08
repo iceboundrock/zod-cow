@@ -2563,7 +2563,7 @@ import { compile } from "../src/index.js";
     for (const k of keys) o[k] = `v-${k}`;
     return Object.assign(o, patch);
   };
-  const positional = /if \(k === c\d+\[x\d+\]\) x\d+\+\+;/;
+  const positional = /if \(x\d+ < \d+ && k === c\d+\[x\d+\]\) x\d+\+\+;/;
   for (const width of widths) {
     const shape = shapeOf(width);
     const keys = Object.keys(shape);

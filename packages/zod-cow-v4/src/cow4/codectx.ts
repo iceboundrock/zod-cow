@@ -124,8 +124,14 @@ function unknownStringKeyExpr(stringKeys: readonly string[], knownSet: () => str
  * the membership test for the keys that follow, plus the one failed comparison, and re-synchronizes
  * only when the input's order meets the declared one again. A positional hit and a membership hit
  * are the same proof, so the loop's verdict is the membership test's for every key order. The
- * declared list ends with a `null` no string equals, so the position never runs past the list and
- * the comparison needs no bound check.
+ * position is bound-checked before the read, and the list holds nothing but the declared keys: a
+ * trailing sentinel that is not a string (the form first measured, one comparison cheaper in
+ * isolation) reaches the comparison as soon as one input carries a key past the last declared
+ * one, and that single string-to-`null` comparison turns the site's type feedback from
+ * "internalized string" into "any", after which TurboFan emits a generic equality call instead of
+ * a pointer comparison for every key of every later parse (measured through `bench-v4`'s gate,
+ * whose extra-key fixture runs before the timing: 499 instead of 296 ns for the 64-key strip
+ * clean row, against 353 with the bound check).
  *
  * Measured in isolation on Node 24 (a 1 000 000-operation hot loop over a `JSON.parse` object of
  * optional and required string keys, the validation reads included; the script and the full table
@@ -152,12 +158,12 @@ export function emitDeclaredKeyWalk(
     ctx.write(`}`);
     return;
   }
-  const order = ctx.addConst([...stringKeys, null]);
+  const order = ctx.addConst([...stringKeys]);
   const pos = ctx.var();
   ctx.write(`let ${pos} = 0;`);
   ctx.write(`for (const k in ${accessor}) {`);
   ctx.indented(() => {
-    ctx.write(`if (k === ${order}[${pos}]) ${pos}++;`);
+    ctx.write(`if (${pos} < ${stringKeys.length} && k === ${order}[${pos}]) ${pos}++;`);
     ctx.write(`else {`);
     ctx.indented(() => onOther(unknown));
     ctx.write(`}`);

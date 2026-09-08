@@ -1652,6 +1652,254 @@ if (ignore.refShared < base.refShared) {
     `\n✗ the "ignore" pass shared fewer top-level references (${ignore.refShared}) than the default pass (${base.refShared}); the option must not lose a CoW path`,
   );
 }
+// ─────────────────────── readonly differential (#28) ───────────────────────
+// The main generator above never emits `readonly`, and its mutation check compares values
+// (`snapshotInput` + `deepEqual`), not frozenness. So the one in-place write stock performs — the
+// `Object.freeze` of `readonly` — is invisible to it: over a pass-through leaf (`any` / `unknown` /
+// `custom` / `date`, or a wrapper whose branch hands the value straight through) stock returns the
+// caller's input and freezes it in place; over a container it freezes a fresh copy. The zod4 line
+// hands every `readonly` subtree to the official parser (`isPure` is false for `readonly`), so it
+// reproduces both freezes exactly. This block fuzzes that directly with a frozenness oracle.
+//
+// Stock and the CoW line each run on their own clone of the same generated input, so an in-place
+// freeze by one side cannot be seen by the other. The two runs must then agree on three things: the
+// output value (`orderedView` + `deepEqual`), which nodes of the output are frozen, and which nodes
+// of the input were frozen in place. It deliberately does NOT assert reference identity with stock:
+// aliasing the input on the clean path is the CoW line's whole point and diverges from stock's
+// unconditional rebuild by design (§5.3 of the architecture deep dive), so a nested
+// `object({ n: any().readonly() })` freezes `input.n` on both sides yet returns the parent by
+// reference here and a rebuilt parent in stock — same value, same freeze footprint. An async identity
+// transform under `readonly`, alone and inside a container, takes the async product path (an async
+// island, an awaiting skeleton above it), so those cases run both sides through `safeParseAsync`
+// (second review of #111).
+{
+  const RO_CASES = REPRO ? 0 : Number(process.env.RO_CASES ?? 3000);
+
+  // A faithful deep clone for exactly the shapes this block generates (plain objects, arrays, Map,
+  // Set, Date, primitives); it does not need to preserve holes, symbols or exotic prototypes because
+  // the generator never emits them. `structuredClone` would round-trip every one of these shapes too
+  // (fresh identities for Date / Map / Set, contents preserved); the hand-written clone keeps the domain
+  // the oracle relies on explicit in the block (second review of #111).
+  const roClone = (v: unknown): unknown => {
+    if (typeof v !== "object" || v === null) return v;
+    if (v instanceof Date) return new Date(v.getTime());
+    if (v instanceof Map) return new Map([...v].map(([k, x]) => [roClone(k), roClone(x)]));
+    if (v instanceof Set) return new Set([...v].map(roClone));
+    if (Array.isArray(v)) return v.map(roClone);
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as object)) out[k] = roClone((v as Record<string, unknown>)[k]);
+    return out;
+  };
+
+  // The freeze footprint of a value: `Object.isFrozen` at every object node, walked in a stable
+  // order (both sides share the same shape, so the strings line up). Primitives contribute nothing.
+  const frozenWalk = (v: unknown, path = "$", out: string[] = []): string[] => {
+    if (typeof v !== "object" || v === null) return out;
+    out.push(`${path}=${Object.isFrozen(v)}`);
+    if (v instanceof Date) return out;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) frozenWalk(v[i], `${path}[${i}]`, out);
+    } else if (v instanceof Map) {
+      for (const [k, x] of v) frozenWalk(x, `${path}.get(${String(k)})`, out);
+    } else if (v instanceof Set) {
+      let i = 0;
+      for (const x of v) frozenWalk(x, `${path}#${i++}`, out);
+    } else {
+      for (const k of Object.keys(v))
+        frozenWalk((v as Record<string, unknown>)[k], `${path}.${k}`, out);
+    }
+    return out;
+  };
+
+  // A value for a pass-through slot: some are objects/arrays/Map/Set/Date that carry frozenness, some
+  // are primitives that do not, so the oracle sees both a frozen leaf and a plain one. `undefined` and
+  // `null` take the `optional` / `nullable` shortcut and fire the `default` (whose value is then what
+  // `readonly` freezes), so those pass-through branches are drawn too (review of #111).
+  const roValue = (r: RNG): unknown => {
+    switch (r.int(9)) {
+      case 0:
+        return { x: 1, y: { z: 2 } };
+      case 1:
+        return [1, { a: 3 }];
+      case 2:
+        return new Map<string, unknown>([["k", { v: 4 }]]);
+      case 3:
+        return new Set<unknown>([{ s: 5 }]);
+      case 4:
+        return new Date(0);
+      case 5:
+        return "leaf";
+      case 6:
+        return undefined;
+      case 7:
+        return null;
+      default:
+        return 7;
+    }
+  };
+
+  // A base schema paired with an input its parse accepts. Pass-through leaves (stock freezes the
+  // input in place) and containers (stock freezes a copy), each of which `.readonly()` then wraps.
+  // `async` marks a base holding an async identity transform, parsed through `safeParseAsync`.
+  type RoBuilt = { schema: z.ZodType; gen: (r: RNG) => unknown; async?: boolean };
+  const roBase = (r: RNG): RoBuilt => {
+    const passThrough: RoBuilt[] = [
+      { schema: z.any(), gen: roValue },
+      { schema: z.unknown(), gen: roValue },
+      { schema: z.custom<unknown>(() => true), gen: roValue },
+      { schema: z.date(), gen: () => new Date(0) },
+      { schema: z.any().optional(), gen: roValue },
+      { schema: z.any().nullable(), gen: roValue },
+      { schema: z.any().default({}), gen: roValue },
+      { schema: z.lazy(() => z.any()), gen: roValue },
+      { schema: z.union([z.string(), z.any()]), gen: roValue },
+      { schema: z.any().transform((v) => v), gen: roValue },
+      { schema: z.any().transform(async (v) => v), gen: roValue, async: true },
+    ];
+    const containers: RoBuilt[] = [
+      { schema: z.object({ x: z.any() }), gen: (rr) => ({ x: roValue(rr) }) },
+      { schema: z.array(z.any()), gen: (rr) => [roValue(rr)] },
+      { schema: z.tuple([z.any()]), gen: (rr) => [roValue(rr)] },
+      { schema: z.record(z.string(), z.any()), gen: (rr) => ({ k: roValue(rr) }) },
+      { schema: z.map(z.string(), z.any()), gen: (rr) => new Map([["k", roValue(rr)]]) },
+      { schema: z.set(z.any()), gen: (rr) => new Set([roValue(rr)]) },
+      {
+        schema: z.array(z.any().transform(async (v) => v)),
+        gen: (rr) => [roValue(rr)],
+        async: true,
+      },
+      {
+        schema: z.object({ x: z.any().transform(async (v) => v) }),
+        gen: (rr) => ({ x: roValue(rr) }),
+        async: true,
+      },
+    ];
+    return r.chance(0.5) ? r.pick(passThrough) : r.pick(containers);
+  };
+
+  // `<base>.readonly()`, sometimes nested one level under a parent object or array so the parent's
+  // clean-path aliasing (ours) vs rebuild (stock) is exercised alongside the child's in-place freeze.
+  const roCase = (r: RNG): RoBuilt => {
+    const base = roBase(r);
+    const ro: RoBuilt = {
+      schema: base.schema.readonly() as z.ZodType,
+      gen: base.gen,
+      async: base.async,
+    };
+    const nest = r.int(3);
+    if (nest === 1)
+      return {
+        schema: z.object({ n: ro.schema, extra: z.number() }),
+        gen: (rr) => ({ n: ro.gen(rr), extra: 9 }),
+        async: ro.async,
+      };
+    if (nest === 2)
+      return { schema: z.array(ro.schema), gen: (rr) => [ro.gen(rr)], async: ro.async };
+    return ro;
+  };
+
+  let roChecked = 0;
+  let roAsync = 0;
+  let frozenChecks = 0;
+  const roFailures: string[] = [];
+  for (let i = 0; i < RO_CASES; i++) {
+    const rng = makeRng(0x5eed ^ (i * 2654435761));
+    const built = roCase(rng);
+    const model = built.gen(rng);
+    const forStock = roClone(model);
+    const forOurs = roClone(model);
+    const pristine = roClone(model);
+    const id = `readonly case=${i} def=${defRepr(built.schema)} input=${repr(model)}`;
+
+    const useAsync = built.async === true;
+    if (useAsync) roAsync++;
+    let stock: { ok: boolean; data?: unknown } | null = null;
+    let stockThrew: Error | null = null;
+    try {
+      const r = useAsync
+        ? await built.schema.safeParseAsync(forStock as never)
+        : built.schema.safeParse(forStock as never);
+      stock = r.success ? { ok: true, data: r.data } : { ok: false };
+    } catch (e) {
+      stockThrew = e as Error;
+    }
+    let ours: { ok: boolean; data?: unknown } | null = null;
+    let oursThrew: Error | null = null;
+    let asyncFlag: boolean | null = null;
+    try {
+      const c = compile(built.schema);
+      asyncFlag = c.async;
+      const r = useAsync ? await c.safeParseAsync(forOurs) : c.safeParse(forOurs);
+      ours = r.success ? { ok: true, data: r.data } : { ok: false };
+    } catch (e) {
+      oursThrew = e as Error;
+    }
+    roChecked++;
+
+    // The async cases must take the async product path (an async island under an awaiting skeleton),
+    // not a sync product that happens to answer; the sync cases must stay sync.
+    if (asyncFlag !== null && asyncFlag !== useAsync) {
+      roFailures.push(
+        `ASYNC FLAG MISMATCH compiled.async=${asyncFlag} expected=${useAsync} → ${id}`,
+      );
+      continue;
+    }
+
+    if ((stockThrew === null) !== (oursThrew === null)) {
+      roFailures.push(
+        `THROW MISMATCH (stock=${stockThrew?.message} ours=${oursThrew?.message}) → ${id}`,
+      );
+      continue;
+    }
+    if (stockThrew || oursThrew) continue;
+    if (stock!.ok !== ours!.ok) {
+      roFailures.push(`SUCCESS MISMATCH stock=${stock!.ok} ours=${ours!.ok} → ${id}`);
+      continue;
+    }
+    if (!stock!.ok) continue;
+
+    if (!assertDeepEqual(orderedView(ours!.data), orderedView(stock!.data))) {
+      roFailures.push(
+        `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${id}`,
+      );
+      continue;
+    }
+    // No forbidden mutation: the CoW line's input, cloned from the same model, still equals a pristine
+    // clone by value (freezing changes descriptors, not values, so `deepEqual` sees only a legal freeze).
+    if (!assertDeepEqual(orderedView(forOurs), orderedView(pristine))) {
+      roFailures.push(`INPUT VALUE MUTATED → ${id}`);
+      continue;
+    }
+    const outStock = frozenWalk(stock!.data).join(",");
+    const outOurs = frozenWalk(ours!.data).join(",");
+    frozenChecks++;
+    if (outStock !== outOurs) {
+      roFailures.push(
+        `OUTPUT FROZENNESS MISMATCH\n      stock: [${outStock}]\n      ours:  [${outOurs}]\n      ${id}`,
+      );
+      continue;
+    }
+    const inStock = frozenWalk(forStock).join(",");
+    const inOurs = frozenWalk(forOurs).join(",");
+    frozenChecks++;
+    if (inStock !== inOurs) {
+      roFailures.push(
+        `INPUT FROZENNESS MISMATCH (in-place freeze diverged)\n      stock: [${inStock}]\n      ours:  [${inOurs}]\n      ${id}`,
+      );
+    }
+  }
+  if (RO_CASES > 0) {
+    console.log(
+      `  readonly differential (#28): ${roChecked} cases (${roAsync} async), ${frozenChecks} frozenness comparisons`,
+    );
+    if (roFailures.length > 0) {
+      failed += roFailures.length;
+      console.log(`\n✗ ${roFailures.length} readonly differences (first 10):`);
+      for (const f of roFailures.slice(0, 10)) console.log(`\n${f}`);
+    }
+  }
+}
+
 if (failed > 0) {
   process.exit(1);
 } else {

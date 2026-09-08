@@ -542,6 +542,56 @@ test("readonly .pure: a union whose branch decides the provenance at run time is
   assert.equal(compile(z.object({ a: z.string() }).catch({ a: "d" }).readonly()).pure, false);
 });
 
+test("array .pure: an array whose element schema may accept undefined is not pure, since an element that reads as undefined is copied (#117, #66)", () => {
+  // The runtime copies an array at an element that reads as `undefined` (a hole or an explicit
+  // member, told apart only by a `has` stock never makes), so the static promise "the input
+  // reference on every successful parse" holds only where `undefined` cannot pass the element
+  const opt = z.array(z.string().optional());
+  const C = compile(opt);
+  assert.equal(C.pure, false);
+  const withUndef = ["a", undefined];
+  assert.notEqual(C.parse(withUndef), withUndef);
+  const plain = ["a", "b"];
+  assert.equal(C.parse(plain), plain);
+  assert.equal(compile(z.array(z.string())).pure, true);
+  assert.equal(compile(z.array(z.string().nullable())).pure, true);
+  assert.equal(compile(z.array(z.unknown())).pure, false);
+  assert.equal(compile(z.array(z.any())).pure, false);
+  assert.equal(compile(z.array(z.undefined())).pure, false);
+  assert.equal(compile(z.array(z.void())).pure, false);
+  assert.equal(compile(z.array(z.literal(undefined))).pure, false);
+  assert.equal(compile(z.array(z.literal("x"))).pure, true);
+  assert.equal(compile(z.array(z.union([z.string(), z.undefined()]))).pure, false);
+  assert.equal(compile(z.array(z.union([z.string(), z.number()]))).pure, true);
+  // Conservative through a refine (the predicate is never run at compile time), a nullable or
+  // readonly layer, a pipeline's input side, a brand and a lazy
+  assert.equal(
+    compile(
+      z.array(
+        z
+          .string()
+          .optional()
+          .refine(() => true),
+      ),
+    ).pure,
+    false,
+  );
+  assert.equal(compile(z.array(z.string().optional().nullable())).pure, false);
+  assert.equal(compile(z.array(z.string().optional().readonly())).pure, false);
+  assert.equal(compile(z.array(z.string().optional().pipe(z.string().optional()))).pure, false);
+  assert.equal(compile(z.array(z.string().optional().brand("b"))).pure, false);
+  assert.equal(compile(z.array(z.lazy(() => z.string().optional()))).pure, false);
+  assert.equal(compile(z.array(z.lazy(() => z.string()))).pure, true);
+  // The answer propagates: a container above such an array is not pure either
+  assert.equal(compile(z.object({ a: z.array(z.string().optional()) })).pure, false);
+  assert.equal(compile(z.object({ a: z.array(z.string()) })).pure, true);
+  // A hole under a pure array fails validation on both sides, so the promise is kept there
+  const holes: unknown[] = ["a"];
+  holes.length = 2;
+  assert.equal(compile(z.array(z.string())).safeParse(holes).success, false);
+  assert.equal(z.array(z.string()).safeParse(holes).success, false);
+});
+
 test("object / record / discriminated union reject a Date, Map, Set or promise-like input like stock (invalid_type, received date / map / set / promise)", () => {
   const schemas = [
     z.object({}),

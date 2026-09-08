@@ -1,23 +1,65 @@
 /**
  * Differential fuzz test — random schema + data, comparing the compiled layer against stock zod:
- *   1. Success/failure parity
+ *   1. Success/failure parity, and the same thrown error where a callback or an accessor throws
  *   2. On success, output values are deepStrictEqual (key-set semantics aligned: absent optional keys, present-undefined, etc.)
- *   3. Zero input distortion (deepStrictEqual snapshot before/after parse) — never mutate in place,
- *      and never freeze the input (readonly freezes a copy, #27)
+ *   3. Zero input distortion (descriptor-level snapshot before/after parse, and the two instances
+ *      compared with each other after the parses where a getter effect mutates the input on both
+ *      sides) — never mutate in place, and never freeze the input (readonly freezes a copy, #27)
  *   4. On failure, the issue lists are identical: same order, and per issue every property stock
  *      carries (code, path, message, `fatal`, the check params, a union's nested errors)
- * Extra statistic: top-level reference sharing rate (CoW hit rate).
+ *   5. Decorated inputs (#66, `decorations.ts`): a share of the generated objects, records, arrays
+ *      and tuples carry the descriptors stock's rebuild normalizes away (a non-enumerable declared
+ *      key, an own symbol key, a counting getter, an inherited enumerable key, a present-undefined
+ *      value, an own `__proto__`, a logging Proxy) or an accessor at an index with an effect on the
+ *      input (a throw, a rewrite of another index, a shrink or growth of the length), an own
+ *      `Symbol.iterator` or the array iterator protocol replaced on its prototypes for the case,
+ *      each `iterator` and `next` call logged on the container the iterator walks (so a tuple's
+ *      spread matches stock's call for call and an array skeleton reaching the prototype's
+ *      iterator in any way is flagged). Every read the input can observe is logged per container
+ *      and compared with stock's before anything reads the outputs (tuples exactly; arrays and
+ *      records through the documented prefix re-read of the copy path, the array log without
+ *      stock's iterator reads, #65 and #116; objects on the `get` reads of their declared keys,
+ *      and of their undeclared keys on the copy path). Where the compiled output is a copy, its
+ *      key set and descriptors are compared with stock's exactly; where it is the input reference,
+ *      the documented alias rule applies and only the assembly view is compared.
+ *   6. The `.pure` contract: when `compiled.pure` is true, the parse succeeded and the input carries
+ *      no undeclared key that forces stock's assembly to copy, the output must be the input reference.
+ * Extra statistics: top-level reference sharing rate (CoW hit rate) and the share of cases carrying
+ * each decoration, with a floor at the default size so a generator change cannot silently stop
+ * producing one.
  *
- * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro.
+ * The generator is deterministic: on failure it prints seed/case/desc/input for a direct repro, and
+ * `REPRO=seed:case` runs that one case and prints its decorations and event logs.
  */
+import assert from "node:assert/strict";
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
+import {
+  assemblyCopies,
+  type ContainerSpec,
+  type Decoration,
+  type DecorationKind,
+  type Effect,
+  INHERITED_KEY,
+  type Instance,
+  instantiate,
+  matchesPrefixReread,
+  readsOf,
+  register,
+  registry,
+  snapshotInput,
+  specsBelow,
+  stockView,
+  UNDECLARED_GETTER_KEY,
+  withReplacedNext,
+} from "./decorations.js";
 
 // `--no-codegen` runs the same cases through the closure skeletons (the fallback used where
 // `new Function` is unavailable); the flag must be set before the compiler module loads
 const noCodegen = process.argv.includes("--no-codegen");
 if (noCodegen) process.env.ZC_V3_CODEGEN = "0";
 const { compile } = await import("../src/index.js");
+const { resolveLazy } = await import("../src/compile.js");
 
 /* ─────────────────────────── deterministic RNG ─────────────────────────── */
 
@@ -57,6 +99,12 @@ const ABSENT = Symbol("absent");
  * the compiled output to alias the defaults exactly where stock's does.
  */
 let caseDefaults: unknown[] = [];
+/**
+ * The `catch` fallbacks the current case's schema owns: stock returns the fallback object itself
+ * where the inner schema failed, so an output object at the position of a decorated input may be
+ * a value of the schema rather than a copy of the input, and the copy-path checks skip it
+ */
+let caseFallbacks: unknown[] = [];
 
 /** Every object reachable from `v` (objects, arrays, Dates, Map keys and values, Set members) */
 function reachable(v: unknown, out = new Set<object>()): Set<object> {
@@ -112,48 +160,427 @@ const DATES = [
 ] as const;
 
 /**
- * The output comparison sees Map and Set contents in iteration order: stock rebuilds both from
- * the parsed entries in input order, and the order is observable, so a Map or Set is compared as
- * the ordered list of its entries or members (the harness comparator, like Node's
- * `isDeepStrictEqual`, treats them as unordered and can also mismatch two Sets whose object
- * members are mutually deep-equal, such as two Dates of the same time).
+ * The output comparison: a structural walk of the compiled output against stock's. Map and Set
+ * contents are compared in iteration order (stock rebuilds both from the parsed entries in input
+ * order, and the order is observable; the harness comparator, like Node's `isDeepStrictEqual`,
+ * treats them as unordered and can also mismatch two Sets whose object members are mutually
+ * deep-equal, such as two Dates of the same time). A decorated container an output holds by
+ * reference is viewed as stock's assembly builds it (`stockView`), so the documented alias rules
+ * of the clean path (a non-enumerable declared key, an inherited key a loose object keeps
+ * inherited, a surviving symbol key, the input's prototype) do not trip the comparison while
+ * anything else does; where such a container was shrunk by its own accessor during the parse
+ * (`shrinks`), the compiled output holds it as it then is by reference, or its copy's re-read
+ * prefix holds the deleted slots, where stock's fresh array holds what its spread read (the alias
+ * rule and the documented second read), so the walk stops there: the two instances' states were
+ * compared with each other already. Where the compiled output holds a copy of a decorated
+ * container, the copy's key set, descriptors and prototype must be stock's, and an object's
+ * undeclared keys must have been read as stock read them. Children are walked by stock's
+ * structure, with the input child alongside. Returns the path of the first difference, or null.
  */
-function orderedView(v: unknown, seen = new Map<object, unknown>()): unknown {
-  if (typeof v !== "object" || v === null) return v;
-  if (v instanceof Date) return v;
-  const hit = seen.get(v);
-  if (hit !== undefined) return hit;
-  if (v instanceof Map) {
-    const out = { $map: [] as unknown[] };
-    seen.set(v, out);
-    for (const [k, x] of v) out.$map.push([orderedView(k, seen), orderedView(x, seen)]);
-    return out;
+interface Sides {
+  cowInst: Instance;
+  stockInst: Instance;
+  cowLogs: Map<number, string[]>;
+  stockLogs: Map<number, string[]>;
+  /** Every object the schema owns (default values, catch fallbacks): never a copy of the input */
+  owned: Set<object>;
+}
+
+/** The key set and descriptors of an output object, compared exactly between a compiled copy and stock's output */
+const shapeOf = (o: object) => ({
+  proto: Object.getPrototypeOf(o),
+  descriptors: Reflect.ownKeys(o).map((k) => {
+    const d = Object.getOwnPropertyDescriptor(o, k)!;
+    return [k, d.enumerable, d.configurable, "value" in d ? d.writable : "accessor"];
+  }),
+});
+
+function compareOutputs(
+  inp: unknown,
+  ours: unknown,
+  stock: unknown,
+  sides: Sides,
+  path = "$",
+): string | null {
+  if (typeof stock !== "object" || stock === null || stock instanceof Date) {
+    return assertDeepEqual(ours, stock) ? null : `${path} (value)`;
   }
-  if (v instanceof Set) {
-    const out = { $set: [] as unknown[] };
-    seen.set(v, out);
-    for (const x of v) out.$set.push(orderedView(x, seen));
-    return out;
+  if (typeof ours !== "object" || ours === null || ours instanceof Date) return `${path} (kind)`;
+  const { cowInst, stockInst } = sides;
+  const iinfo = typeof inp === "object" && inp !== null ? cowInst.infos.get(inp) : undefined;
+  if (iinfo?.spec.shrinks) return null;
+  const sinfo = stockInst.infos.get(stock);
+  // Returned by reference where stock's assembly built a copy: allowed only under the documented
+  // alias rules, which `assemblyCopies` excludes. Where stock's output is its own instance of the
+  // same container (a pass-through option won on both sides) there is no copy to compare with.
+  if (
+    iinfo !== undefined &&
+    ours === inp &&
+    sinfo?.spec !== iinfo.spec &&
+    assemblyCopies(iinfo.spec, inp as object)
+  )
+    return `${path} (returned by reference where stock's assembly copies, #${iinfo.spec.id})`;
+  if (iinfo !== undefined && ours !== inp && !sides.owned.has(ours)) {
+    // The copy of a decorated container: stock's key set, descriptors and prototype exactly, and
+    // an object's undeclared keys read as stock read them (once by a loose append, never in strip
+    // or strict mode); on the clean path the alias rule applies and only the view is compared
+    if (!assertDeepEqual(shapeOf(ours), shapeOf(stock)))
+      return `${path} (copy shape #${iinfo.spec.id}: stock ${repr(shapeOf(stock).descriptors)}, ours ${repr(shapeOf(ours).descriptors)})`;
+    if (iinfo.spec.kind === "object") {
+      const declared = iinfo.spec.declared!;
+      const c = readsOf(sides.cowLogs.get(iinfo.spec.id) ?? [], declared, false);
+      const s = readsOf(sides.stockLogs.get(iinfo.spec.id) ?? [], declared, false);
+      if (!sameList(c, s))
+        return `${path} (undeclared reads on the copy path #${iinfo.spec.id}: stock [${s}], ours [${c}])`;
+    }
   }
-  if (Array.isArray(v)) {
-    const out: unknown[] = new Array(v.length); // holes stay holes
-    seen.set(v, out);
-    for (const k of Object.keys(v)) (out as any)[k] = orderedView((v as any)[k], seen);
-    return out;
+  const child = (i: unknown, o: unknown, s: unknown, p: string) =>
+    compareOutputs(i, o, s, sides, `${path}${p}`);
+  if (stock instanceof Map) {
+    if (!(ours instanceof Map) || ours.size !== stock.size) return `${path} (map)`;
+    const so = [...stock];
+    const oo = [...ours];
+    const io = inp instanceof Map ? [...inp] : [];
+    for (let i = 0; i < so.length; i++) {
+      const r =
+        child(io[i]?.[0], oo[i]![0], so[i]![0], `.key${i}`) ??
+        child(io[i]?.[1], oo[i]![1], so[i]![1], `.value${i}`);
+      if (r !== null) return r;
+    }
+    return null;
   }
-  const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return v; // class instance: as it is
-  const out = Object.create(proto);
-  seen.set(v, out);
-  for (const k of Object.keys(v)) {
-    Object.defineProperty(out, k, {
-      value: orderedView((v as any)[k], seen),
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
+  if (stock instanceof Set) {
+    if (!(ours instanceof Set) || ours.size !== stock.size) return `${path} (set)`;
+    const so = [...stock];
+    const oo = [...ours];
+    const io = inp instanceof Set ? [...inp] : [];
+    for (let i = 0; i < so.length; i++) {
+      const r = child(io[i], oo[i], so[i], `.member${i}`);
+      if (r !== null) return r;
+    }
+    return null;
   }
-  return out;
+  if (ours instanceof Map || ours instanceof Set) return `${path} (kind)`;
+  const oinfo = cowInst.infos.get(ours);
+  const ov: any = oinfo === undefined ? ours : stockView(ours, oinfo, (x) => x);
+  const sv: any = sinfo === undefined ? stock : stockView(stock, sinfo, (x) => x);
+  const iv: any =
+    iinfo === undefined
+      ? typeof inp === "object" && inp !== null
+        ? inp
+        : undefined
+      : stockView(inp as object, iinfo, (x) => x);
+  if (Array.isArray(sv) !== Array.isArray(ov)) return `${path} (kind)`;
+  if (!Array.isArray(sv) && Object.getPrototypeOf(ov) !== Object.getPrototypeOf(sv))
+    return `${path} (prototype)`;
+  if (Array.isArray(sv) && ov.length !== sv.length) return `${path}.length`;
+  const okeys = Object.keys(ov);
+  const skeys = Object.keys(sv);
+  if (!sameList(okeys, skeys)) return `${path} (keys [${okeys}] vs [${skeys}])`;
+  for (const k of skeys) {
+    const r = child(iv?.[k], ov[k], sv[k], Array.isArray(sv) ? `[${k}]` : `.${k}`);
+    if (r !== null) return r;
+  }
+  return null;
+}
+
+/**
+ * Whether stock's assembly copies some container of `value` on every path under `schema`, the
+ * documented exception of the `.pure` promise: a strip object whose input carries an undeclared
+ * enumerable key (own or inherited, stock's `for...in`), an own `__proto__` data property on an
+ * object or record (dropped by stock's assembly), an inherited enumerable key on a record
+ * (written as own). Judged from the schema and the parsed input, every union option included,
+ * since an option earlier than the one the input was generated for may accept it. A `z.lazy` node
+ * is read through the engine's memoized `resolveLazy`, so the oracle judges the schema `.pure` was
+ * decided on and the getter is not called again (the generator emits no lazy node today).
+ */
+function mayForceCopy(schema: z.ZodTypeAny, value: unknown): boolean {
+  const def: any = (schema as any)._def;
+  const obj = typeof value === "object" && value !== null;
+  switch (def.typeName) {
+    case "ZodObject": {
+      if (!obj || Array.isArray(value)) return false;
+      if (Object.hasOwn(value, "__proto__")) return true;
+      const shape = def.shape() as Record<string, z.ZodTypeAny>;
+      const keys = Object.keys(shape);
+      if (def.unknownKeys === "strip") {
+        for (const k in value) if (!keys.includes(k)) return true;
+      }
+      return keys.some((k) => mayForceCopy(shape[k]!, (value as any)[k]));
+    }
+    case "ZodRecord": {
+      if (!obj || Array.isArray(value)) return false;
+      if (Object.hasOwn(value, "__proto__")) return true;
+      for (const k in value) {
+        if (!Object.hasOwn(value, k) || mayForceCopy(def.valueType, (value as any)[k])) return true;
+      }
+      return false;
+    }
+    case "ZodArray":
+      return Array.isArray(value) && value.some((x) => mayForceCopy(def.type, x));
+    case "ZodTuple":
+      return (
+        Array.isArray(value) &&
+        (def.items as z.ZodTypeAny[]).some((it, i) => mayForceCopy(it, value[i]))
+      );
+    case "ZodMap":
+      return (
+        value instanceof Map &&
+        [...value].some(([k, x]) => mayForceCopy(def.keyType, k) || mayForceCopy(def.valueType, x))
+      );
+    case "ZodSet":
+      return value instanceof Set && [...value].some((x) => mayForceCopy(def.valueType, x));
+    case "ZodUnion":
+    case "ZodDiscriminatedUnion":
+      return (def.options as z.ZodTypeAny[]).some((o) => mayForceCopy(o, value));
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+    case "ZodCatch":
+    case "ZodReadonly":
+      return mayForceCopy(def.innerType, value);
+    case "ZodEffects":
+      return mayForceCopy(def.schema, value);
+    case "ZodPipeline":
+      return mayForceCopy(def.in, value) || mayForceCopy(def.out, value);
+    case "ZodBranded":
+      return mayForceCopy(def.type, value);
+    case "ZodLazy":
+      return mayForceCopy(resolveLazy(def), value);
+    default:
+      return false;
+  }
+}
+
+/** The base node kinds a schema may read an input through: wrappers unwrapped, unions flattened */
+function baseKinds(schema: z.ZodTypeAny, out = new Set<string>()): Set<string> {
+  const def: any = (schema as any)._def;
+  switch (def.typeName) {
+    case "ZodOptional":
+    case "ZodNullable":
+    case "ZodDefault":
+    case "ZodCatch":
+    case "ZodReadonly":
+      return baseKinds(def.innerType, out);
+    case "ZodEffects":
+      return baseKinds(def.schema, out);
+    case "ZodBranded":
+      return baseKinds(def.type, out);
+    case "ZodPipeline":
+      return baseKinds(def.in, out);
+    case "ZodUnion":
+      for (const o of def.options as z.ZodTypeAny[]) baseKinds(o, out);
+      return out;
+    default:
+      out.add(def.typeName);
+      return out;
+  }
+}
+
+const sameList = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((e, i) => e === b[i]);
+
+/* ─────────────────────────── decorations (#66) ─────────────────────────── */
+
+/**
+ * Decorations are rolled for the case input only: `validValueFor` builds the values of a
+ * `default` / `catch` wrapper through the same generators, and those must stay plain (stock
+ * re-parses a default through the inner schema in rebuild mode, and a decorated default would be
+ * parsed identically on both sides without exercising anything)
+ */
+let decorating = false;
+let nextSpecId = 0;
+/** The decoration kinds the current case's input carries, for the statistics */
+let caseKinds = new Set<string>();
+
+const OBJECT_DECORATION_RATE = 0.35;
+const ARRAY_DECORATION_RATE = 0.45;
+const UNDECLARED_VALUES = [1, "x", null, true, undefined] as const;
+
+function note(spec: ContainerSpec, d: Decoration): void {
+  spec.decorations.push(d);
+  caseKinds.add(d.kind);
+}
+
+/** An object generated with `declared` keys in shape order; `mode` decides what an undeclared key does */
+function decorateObject(
+  r: RNG,
+  out: Record<string, unknown>,
+  mode: "strip" | "strict" | "loose",
+  declared: string[],
+): void {
+  if (!decorating) return;
+  const spec: ContainerSpec = { id: nextSpecId++, kind: "object", mode, declared, decorations: [] };
+  const present = declared.filter((k) => Object.hasOwn(out, k));
+  // A present-undefined declared key: written by stock's assembly (`alwaysSet`), clean here.
+  // The `optional` wrapper's generator produces the same shape on its own; both are counted
+  for (const k of declared) {
+    if (!Object.hasOwn(out, k) && r.chance(0.12)) {
+      out[k] = undefined;
+      note(spec, { kind: "presentUndefined", key: k });
+    }
+  }
+  if (declared.some((k) => Object.hasOwn(out, k) && out[k] === undefined))
+    caseKinds.add("presentUndefined");
+  if (r.chance(OBJECT_DECORATION_RATE)) {
+    const roll = r.next();
+    if (roll < 0.15 && present.length > 0)
+      note(spec, { kind: "nonEnumDeclared", key: r.pick(present) });
+    else if (roll < 0.3) note(spec, { kind: "symbolKey", enumerable: r.chance(0.5), value: 1 });
+    else if (roll < 0.5 && present.length > 0)
+      note(spec, { kind: "getter", key: r.pick(present), declared: true });
+    else if (roll < 0.6)
+      note(spec, {
+        kind: "getter",
+        key: UNDECLARED_GETTER_KEY,
+        declared: false,
+        value: r.pick(UNDECLARED_VALUES),
+      });
+    else if (roll < 0.75)
+      note(spec, { kind: "inherited", key: INHERITED_KEY, value: r.pick(UNDECLARED_VALUES) });
+    else if (roll < 0.85) note(spec, { kind: "ownProto", value: r.pick(UNDECLARED_VALUES) });
+    else note(spec, { kind: "proxy" });
+  }
+  register(out, spec);
+}
+
+/** A record: every enumerable key is a pair; a non-enumerable own key is invisible to stock and the skeleton alike */
+function decorateRecord(r: RNG, out: Record<string, unknown>, valueGen: (r: RNG) => unknown): void {
+  if (!decorating) return;
+  const spec: ContainerSpec = { id: nextSpecId++, kind: "record", decorations: [] };
+  const keys = Object.keys(out).filter((k) => k !== "__proto__");
+  if (r.chance(OBJECT_DECORATION_RATE)) {
+    const roll = r.next();
+    if (roll < 0.3 && keys.length > 0)
+      note(spec, { kind: "getter", key: r.pick(keys), declared: true });
+    else if (roll < 0.5) note(spec, { kind: "symbolKey", enumerable: r.chance(0.5), value: 1 });
+    else if (roll < 0.62 && keys.length > 0)
+      note(spec, { kind: "nonEnumDeclared", key: r.pick(keys) });
+    else if (roll < 0.82) {
+      const v = valueGen(r);
+      note(spec, { kind: "inherited", key: INHERITED_KEY, value: v === ABSENT ? undefined : v });
+    } else note(spec, { kind: "proxy" });
+  }
+  if (Object.hasOwn(out, "__proto__")) caseKinds.add("ownProto");
+  register(out, spec);
+}
+
+/** An array or tuple input: an accessor with an effect, an own iterator, a replaced `next`, a Proxy */
+function decorateArray(r: RNG, out: unknown[], kind: "array" | "tuple"): void {
+  if (!decorating) return;
+  const spec: ContainerSpec = { id: nextSpecId++, kind, decorations: [] };
+  const len = out.length;
+  const effectAt = (i: number): Effect => {
+    const roll = r.next();
+    if (roll < 0.1) return { kind: "throw" };
+    if (roll < 0.3 && i + 1 < len)
+      return {
+        kind: "rewriteLater",
+        at: i + 1 + r.int(len - i - 1),
+        value: r.pick(UNDECLARED_VALUES),
+      };
+    if (roll < 0.45) return { kind: "shrink", length: r.int(len + 1) };
+    if (roll < 0.6)
+      return { kind: "grow", length: len + 1 + r.int(2), value: r.pick(["x", 1] as const) };
+    // The prefix re-read of the array skeleton's copy path would copy a rewritten earlier index
+    // where stock's output holds the original (documented, #65): tuples only, whose capture is
+    // stock's spread
+    if (roll < 0.75 && kind === "tuple" && i > 0)
+      return { kind: "rewriteEarlier", at: r.int(i), value: r.pick(UNDECLARED_VALUES) };
+    return { kind: "count" };
+  };
+  if (r.chance(ARRAY_DECORATION_RATE)) {
+    const roll = r.next();
+    let throwAt = -1;
+    if (roll < 0.55 && len > 0) {
+      const index = r.int(len);
+      const effect = effectAt(index);
+      if (effect.kind === "throw") throwAt = index;
+      note(spec, { kind: "indexGetter", index, effect });
+    } else if (roll < 0.65) note(spec, { kind: "ownIterator" });
+    else if (roll < 0.75) note(spec, { kind: "replacedNext" });
+    else if (len > 0) {
+      const at = r.int(len);
+      const eroll = r.next();
+      const effect: Effect =
+        eroll < 0.2
+          ? { kind: "throw" }
+          : eroll < 0.4 && at + 1 < len
+            ? {
+                kind: "rewriteLater",
+                at: at + 1 + r.int(len - at - 1),
+                value: r.pick(UNDECLARED_VALUES),
+              }
+            : { kind: "count" };
+      if (effect.kind === "throw") throwAt = at;
+      note(spec, { kind: "arrayProxy", effectAt: at, effect });
+    }
+    // A throwing read stops stock's spread before any element is parsed, while the array
+    // skeleton parsed the elements before it (#116, documented): their nested logs and effects
+    // are one-sided
+    if (throwAt > 0 && kind === "array") {
+      for (let j = 0; j < throwAt; j++) {
+        for (const nested of specsBelow(out[j])) {
+          nested.skipLog = true;
+          nested.oneSided = true;
+        }
+      }
+    }
+  }
+  const effects = spec.decorations.flatMap((d) =>
+    d.kind === "indexGetter" || d.kind === "arrayProxy" ? [d.effect.kind] : [],
+  );
+  spec.shrinks = effects.includes("shrink");
+  // A throw inside an element's subtree stops the skeleton's loop where stock's spread had read
+  // every later index (#116, documented): this array's log is a prefix of stock's, not compared,
+  // and an effect of its own past that element ran on stock's side only
+  if (
+    kind === "array" &&
+    specsBelow(out).some(
+      (s) =>
+        s !== spec &&
+        s.decorations.some(
+          (d) => (d.kind === "indexGetter" || d.kind === "arrayProxy") && d.effect.kind === "throw",
+        ),
+    )
+  ) {
+    spec.skipLog = true;
+    if (effects.some((e) => e !== "count" && e !== "throw")) spec.oneSided = true;
+  }
+  register(out, spec);
+}
+
+/** The decorations of a case input, for its id line */
+function describeDecorations(plain: unknown): string {
+  const parts: string[] = [];
+  for (const s of specsBelow(plain)) {
+    if (s.decorations.length === 0) continue;
+    const ds = s.decorations
+      .map((d) => {
+        switch (d.kind) {
+          case "nonEnumDeclared":
+          case "presentUndefined":
+            return `${d.kind}(${d.key})`;
+          case "symbolKey":
+            return `symbolKey(${d.enumerable ? "enumerable" : "hidden"})`;
+          case "getter":
+            return `getter(${d.key}${d.declared ? "" : `=${repr(d.value)}`})`;
+          case "inherited":
+            return `inherited(${d.key}=${repr(d.value)})`;
+          case "ownProto":
+            return `ownProto(${repr(d.value)})`;
+          case "indexGetter":
+            return `getter(${d.index}: ${repr(d.effect)})`;
+          case "arrayProxy":
+            return `proxy(${d.effectAt}: ${repr(d.effect)})`;
+          default:
+            return d.kind;
+        }
+      })
+      .join(", ");
+    parts.push(`#${s.id} ${s.kind}${s.mode ? `/${s.mode}` : ""}: ${ds}`);
+  }
+  return parts.length === 0 ? "" : ` decorations=[${parts.join("; ")}]`;
 }
 
 function repr(v: unknown): string {
@@ -164,6 +591,7 @@ function repr(v: unknown): string {
       JSON.stringify({ v }, function (this: any, k, x) {
         const raw = this[k];
         if (typeof raw === "bigint") return `${raw}n`;
+        if (typeof raw === "number" && Number.isNaN(raw)) return "NaN";
         if (raw instanceof Date)
           return Number.isNaN(raw.getTime()) ? "Date(NaN)" : raw.toISOString();
         if (raw instanceof Map) return `Map(${repr([...raw])})`;
@@ -387,6 +815,7 @@ function bWrap(rng: RNG, inner: Built): Built {
   }
   if (which === 5) {
     const cv = validValueFor(inner, rng);
+    caseFallbacks.push(cv);
     return {
       schema: inner.schema.catch(cv as never),
       desc: `${inner.desc}.catch(${repr(cv)})`,
@@ -428,6 +857,8 @@ function bObject(rng: RNG, depth: number): Built {
   }
   const desc = `object({${fields.map((f) => `${f.key}: ${f.built.desc}`).join(", ")}})${modeDesc}`;
   let extraSeq = 0;
+  const mode = modeRoll < 1 ? "strict" : modeRoll < 2 ? "loose" : "strip";
+  const declared = fields.map((f) => f.key);
   return {
     schema,
     desc,
@@ -438,6 +869,7 @@ function bObject(rng: RNG, depth: number): Built {
         if (v !== ABSENT) out[f.key] = v;
       }
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
+      decorateObject(r, out, mode, declared);
       return out;
     },
   };
@@ -468,6 +900,7 @@ function bArray(rng: RNG, depth: number): Built {
       // A sparse input now and then: a hole reads as undefined but stock's output owns the index
       if (out.length > 0 && r.chance(0.08)) delete out[r.int(out.length)];
       if (r.chance(0.04)) out.length += 1;
+      decorateArray(r, out, "array");
       return out;
     },
   };
@@ -499,6 +932,7 @@ function bRecord(rng: RNG, depth: number): Built {
           configurable: true,
         });
       }
+      decorateRecord(r, out, inner.gen);
       return out;
     },
   };
@@ -514,15 +948,16 @@ function bTuple(rng: RNG, depth: number): Built {
       const roll = r.next();
       const va = a.gen(r);
       const vb = b.gen(r);
-      const items = [va === ABSENT ? undefined : va, vb === ABSENT ? undefined : vb];
-      if (roll < 0.1) return items.slice(0, 1);
-      if (roll < 0.2) return [...items, 1];
-      if (roll < 0.25) return r.pick(["x", 1, null, {}] as const);
-      if (roll < 0.3) {
+      let items = [va === ABSENT ? undefined : va, vb === ABSENT ? undefined : vb];
+      if (roll < 0.25 && roll >= 0.2) return r.pick(["x", 1, null, {}] as const);
+      if (roll < 0.1) items = items.slice(0, 1);
+      else if (roll < 0.2) items = [...items, 1];
+      else if (roll < 0.3) {
         // A hole in one slot, or a hole in the slot stock truncates away
         if (r.chance(0.3)) items.push(2);
         delete items[r.int(2)];
       }
+      decorateArray(r, items, "tuple");
       return items;
     },
   };
@@ -604,16 +1039,20 @@ function bDiscriminated(rng: RNG, depth: number): Built {
       if (roll < 0.1) return { kind: "c" };
       if (roll < 0.15) return r.pick([null, 1, "a"] as const);
       const out: Record<string, unknown> = {};
+      let declared: string[];
       if (roll < 0.575) {
         out.kind = "a";
         const v = a.gen(r);
         if (v !== ABSENT) out.v = v;
+        declared = ["kind", "v"];
       } else {
         out.kind = "b";
         const v = b.gen(r);
         if (v !== ABSENT) out.w = v;
+        declared = ["kind", "w"];
       }
       if (r.chance(0.2)) out.extra = 1;
+      decorateObject(r, out, "strip", declared);
       return out;
     },
   };
@@ -634,12 +1073,26 @@ function bUnion(rng: RNG, depth: number): Built {
     branches.push(b);
     kinds.push(b.desc);
   }
+  // A union with an array option and a tuple option reads one input through two skeletons whose
+  // logs follow different models (the array's prefix re-read without stock's iterator reads, the
+  // tuple's exact spread), so such an input's own log is not compared
+  const readers = new Set<string>();
+  for (const b of branches) baseKinds(b.schema, readers);
+  const mixedReaders = readers.has("ZodArray") && readers.has("ZodTuple");
   return {
     schema: z.union(
       branches.map((b) => b.schema) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]],
     ),
     desc: `union(${kinds.join(", ")})`,
-    gen: (r) => r.pick(branches).gen(r),
+    gen: (r) => {
+      const v = r.pick(branches).gen(r);
+      if (mixedReaders && typeof v === "object" && v !== null) {
+        const spec = registry.get(v);
+        if (spec !== undefined && (spec.kind === "array" || spec.kind === "tuple"))
+          spec.skipLog = true;
+      }
+      return v;
+    },
   };
 }
 
@@ -667,12 +1120,16 @@ function bAny(rng: RNG, depth: number): Built {
 
 const SEEDS = Number(process.env.SEEDS ?? 200);
 const CASES_PER_SEED = Number(process.env.CASES ?? 100); // 20 000 cases in total
+/** `REPRO=seed:case` runs that one case (the RNG stream up to it is replayed) and prints its logs */
+const REPRO = process.env.REPRO === undefined ? null : process.env.REPRO.split(":").map(Number);
 let total = 0;
 let bothOk = 0;
 let bothFail = 0;
 let refShared = 0;
 let refSharedSuccess = 0;
 let issueMismatches = 0;
+let pureChecked = 0;
+const kindCounts = new Map<string, number>();
 const failures: string[] = [];
 
 /**
@@ -697,15 +1154,229 @@ function issueView(issues: readonly any[]): string {
   return issues.map(one).join(" ; ");
 }
 
+/** A thrown error as text: the class and the message must agree between the two sides */
+const thrownText = (e: unknown): string =>
+  e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e);
+
+const ITERATOR_READS = new Set(["iterator", "next", "get Symbol(Symbol.iterator)"]);
+
+/**
+ * Pin the oracle itself before any case runs: the prefix re-read model accepts exactly the
+ * documented shapes, the stock-assembly view normalizes what the alias rules leave and nothing
+ * else, and the state snapshot sees a rewrite, a redefinition and a prototype swap.
+ */
+function checkOracle(): void {
+  const ok = (c: string[], s: string[], complete = true) => matchesPrefixReread(c, s, complete);
+  const L = "get length";
+  assert(ok(["get 0", "get 1"], ["get 0", "get 1"]), "equal logs");
+  assert(ok(["get 0", "get 1", "get 0", "get 2"], ["get 0", "get 1", "get 2"]), "prefix block");
+  assert(
+    ok(
+      [L, "get 0", L, "get 1", L, "get 0", L, "get 2", L],
+      [L, "get 0", L, "get 1", L, "get 2", L],
+    ),
+    "prefix block with the length read",
+  );
+  assert(ok([L, L, "get 0", L], [L, "get 0", L]), "rebuild mode: the length read alone");
+  assert(
+    ok(
+      ["get 0", "get 1", "get 0", "get 2", "get 0", "get 1", "get 0", "get 2"],
+      ["get 0", "get 1", "get 2", "get 0", "get 1", "get 2"],
+    ),
+    "one block per read pass",
+  );
+  assert(ok(["get a", "get b", "get a", "get c"], ["get a", "get b", "get c"]), "record keys");
+  assert(
+    !ok(["get 0", "get 1", "get 1", "get 2"], ["get 0", "get 1", "get 2"]),
+    "a re-read of the changed element itself, under a complete log",
+  );
+  assert(
+    ok(["get a", "get a"], ["get a"], false),
+    "a block after an unlogged read of the changed key, under an accessor's partial log",
+  );
+  assert(
+    !ok(["get 0", "get 1", "get 2", "get 3"], ["get 0", "get 1", "get 2"]),
+    "a read stock never made",
+  );
+  assert(!ok(["get 0", "get 1"], ["get 0", "get 1", "get 2"]), "a missing read");
+  assert(!ok(["get 0", "has 1", "get 1"], ["get 0", "get 1"]), "a has stock never made");
+  assert(
+    !ok(["get 1", "get 0", "get 2"], ["get 0", "get 1", "get 2"]),
+    "an order stock never used",
+  );
+  assert(
+    !ok(["get 0", "get 1", "get 1", "get 0", "get 2"], ["get 0", "get 1", "get 2"]),
+    "a block out of order",
+  );
+  // The stock-assembly view of a decorated object
+  const plain = { f0: "x", f1: undefined, extra: 1 };
+  const spec: ContainerSpec = {
+    id: 0,
+    kind: "object",
+    mode: "strip",
+    declared: ["f0", "f1", "f2"],
+    decorations: [
+      { kind: "nonEnumDeclared", key: "f0" },
+      { kind: "symbolKey", enumerable: true, value: 1 },
+      { kind: "inherited", key: INHERITED_KEY, value: 2 },
+      { kind: "ownProto", value: 3 },
+    ],
+  };
+  register(plain, spec);
+  const inst = instantiate(plain, false);
+  const info = inst.infos.get(inst.root as object)!;
+  const view = stockView(inst.root as object, info, (x) => x) as Record<string, unknown>;
+  assert(
+    sameList(Object.keys(view), ["f0", "f1"]),
+    "strip view: declared keys only, the non-enumerable one included, present-undefined kept",
+  );
+  assert(view.f0 === "x" && Object.getOwnPropertySymbols(view).length === 0, "strip view values");
+  spec.mode = "loose";
+  const loose = stockView(inst.root as object, info, (x) => x) as Record<string, unknown>;
+  assert(
+    sameList(Object.keys(loose), ["f0", "f1", "extra", INHERITED_KEY]),
+    "loose view: extras and the inherited key appended, __proto__ dropped",
+  );
+  assert(!Object.hasOwn(loose, "__proto__"), "loose view drops an own __proto__");
+  // The state snapshot
+  const before = snapshotInput(inst.root, inst);
+  assert(assertDeepEqual(snapshotInput(inst.root, inst), before), "snapshot is stable");
+  (inst.root as any).extra = 2;
+  assert(!assertDeepEqual(snapshotInput(inst.root, inst), before), "snapshot sees a rewrite");
+  (inst.root as any).extra = 1;
+  Object.defineProperty(inst.root as object, "extra", { enumerable: false });
+  assert(!assertDeepEqual(snapshotInput(inst.root, inst), before), "snapshot sees a redefinition");
+  Object.defineProperty(inst.root as object, "extra", { enumerable: true });
+  assert(assertDeepEqual(snapshotInput(inst.root, inst), before), "snapshot restored");
+  Object.getPrototypeOf(inst.root)[INHERITED_KEY] = 9;
+  assert(
+    !assertDeepEqual(snapshotInput(inst.root, inst), before),
+    "snapshot sees the generated prototype",
+  );
+  const frozenView = snapshotInput(inst.root, inst, false);
+  Object.freeze(inst.root);
+  assert(
+    assertDeepEqual(snapshotInput(inst.root, inst, false), frozenView),
+    "the pristine snapshot ignores a freeze",
+  );
+  assert(
+    !assertDeepEqual(snapshotInput(inst.root, inst), before),
+    "the state snapshot sees a freeze",
+  );
+  // The replaced array iterator protocol: attributed to the decorated container the iterator
+  // walks (through a Proxy too), by every route to the prototype's iterator, silent on a fresh
+  // array and on the other instance's containers, and restored afterwards
+  const nativeValues = Array.prototype.values;
+  const plainArray = [1, 2];
+  register(plainArray, { id: 1, kind: "array", decorations: [{ kind: "replacedNext" }] });
+  const arrayInst = instantiate(plainArray, false);
+  const otherInst = instantiate(plainArray, true);
+  const array = arrayInst.root as number[];
+  const arrayLog = arrayInst.logs.get(1)!;
+  const walk = ["iterator", "next", "next", "next"];
+  withReplacedNext(arrayInst, () => {
+    assert.deepEqual([...array], [1, 2], "the spread yields the values");
+    assert(sameList(arrayLog, walk), "a spread is logged on its container");
+    for (const _ of array) {
+    }
+    Array.from(array);
+    const values = Array.prototype.values.call(array);
+    while (!values.next().done) {}
+    assert(
+      sameList(arrayLog, [...walk, ...walk, ...walk, ...walk]),
+      "for...of, Array.from and Array.prototype.values.call reach the wrapper",
+    );
+    for (const _ of [3, 4]) {
+    }
+    for (const _ of otherInst.root as number[]) {
+    }
+    assert(arrayLog.length === 16 && otherInst.logs.get(1)!.length === 0, "unattributed walks");
+  });
+  [...array];
+  assert(arrayLog.length === 16, "restored: a spread outside the install logs nothing");
+  assert(
+    Array.prototype[Symbol.iterator] === nativeValues && Array.prototype.values === nativeValues,
+    "restored: the native function object is back on both keys",
+  );
+  const proxyLog: string[] = [];
+  const proxied = new Proxy(array, {
+    get(t, k, r) {
+      proxyLog.push(`get ${String(k)}`);
+      return Reflect.get(t, k, r);
+    },
+  });
+  arrayInst.infos.set(proxied, arrayInst.infos.get(array)!);
+  withReplacedNext(arrayInst, () => [...proxied]);
+  assert(sameList(arrayLog.slice(16), walk), "a Proxy receiver is attributed to its container");
+  assert(
+    sameList(proxyLog, [
+      "get Symbol(Symbol.iterator)",
+      "get length",
+      "get 0",
+      "get length",
+      "get 1",
+      "get length",
+    ]),
+    "the traps see stock's spread reads around the wrapper",
+  );
+}
+checkOracle();
+
+/**
+ * The event log of one decorated container against stock's (the documented models of the file
+ * header): a tuple exactly; an array through the prefix re-read of its copy path and without
+ * stock's iterator reads, which the skeleton never makes (#116); a record through the prefix
+ * re-read; an object on the ordered `get` reads of its declared keys (its undeclared reads are
+ * compared on the copy path by `compareOutputs`).
+ */
+function compareLog(
+  spec: ContainerSpec,
+  cow: readonly string[],
+  stock: readonly string[],
+): string | null {
+  if (spec.skipLog) return null;
+  const show = () => `\n      stock: ${stock.join(" ")}\n      ours:  ${cow.join(" ")}`;
+  const complete = spec.decorations.some((d) => d.kind === "proxy" || d.kind === "arrayProxy");
+  switch (spec.kind) {
+    case "tuple":
+      return sameList(cow, stock) ? null : `EVENT LOG MISMATCH #${spec.id} tuple${show()}`;
+    case "array": {
+      if (cow.some((e) => ITERATOR_READS.has(e)))
+        return `ARRAY ITERATOR CONSULTED #${spec.id}${show()}`;
+      const expected = stock.filter((e) => !ITERATOR_READS.has(e));
+      return matchesPrefixReread(cow, expected, complete)
+        ? null
+        : `EVENT LOG MISMATCH #${spec.id} array${show()}`;
+    }
+    case "record":
+      return matchesPrefixReread(cow, stock, complete)
+        ? null
+        : `EVENT LOG MISMATCH #${spec.id} record${show()}`;
+    case "object": {
+      const declared = spec.declared!;
+      return sameList(readsOf(cow, declared, true), readsOf(stock, declared, true))
+        ? null
+        : `DECLARED READ MISMATCH #${spec.id}${show()}`;
+    }
+  }
+}
+
 for (let seed = 1; seed <= SEEDS; seed++) {
   const rng = makeRng(seed);
   for (let i = 0; i < CASES_PER_SEED; i++) {
     caseDefaults = [];
+    caseFallbacks = [];
+    caseKinds = new Set();
+    nextSpecId = 0;
     const built = bAny(rng, 3);
-    let input = built.gen(rng);
-    if (input === ABSENT) input = undefined; // the top-level wrapper may be absent
-    const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
+    decorating = true;
+    let plain = built.gen(rng);
+    decorating = false;
+    if (plain === ABSENT) plain = undefined; // the top-level wrapper may be absent
+    if (REPRO !== null && (seed !== REPRO[0] || i !== REPRO[1])) continue;
+    const caseId = `seed=${seed} case=${i} schema=[${built.desc}] input=${repr(plain)}${describeDecorations(plain)}`;
     total++;
+    for (const k of caseKinds) kindCounts.set(k, (kindCounts.get(k) ?? 0) + 1);
 
     let compiled: ReturnType<typeof compile>;
     try {
@@ -715,39 +1386,86 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       continue;
     }
 
-    const snapshot = structuredClone(input);
-    // Stock parses its own clone: a readonly over a pass-through leaf freezes the input in place on
-    // both sides (stock behavior), so frozenness is compared between the two inputs afterwards
-    const stockInput = structuredClone(input);
+    // Two instances of the plain input with the same decorations: stock parses its own, so a
+    // getter effect, a `readonly` over a pass-through leaf (which freezes the input in place on
+    // both sides, stock behavior) and every read log are compared between the two afterwards
+    const specs = specsBelow(plain);
+    const stockInst = instantiate(plain, true);
+    const cowInst = instantiate(plain, false);
+    const input = cowInst.root;
+    const pristine = cowInst.effectful ? null : snapshotInput(input, cowInst, false);
+    // A case with a `replacedNext` decoration parses under the replaced array iterator protocol,
+    // whose calls are attributed to the decorated containers of the instance under parse
+    const run = <T>(inst: Instance, fn: () => T): T =>
+      inst.replacedNext ? withReplacedNext(inst, fn) : fn();
 
     let stock: z.SafeParseReturnType<unknown, unknown> | null = null;
-    let stockThrew: Error | null = null;
+    let stockThrew: unknown = null;
+    let stockDidThrow = false;
     try {
-      stock = built.schema.safeParse(stockInput as never);
+      stock = run(stockInst, () => built.schema.safeParse(stockInst.root as never));
     } catch (e) {
-      stockThrew = e as Error;
+      stockThrew = e;
+      stockDidThrow = true;
     }
 
     let ours: { success: boolean; data?: unknown; error?: { issues: unknown[] } } | null = null;
-    let oursThrew: Error | null = null;
+    let oursThrew: unknown = null;
+    let oursDidThrow = false;
     try {
-      const r = compiled.safeParse(input);
+      const r = run(cowInst, () => compiled.safeParse(input));
       ours = r.success ? { success: true, data: r.data } : { success: false, error: r.error };
     } catch (e) {
-      oursThrew = e as Error;
+      oursThrew = e;
+      oursDidThrow = true;
     }
 
-    // Zero input distortion (regardless of success) — never mutate in place
-    if (!assertDeepEqual(input, snapshot)) {
-      failures.push(`INPUT MUTATED → ${caseId}`);
+    // Event logs first: the compiled output may hold an input container by reference, and every
+    // inspection below would read its accessors again; the effects are disarmed for those reads
+    cowInst.armed = false;
+    stockInst.armed = false;
+    const cowLogs = new Map([...cowInst.logs].map(([id, l]) => [id, l.slice()]));
+    const stockLogs = new Map([...stockInst.logs].map(([id, l]) => [id, l.slice()]));
+    if (REPRO !== null) {
+      console.log(caseId);
+      for (const spec of specs) {
+        console.log(
+          `  #${spec.id} ${spec.kind}${spec.mode ? `/${spec.mode}` : ""}${spec.skipLog ? " (log not compared)" : ""}${spec.oneSided ? " (one-sided)" : ""}${spec.shrinks ? " (shrinks)" : ""}\n    stock: ${(stockLogs.get(spec.id) ?? []).join(" ")}\n    ours:  ${(cowLogs.get(spec.id) ?? []).join(" ")}`,
+        );
+      }
+      console.log(
+        `  pure=${compiled.pure} stock=${stockDidThrow ? `threw ${thrownText(stockThrew)}` : stock!.success} ours=${oursDidThrow ? `threw ${thrownText(oursThrew)}` : ours!.success}` +
+          (ours?.success ? ` output=${repr(ours.data)} byReference=${ours.data === input}` : ""),
+      );
+    }
+    let logFailure: string | null = null;
+    for (const spec of specs) {
+      logFailure = compareLog(spec, cowLogs.get(spec.id) ?? [], stockLogs.get(spec.id) ?? []);
+      if (logFailure !== null) break;
+    }
+    if (logFailure !== null) {
+      failures.push(`${logFailure}\n      ${caseId}`);
       continue;
     }
 
-    if (stockThrew !== null || oursThrew !== null) {
-      // A user callback threw: only require "both throw or neither throws"
-      if ((stockThrew === null) !== (oursThrew === null)) {
+    // Zero input distortion (regardless of success): never mutate in place, and where a getter
+    // effect mutates the input by design, the two instances must have been changed the same way
+    if (pristine !== null && !assertDeepEqual(snapshotInput(input, cowInst, false), pristine)) {
+      failures.push(`INPUT MUTATED → ${caseId}`);
+      continue;
+    }
+    if (!assertDeepEqual(snapshotInput(input, cowInst), snapshotInput(stockInst.root, stockInst))) {
+      failures.push(
+        `INPUT STATE MISMATCH (frozenness, descriptors or a getter effect) → ${caseId}`,
+      );
+      continue;
+    }
+
+    if (stockDidThrow || oursDidThrow) {
+      // A user callback or an accessor threw: the same error must leave both parsers
+      if (stockDidThrow !== oursDidThrow || thrownText(stockThrew) !== thrownText(oursThrew)) {
         failures.push(
-          `THROW MISMATCH (stock=${stockThrew?.message} ours=${oursThrew?.message}) → ${caseId}`,
+          `THROW MISMATCH (stock=${stockDidThrow ? thrownText(stockThrew) : "no throw"} ours=${oursDidThrow ? thrownText(oursThrew) : "no throw"}) → ${caseId}`,
         );
       }
       continue;
@@ -759,18 +1477,6 @@ for (let seed = 1; seed <= SEEDS; seed++) {
           (ours!.success
             ? `\n      stock issues: ${JSON.stringify((stock as any).error?.issues?.slice(0, 3))}`
             : `\n      ours issues: ${JSON.stringify((ours!.error as any)?.issues?.slice(0, 3))}`),
-      );
-      continue;
-    }
-
-    // Never freeze the caller's input where stock does not (readonly freezes a copy for containers, #27)
-    if (
-      input !== null &&
-      typeof input === "object" &&
-      Object.isFrozen(input) !== Object.isFrozen(stockInput as object)
-    ) {
-      failures.push(
-        `INPUT FROZENNESS MISMATCH stock=${Object.isFrozen(stockInput as object)} ours=${Object.isFrozen(input)} → ${caseId}`,
       );
       continue;
     }
@@ -789,15 +1495,31 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         );
         continue;
       }
-      if (!assertDeepEqual(orderedView(ours!.data), orderedView(stock!.data))) {
+      const outputDiff = compareOutputs(input, oo, so, {
+        cowInst,
+        stockInst,
+        cowLogs,
+        stockLogs,
+        owned: reachable([...caseDefaults, ...caseFallbacks]),
+      });
+      if (outputDiff !== null) {
         failures.push(
-          `OUTPUT MISMATCH\n      stock: ${repr(stock!.data)}\n      ours:  ${repr(ours!.data)}\n      ${caseId}`,
+          `OUTPUT MISMATCH at ${outputDiff}\n      stock: ${repr(so)}\n      ours:  ${repr(oo)}\n      ${caseId}`,
         );
         continue;
       }
+      // The `.pure` contract: the input reference on every successful parse, unless the input
+      // carries a key that forces stock's assembly to copy (the documented strip exception)
+      if (compiled.pure && !mayForceCopy(built.schema, input)) {
+        pureChecked++;
+        if (!Object.is(oo, input)) {
+          failures.push(`PURE CONTRACT VIOLATED (.pure is true, the output is a copy) → ${caseId}`);
+          continue;
+        }
+      }
       // A parsed default aliases the schema's default value exactly where stock's output does
       // (through a pass-through leaf only; a container default is rebuilt at every level)
-      const stockAliases = aliasesDefaults(so, stockInput);
+      const stockAliases = aliasesDefaults(so, stockInst.root);
       const oursAliases = aliasesDefaults(oo, input);
       if (stockAliases !== oursAliases) {
         failures.push(
@@ -806,7 +1528,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
         continue;
       }
       refSharedSuccess++;
-      if (ours!.data === input) refShared++;
+      if (Object.is(oo, input)) refShared++;
     } else {
       bothFail++;
       const sv = issueView((stock as any).error.issues);
@@ -820,13 +1542,44 @@ for (let seed = 1; seed <= SEEDS; seed++) {
 }
 
 console.log(
-  `differential (${noCodegen ? "closure skeletons, --no-codegen" : "generated skeletons"}): ${total} cases | success=${bothOk} fail=${bothFail} | issue lists compared on every failing case (${issueMismatches} mismatches)`,
+  `differential (${noCodegen ? "closure skeletons, --no-codegen" : "generated skeletons"}): ${total} cases | success=${bothOk} fail=${bothFail} | issue lists compared on every failing case (${issueMismatches} mismatches) | .pure contract checked on ${pureChecked} cases`,
 );
 if (refSharedSuccess > 0) {
   console.log(
     `CoW top-level reference sharing: ${((refShared / refSharedSuccess) * 100).toFixed(1)}% ` +
       `(${refShared}/${refSharedSuccess} successful cases returned the original input reference)`,
   );
+}
+/**
+ * The share of cases whose input carries each decoration. At the default size or above every
+ * kind must reach the floor, so a generator change cannot silently stop producing one (#66).
+ */
+const DECORATION_KINDS: DecorationKind[] = [
+  "nonEnumDeclared",
+  "symbolKey",
+  "getter",
+  "inherited",
+  "presentUndefined",
+  "ownProto",
+  "proxy",
+  "indexGetter",
+  "ownIterator",
+  "replacedNext",
+  "arrayProxy",
+];
+const DECORATION_FLOOR = 0.003;
+const shares = DECORATION_KINDS.map(
+  (k) => `${k} ${(((kindCounts.get(k) ?? 0) / total) * 100).toFixed(1)}%`,
+);
+console.log(`decorated inputs (share of cases): ${shares.join(", ")}`);
+if (total >= 20000) {
+  for (const k of DECORATION_KINDS) {
+    const count = kindCounts.get(k) ?? 0;
+    if (count < total * DECORATION_FLOOR)
+      failures.push(
+        `DECORATION FLOOR: ${k} appeared in ${count} of ${total} cases, below ${DECORATION_FLOOR * 100}%`,
+      );
+  }
 }
 if (failures.length > 0) {
   console.log(`\n${failures.length} FAILURES (first 5):`);

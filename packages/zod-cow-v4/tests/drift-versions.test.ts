@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   exclusiveUpperBound,
   nextTarget,
+  peerRange,
   resolveDriftTargets,
   stableVersions,
   versionsInRange,
@@ -59,7 +60,23 @@ test("exclusiveUpperBound: the highest `<` bound across the alternatives, `<=` m
   // node-semver desugars a caret range to `<5.0.0-0`; the bound's release part is what matters.
   assert.equal(exclusiveUpperBound("^4.5.4")?.version, "5.0.0-0");
   assert.equal(exclusiveUpperBound(">=4.5.4"), null);
+  // An unbounded alternative admits every later release already, so nothing sits just above the
+  // range: no target, even though the other alternative has a bound.
   assert.equal(exclusiveUpperBound(">=4.5.4 <4.6.0 || >=4.7.0"), null);
+});
+
+test("peerRange: a missing, empty or invalid declaration is an error naming what was found", () => {
+  assert.equal(peerRange(">=4.5.4 <4.6.0"), ">=4.5.4 <4.6.0");
+  assert.throws(() => peerRange(undefined), /declares no zod peer range \(got undefined\)/);
+  assert.throws(() => peerRange(" "), /declares no zod peer range \(got " "\)/);
+  assert.throws(() => peerRange({ zod: "4" }), /declares no zod peer range/);
+  assert.throws(
+    () => peerRange("garbage"),
+    (error: unknown) =>
+      error instanceof Error &&
+      /invalid zod peer range "garbage"/.test(error.message) &&
+      error.cause instanceof TypeError,
+  );
 });
 
 test("nextTarget: a minor-boundary bound targets the newest release of that minor", () => {

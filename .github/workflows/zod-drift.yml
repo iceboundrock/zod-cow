@@ -23,16 +23,17 @@ name: zod drift check
 #            summary. A release inside the range fails the run; the informational target cannot
 #            (continue-on-error), it only shows the drift the next widening release would meet.
 #
-# Release age: minimumReleaseAge in pnpm-workspace.yaml (five days, ADR 0002) would refuse a zod
-# patch for its first five days, and pnpm's pre-script check ignores a per-command override, so
-# the suites job sets the age to 0 in its throwaway checkout after the policy-checked install of
-# everything else. The lockfile keeps every other entry as main verified it and `pnpm add` re-resolves
-# zod alone, so the one release the job runs without the age gate is the one it exists to test, on
-# the day a consumer can install it.
+# Release age: a minimumReleaseAge policy in pnpm-workspace.yaml (the five-day gate proposed in
+# #14) would refuse a zod patch for its first five days, and pnpm's pre-script check ignores a
+# per-command override, so the suites job sets the age to 0 in its throwaway checkout after the
+# install of everything else ran under whatever policy the repository sets. The lockfile keeps
+# every other entry as main verified it and `pnpm add` re-resolves zod alone, so the one release
+# the job runs without the age gate is the one it exists to test, on the day a consumer can
+# install it.
 on:
   workflow_dispatch:
   schedule:
-    # Tuesdays 04:23 UTC (off the hour, and a day after the Monday benchmark and Dependabot runs).
+    # Tuesdays 04:23 UTC (off the hour, and a day after the Monday benchmark run).
     - cron: "23 4 * * 2"
 
 permissions:
@@ -124,7 +125,8 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      # Under the repository's release-age policy: every entry of the lockfile is verified here.
+      # Under whatever release-age policy the repository sets: every entry of the lockfile is
+      # resolved here, before the gate is dropped for zod below.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

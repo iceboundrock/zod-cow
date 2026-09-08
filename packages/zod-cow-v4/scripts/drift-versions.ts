@@ -53,7 +53,9 @@ export function versionsInRange(range: string, stable: readonly string[]): strin
 
 /**
  * The highest upper bound across the `||` alternatives of the range, as an exclusive bound
- * (`<=x` is read as `<` the next patch). `null` when some alternative has no upper bound.
+ * (`<=x` is read as `<` the next patch). `null` when some alternative has no upper bound: a range
+ * such as `>=4.5.4 <4.6.0 || >=4.7.0` admits every later release already, so no single release
+ * sits "just above" it and the informational step has nothing to target.
  */
 export function exclusiveUpperBound(range: string): SemVer | null {
   let highest: SemVer | null = null;
@@ -173,13 +175,25 @@ function npmView(field: string): unknown {
   return JSON.parse(out);
 }
 
+/** The declared peer range, or an error naming what `package.json` holds instead. */
+export function peerRange(declared: unknown): string {
+  if (typeof declared !== "string" || declared.trim() === "") {
+    throw new Error(`package.json declares no zod peer range (got ${JSON.stringify(declared)})`);
+  }
+  try {
+    new Range(declared);
+  } catch (error) {
+    throw new Error(`package.json declares an invalid zod peer range ${JSON.stringify(declared)}`, {
+      cause: error,
+    });
+  }
+  return declared;
+}
+
 function main(): void {
   const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
-  const range: unknown = manifest.peerDependencies?.zod;
-  if (typeof range !== "string" || new Range(range).range === undefined) {
-    throw new Error(`package.json declares no zod peer range (got ${JSON.stringify(range)})`);
-  }
+  const range = peerRange(manifest.peerDependencies?.zod);
   const versions = npmView("versions") as string[];
   const times = npmView("time") as Record<string, string>;
   const targets = resolveDriftTargets(range, versions, times);

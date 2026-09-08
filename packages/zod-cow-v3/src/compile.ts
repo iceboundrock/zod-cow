@@ -947,9 +947,9 @@ function makeArray(def: any): Validator {
     // first forced change (a changed element, or a hole, which stock's spread turns into an own
     // undefined slot) rebuilds the clean prefix into a fresh array and every later element is
     // written from the loop's single read, as stock reads it once (#65). Stock's rebuild mode
-    // (`ctx.force`) starts from an empty fresh array and writes every element.
+    // (`ctx.force`) starts from a fresh array of the input's length and writes every element.
     let dirty = ctx.force;
-    let out: any[] = dirty ? [] : data;
+    let out: any[] = dirty ? new Array(data.length) : data;
     let anyFailed = false;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
@@ -971,7 +971,7 @@ function makeArray(def: any): Validator {
         out[i] = outVal;
       } else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) {
         dirty = true;
-        out = [];
+        out = new Array(data.length);
         for (let j = 0; j < i; j++) out[j] = data[j];
         out[i] = outVal;
       }

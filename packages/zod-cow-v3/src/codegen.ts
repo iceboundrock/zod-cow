@@ -200,20 +200,48 @@ function childCall(
 }
 
 /**
- * The child call of one array or tuple slot as a statement block: `inVal` is the value read,
- * `resVar` receives the child's result (a value or FAILED). When the leaf has an inline predicate
- * the closure runs only when the predicate fails; `resVar` then still holds `inVal`.
+ * Whether the inline predicate of a leaf can be true for `undefined`. A hole reads as undefined and
+ * is parsed as such, so a slot whose predicate rejects undefined needs no hole test on its
+ * predicate path (the test costs a compare per element on the clean path).
  */
-function slotCall(
+function predicateAcceptsUndefined(schema: z.ZodTypeAny): boolean {
+  const def: any = (schema as any)._def;
+  switch (def.typeName) {
+    case "ZodOptional":
+    case "ZodUndefined":
+    case "ZodVoid":
+    case "ZodAny":
+    case "ZodUnknown":
+      return true;
+    case "ZodNullable":
+      return predicateAcceptsUndefined(def.innerType);
+    case "ZodBranded":
+      return predicateAcceptsUndefined(def.type);
+    case "ZodLiteral":
+      return def.value === undefined;
+    default:
+      return false;
+  }
+}
+
+/**
+ * One slot of an array or tuple: `inVal` holds the value read. When the leaf has an inline
+ * predicate, `onPass` runs when it holds (the value is then the output) and the closure runs only
+ * when it fails; `onResult` runs after the closure with `outVal` holding its result (a value or
+ * FAILED).
+ */
+function slotBlock(
   g: Gen,
   child: ChildSpec,
   spec: { eager: boolean; regexOf: (check: any) => RegExp | null },
   keyExpr: string,
-  resVar: string,
+  onPass: (holeTest: boolean) => string,
+  onResult: string,
 ): string {
   const pred = inlinePredicate(child.schema, g, "inVal", spec.regexOf);
-  const body = `${childCall(g, child, spec.eager, keyExpr, "inVal")} ${resVar} = outVal;`;
-  return pred === null ? `{ ${body} }` : `if (!(${pred})) { ${body} }`;
+  const call = `${childCall(g, child, spec.eager, keyExpr, "inVal")} ${onResult}`;
+  if (pred === null) return call;
+  return `if (${pred}) { ${onPass(predicateAcceptsUndefined(child.schema))} } else { ${call} }`;
 }
 
 /**
@@ -323,8 +351,8 @@ export interface ArraySpec {
  * turns into an own `undefined` slot) rebuilds the clean prefix from the input into a fresh array
  * (the one second read, of the elements before the change) and every later element is written
  * from the loop's single read, so a getter at or after the change is read once, as stock reads it
- * (#65). In stock's rebuild mode (`ctx.force`) the fresh array starts empty and every element is
- * written once.
+ * (#65). In stock's rebuild mode (`ctx.force`) the fresh array is allocated up front and every
+ * element is written once.
  */
 export function genArray(spec: ArraySpec): Validator {
   const g = new Gen();
@@ -349,20 +377,25 @@ export function genArray(spec: ArraySpec): Validator {
       `if (data.length > ${spec.max.value}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${spec.max.value}, type: "array", inclusive: true, exact: false, message: ${m} });`,
     );
   }
-  const call = slotCall(g, spec.element, spec, "i", "val");
+  // The first forced change: a fresh array of the input's length takes the clean prefix
+  const copy =
+    "dirty = true; out = new Array(data.length); for (let j = 0; j < i; j++) out[j] = data[j];";
+  const slot = slotBlock(
+    g,
+    spec.element,
+    spec,
+    "i",
+    (holeTest) =>
+      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
+    `if (outVal === FAILED) anyFailed = true;
+      else if (dirty) out[i] = outVal;
+      else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) { ${copy} out[i] = outVal; }`,
+  );
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let dirty = ctx.force, out = dirty ? [] : data, anyFailed = false;
-    for (let i = 0; i < data.length; i++) {
-      const inVal = data[i]; let val = inVal;
-      ${call}
-      if (val === FAILED) anyFailed = true;
-      else if (dirty) out[i] = val;
-      else if (!anyFailed && (val !== inVal || (inVal === undefined && !(i in data)))) {
-        dirty = true; out = []; for (let j = 0; j < i; j++) out[j] = data[j]; out[i] = val;
-      }
-    }
+    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false;
+    for (let i = 0; i < data.length; i++) { const inVal = data[i]; ${slot} }
     if (anyFailed) return FAILED;
     return out;
   };`;
@@ -391,12 +424,15 @@ export function genTuple(spec: TupleSpec): Validator {
   const n = spec.items.length;
   const slots = spec.items.map((item, i) => {
     const V = `v${i}`;
-    return `{ const inVal = data[${i}]; let val = inVal;
-      ${slotCall(g, item, spec, String(i), "val")}
-      if (val === FAILED) anyFailed = true;
-      else if (val !== inVal) dirty = true;
-      else if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;
-      ${V} = val; }`;
+    const hole = `if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;`;
+    return `{ const inVal = data[${i}]; ${slotBlock(
+      g,
+      item,
+      spec,
+      String(i),
+      (holeTest) => `${V} = inVal;${holeTest ? ` ${hole}` : ""}`,
+      `if (outVal === FAILED) anyFailed = true; else { ${V} = outVal; if (outVal !== inVal) dirty = true; else ${hole} }`,
+    )} }`;
   });
   const src = `return function generatedTuple(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }

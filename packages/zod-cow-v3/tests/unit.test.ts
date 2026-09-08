@@ -125,7 +125,7 @@ test("aligned with stock: an absent optional key is not materialized, present-un
   assert.equal("a" in cowPresent, "a" in stockPresent);
 });
 
-test("array: slice once when an element is dirty, the other elements stay shared", () => {
+test("array: copy once when an element is dirty, the other elements stay shared", () => {
   const C = compile(z.array(z.object({ v: z.number().default(1), n: z.string() })));
   const input = [{ n: "a" }, { n: "b", v: 2 }] as any[];
   const out = C.parse(input) as any[];
@@ -440,13 +440,15 @@ test("object copy path: stock's output assembly from the validated values (non-e
     assert.deepEqual(Object.keys(C.parse(presentUndef) as any), ["a", "b", "c"]);
     assert.deepEqual(Object.keys(M.parse(presentUndef) as any), ["a", "b", "c"]);
     assert.deepEqual(Object.keys(C.parse({ a: "x" }) as any), ["a", "b"]);
-    // An undeclared own symbol key is dropped by the copy like stock (the clean path keeps it by reference)
+    // An undeclared own symbol key is dropped by the copy like stock; a clean input carrying one
+    // is copied as well since #65 (the own-symbol probe, tested on its own below)
     const sym = Symbol("s");
     const withSym: any = { a: "x", [sym]: 1 };
     assert.deepEqual(Object.getOwnPropertySymbols(C.parse(withSym) as any), []);
     assert.deepEqual(Object.getOwnPropertySymbols(M.parse(withSym) as any), []);
     const cleanSym: any = { a: "x", b: "y", [sym]: 1 };
-    assert.equal(C.parse(cleanSym), cleanSym);
+    assert.notEqual(C.parse(cleanSym), cleanSym);
+    assert.deepEqual(C.parse(cleanSym), { a: "x", b: "y" });
     // A getter is read once on the copy path, as stock reads each shape key once
     let reads = 0;
     const g: any = {
@@ -1260,6 +1262,148 @@ test("array / tuple: a hole is materialized as an own undefined slot like stock"
   assert.equal(tb.success, false); // too_big is an issue, as in stock
   const tdense = [undefined, 1];
   assert.equal(compile(T).parse(tdense), tdense);
+});
+
+test("array / tuple copy path: the copy is assembled from the element results, a getter at or after the first change is read once like stock", () => {
+  // An array whose every index is an accessor counting its reads; the value at `dirtyAt` is
+  // undefined so the default fires there
+  const counted = (n: number, dirtyAt: number, reads: number[]) => {
+    const a: any[] = [];
+    for (let i = 0; i < n; i++) {
+      reads[i] = 0;
+      Object.defineProperty(a, i, {
+        get() {
+          reads[i]!++;
+          return i === dirtyAt ? undefined : `v${i}`;
+        },
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return a;
+  };
+  const A = z.array(z.string().default("d"));
+  // Stock reads every element once (`[...data]`) and builds the output from the results
+  const sr: number[] = [];
+  assert.deepEqual(A.parse(counted(3, 1, sr)), ["v0", "d", "v2"]);
+  assert.deepEqual(sr, [1, 1, 1]);
+  // Dirty at index 0: every element is written from its single read, like stock
+  const r0: number[] = [];
+  const in0 = counted(3, 0, r0);
+  const out0 = compile(A).parse(in0);
+  assert.deepEqual(out0, ["d", "v1", "v2"]);
+  assert.notEqual(out0, in0);
+  assert.deepEqual(r0, [1, 1, 1]);
+  // Dirty at index 1: the clean prefix (index 0) is re-read once when the copy is made, the
+  // documented second read of the sync layouts; the elements at and after the change are read once
+  const r1: number[] = [];
+  assert.deepEqual(compile(A).parse(counted(3, 1, r1)), ["v0", "d", "v2"]);
+  assert.deepEqual(r1, [2, 1, 1]);
+  // Rebuild mode (below a readonly): every element read once, as stock's spread reads it
+  const RA = z.array(z.string()).readonly();
+  const rr: number[] = [];
+  const rout = compile(RA).parse(counted(3, -1, rr));
+  assert.deepEqual(rout, ["v0", "v1", "v2"]);
+  assert.deepEqual(rr, [1, 1, 1]);
+  assert.equal(Object.isFrozen(rout), true);
+  // The sparse case after the first change: a hole at index 2 becomes an own undefined slot,
+  // written from the loop's single read
+  const D = z.array(z.string().default("d").optional());
+  const late: any[] = ["x", undefined];
+  late[3] = "y";
+  const lout = compile(D).parse(late) as unknown[];
+  assert.deepEqual(lout, D.parse(late));
+  assert.equal(Object.hasOwn(lout, 2), true);
+  assert.equal(Object.hasOwn(late, 2), false);
+
+  // Tuple: every slot's result is held, so no element is read twice on any path
+  const T = z.tuple([z.string().default("d"), z.string().default("d"), z.string().default("d")]);
+  const ts: number[] = [];
+  assert.deepEqual(T.parse(counted(3, 0, ts)), ["d", "v1", "v2"]);
+  assert.deepEqual(ts, [1, 1, 1]);
+  for (const dirtyAt of [0, 1, 2]) {
+    const tr: number[] = [];
+    const tin = counted(3, dirtyAt, tr);
+    const tout = compile(T).parse(tin);
+    assert.deepEqual(tout, T.parse(counted(3, dirtyAt, [])));
+    assert.notEqual(tout, tin);
+    assert.deepEqual(tr, [1, 1, 1], `tuple dirty at ${dirtyAt}`);
+  }
+  // A too-long tuple: stock spreads the whole input (the extra element read once too), reports
+  // too_big and fails; the same reads here
+  const tl: number[] = [];
+  assert.equal(T.safeParse(counted(4, -1, tl)).success, false);
+  assert.deepEqual(tl, [1, 1, 1, 1]);
+  const cl: number[] = [];
+  const tres = compile(T).safeParse(counted(4, -1, cl));
+  assert.equal(tres.success, false);
+  assert.deepEqual(cl, [1, 1, 1, 1]);
+  assert.deepEqual(tres.success ? [] : tres.error.issues.map((i) => i.code), ["too_big"]);
+  // Rebuild mode below a readonly: one read per slot
+  const RT = z.tuple([z.string(), z.string()]).readonly();
+  const rt: number[] = [];
+  const rtout = compile(RT).parse(counted(2, -1, rt));
+  assert.deepEqual(rtout, ["v0", "v1"]);
+  assert.deepEqual(rt, [1, 1]);
+  assert.equal(Object.isFrozen(rtout), true);
+  // A clean tuple and a clean array still return the input by reference
+  const clean = ["a", "b", "c"];
+  assert.equal(compile(T).parse(clean), clean);
+  assert.equal(compile(A).parse(clean), clean);
+});
+
+test("own-symbol probe: a clean object or record with an undeclared own symbol key is copied without it, like stock's rebuild", () => {
+  const sym = Symbol("s");
+  const withEnum = () => ({ a: "x", [sym]: 1 });
+  const withHidden = () => {
+    const o: any = { a: "x" };
+    Object.defineProperty(o, sym, { value: 1, enumerable: false });
+    return o;
+  };
+  const schemas: [string, z.ZodTypeAny][] = [
+    ["strip", z.object({ a: z.string() })],
+    ["strict", z.object({ a: z.string() }).strict()],
+    ["passthrough", z.object({ a: z.string() }).passthrough()],
+    ["record", z.record(z.string())],
+    ["enum-keyed record", z.record(z.enum(["a"]), z.string())],
+  ];
+  for (const [label, S] of schemas) {
+    for (const mk of [withEnum, withHidden]) {
+      const stockOut = S.parse(mk());
+      assert.deepEqual(Object.getOwnPropertySymbols(stockOut), [], label);
+      const input = mk();
+      const out = compile(S).parse(input);
+      assert.notEqual(out, input, label);
+      assert.deepEqual(Object.getOwnPropertySymbols(out), [], label);
+      assert.deepEqual(out, stockOut, label);
+      assert.equal(input[sym], 1, label); // input lossless
+    }
+    // Without a symbol key the clean input keeps its reference
+    const plain = { a: "x" };
+    assert.equal(compile(S).parse(plain), plain, label);
+    assert.equal(compile(S).pure, true, label);
+  }
+  // The symbol key on a nested object makes the parent dirty too; the sibling stays shared
+  const N = z.object({ n: z.object({ a: z.string() }), m: z.object({ a: z.string() }) });
+  const nin = { n: withEnum(), m: { a: "y" } };
+  const nout = compile(N).parse(nin);
+  assert.notEqual(nout, nin);
+  assert.notEqual(nout.n, nin.n);
+  assert.equal(nout.m, nin.m);
+  assert.deepEqual(nout, N.parse(nin));
+  // A record whose probe fires writes every pair from a single read of its getter
+  let reads = 0;
+  const rin = {
+    get a() {
+      reads++;
+      return "x";
+    },
+    b: "y",
+    [sym]: 1,
+  };
+  const rout = compile(z.record(z.string())).parse(rin);
+  assert.deepEqual(rout, { a: "x", b: "y" });
+  assert.equal(reads, 1);
 });
 
 test("record: an own __proto__ is dropped, a key transformed to __proto__ is skipped, an inherited enumerable key is written as own", () => {

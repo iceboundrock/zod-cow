@@ -38,6 +38,7 @@ export const CODEGEN_AVAILABLE: boolean = (() => {
 })();
 
 const hop = Object.prototype.hasOwnProperty;
+const ownSymbols = Object.getOwnPropertySymbols;
 
 /** Compile-time environment of one generated function: named constants handed in as parameters */
 class Gen {
@@ -199,31 +200,20 @@ function childCall(
 }
 
 /**
- * One child slot of an array or tuple: test the inline predicate when there is one, otherwise call
- * the closure, then the CoW bookkeeping. `access` is the expression that reads the input value,
- * `key` the path segment expression and `assign` the statement that writes a changed value into
- * the copy.
+ * The child call of one array or tuple slot as a statement block: `inVal` is the value read,
+ * `resVar` receives the child's result (a value or FAILED). When the leaf has an inline predicate
+ * the closure runs only when the predicate fails; `resVar` then still holds `inVal`.
  */
-function childBlock(
+function slotCall(
   g: Gen,
   child: ChildSpec,
   spec: { eager: boolean; regexOf: (check: any) => RegExp | null },
-  access: string,
   keyExpr: string,
-  copyExpr: string,
-  assign: (outVal: string) => string,
+  resVar: string,
 ): string {
   const pred = inlinePredicate(child.schema, g, "inVal", spec.regexOf);
-  const body = `${childCall(g, child, spec.eager, keyExpr, "inVal")}
-      if (outVal === FAILED) anyFailed = true;
-      else if (outVal !== inVal && !anyFailed) { if (!dirty) { dirty = true; out = ${copyExpr}; } ${assign("outVal")} }`;
-  // A hole reads as undefined and is parsed as such; stock spreads the input, so its output owns
-  // every index, while `slice()` keeps the hole: an index still absent from `out` after the slot
-  // ran is materialized as an own undefined (tested only when the value read was undefined)
-  const hole = `if (inVal === undefined && !anyFailed && !(${keyExpr} in out)) { if (!dirty) { dirty = true; out = ${copyExpr}; } ${assign("undefined")} }`;
-  return `{ const inVal = ${access};
-    ${pred === null ? body : `if (!(${pred})) { ${body} }`}
-    ${hole} }`;
+  const body = `${childCall(g, child, spec.eager, keyExpr, "inVal")} ${resVar} = outVal;`;
+  return pred === null ? `{ ${body} }` : `if (!(${pred})) { ${body} }`;
 }
 
 /**
@@ -238,7 +228,9 @@ function childBlock(
  * does (inherited enumerable keys included, an `undefined` value dropped). The strip / strict
  * probe is stock's `for...in` as well, so an inherited enumerable key counts as undeclared. In
  * stock's rebuild mode (`ctx.force`, below a readonly or a fired default) the skeleton starts out
- * dirty and always takes that assembly.
+ * dirty and always takes that assembly. The clean path returns the input only after proving it
+ * carries no own symbol key (`Object.getOwnPropertySymbols`), which the assembly drops as stock's
+ * does (#65); a copy needs no probe, since it is built from the locals.
  */
 export function genObject(spec: ObjectSpec): Validator {
   const g = new Gen();
@@ -304,7 +296,7 @@ export function genObject(spec: ObjectSpec): Validator {
     ${dropOwnProto}
     ${probe}
     ${spec.mode === "strict" ? "if (anyFailed) return FAILED;" : ""}
-    if (!dirty) return data;
+    if (!dirty && ownSymbols(data).length === 0) return data;
     const out = {};
     ${assembly.join("\n    ")}
     ${extrasAppend}
@@ -324,7 +316,16 @@ export interface ArraySpec {
   prefixIssues: (ctx: Ctx, from: number, key: string | number, to?: number) => void;
 }
 
-/** Generated array skeleton (the closure `makeArray` in compile.ts) */
+/**
+ * Generated array skeleton (the closure `makeArray` in compile.ts). Stock reads every element
+ * once (`[...data]`) and builds a fresh array from the results; here the clean path returns the
+ * input by reference, the first forced change (a changed element, or a hole, which stock's spread
+ * turns into an own `undefined` slot) rebuilds the clean prefix from the input into a fresh array
+ * (the one second read, of the elements before the change) and every later element is written
+ * from the loop's single read, so a getter at or after the change is read once, as stock reads it
+ * (#65). In stock's rebuild mode (`ctx.force`) the fresh array starts empty and every element is
+ * written once.
+ */
 export function genArray(spec: ArraySpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
@@ -348,20 +349,20 @@ export function genArray(spec: ArraySpec): Validator {
       `if (data.length > ${spec.max.value}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${spec.max.value}, type: "array", inclusive: true, exact: false, message: ${m} });`,
     );
   }
-  const slot = childBlock(
-    g,
-    spec.element,
-    spec,
-    "data[i]",
-    "i",
-    "data.slice()",
-    (outVal) => `out[i] = ${outVal};`,
-  );
+  const call = slotCall(g, spec.element, spec, "i", "val");
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let dirty = ctx.force, out = dirty ? data.slice() : data, anyFailed = false;
-    for (let i = 0; i < data.length; i++) ${slot}
+    let dirty = ctx.force, out = dirty ? [] : data, anyFailed = false;
+    for (let i = 0; i < data.length; i++) {
+      const inVal = data[i]; let val = inVal;
+      ${call}
+      if (val === FAILED) anyFailed = true;
+      else if (dirty) out[i] = val;
+      else if (!anyFailed && (val !== inVal || (inVal === undefined && !(i in data)))) {
+        dirty = true; out = []; for (let j = 0; j < i; j++) out[j] = data[j]; out[i] = val;
+      }
+    }
     if (anyFailed) return FAILED;
     return out;
   };`;
@@ -376,31 +377,37 @@ export interface TupleSpec {
   prefixIssues: (ctx: Ctx, from: number, key: string | number, to?: number) => void;
 }
 
-/** Generated tuple skeleton (the closure `makeTuple` in compile.ts), one unrolled block per slot */
+/**
+ * Generated tuple skeleton (the closure `makeTuple` in compile.ts), one unrolled block per slot.
+ * Every slot's result is held in a local (`v0`, `v1`, …) and the copy is an array literal of
+ * those locals, so no element is read twice on any path (#65): a too-long input (too_big, dirty
+ * like stock, whose spread reads the extra elements once too) and stock's rebuild mode take the
+ * same assembly. A hole reads as undefined, is parsed as such and makes the tuple dirty, since
+ * stock's spread turns it into an own `undefined` slot.
+ */
 export function genTuple(spec: TupleSpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
   const n = spec.items.length;
-  const slots = spec.items.map((item, i) =>
-    childBlock(
-      g,
-      item,
-      spec,
-      `data[${i}]`,
-      String(i),
-      "data.slice()",
-      (outVal) => `out[${i}] = ${outVal};`,
-    ),
-  );
+  const slots = spec.items.map((item, i) => {
+    const V = `v${i}`;
+    return `{ const inVal = data[${i}]; let val = inVal;
+      ${slotCall(g, item, spec, String(i), "val")}
+      if (val === FAILED) anyFailed = true;
+      else if (val !== inVal) dirty = true;
+      else if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;
+      ${V} = val; }`;
+  });
   const src = `return function generatedTuple(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
-    let dirty = ctx.force, out = data, anyFailed = false;
-    if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); out = data.slice(0, ${n}); dirty = true; }
-    else if (dirty) out = data.slice();
+    let dirty = ctx.force, anyFailed = false;
+    if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; for (let i = ${n}; i < data.length; i++) data[i]; }
+    ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i}`).join(", ")};`}
     ${slots.join("\n    ")}
     if (anyFailed) return FAILED;
-    return out;
+    if (!dirty) return data;
+    return [${spec.items.map((_, i) => `v${i}`).join(", ")}];
   };`;
   return build(g, spec.prefixIssues, src);
 }
@@ -413,6 +420,7 @@ function build(
   const factory = new Function(
     "FAILED",
     "hop",
+    "ownSymbols",
     "isObjectType",
     "pushIssue",
     "pushInvalidType",
@@ -423,6 +431,7 @@ function build(
   return factory(
     FAILED,
     hop,
+    ownSymbols,
     isObjectType,
     pushIssue,
     pushInvalidType,

@@ -857,7 +857,9 @@ function makeObject(def: any): Validator {
       }
     }
     if (anyFailed) return FAILED;
-    if (!dirty) return data; // Pure case: === data, the original reference goes straight through
+    // Pure case: === data, the original reference goes straight through, once the input is proven
+    // to carry no own symbol key, which the assembly below drops as stock's does (#65)
+    if (!dirty && Object.getOwnPropertySymbols(data).length === 0) return data;
 
     // Stock's output assembly (`mergeObjectSync`): the shape keys in shape order, a key written when
     // its value is defined or the key is present on the input (`in`, as stock tests it; the flags
@@ -941,8 +943,13 @@ function makeArray(def: any): Validator {
       });
     }
 
-    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
-    let out: any[] = dirty ? data.slice() : data;
+    // Same algorithm as the generated skeleton: the clean path returns the input by reference, the
+    // first forced change (a changed element, or a hole, which stock's spread turns into an own
+    // undefined slot) rebuilds the clean prefix into a fresh array and every later element is
+    // written from the loop's single read, as stock reads it once (#65). Stock's rebuild mode
+    // (`ctx.force`) starts from an empty fresh array and writes every element.
+    let dirty = ctx.force;
+    let out: any[] = dirty ? [] : data;
     let anyFailed = false;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
@@ -960,19 +967,13 @@ function makeArray(def: any): Validator {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
         continue;
       }
-      if (outVal !== inVal && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = data.slice(); // slice only at the first "forced" change — the other elements stay shared
-        }
+      if (dirty) {
         out[i] = outVal;
-      } else if (inVal === undefined && !anyFailed && !(i in out)) {
-        // A hole: stock spreads the input, so its output owns every index (`slice()` keeps holes)
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = undefined;
+      } else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) {
+        dirty = true;
+        out = [];
+        for (let j = 0; j < i; j++) out[j] = data[j];
+        out[i] = outVal;
       }
     }
     if (anyFailed) return FAILED;
@@ -1010,10 +1011,14 @@ function makeTuple(def: any): Validator {
       });
       return FAILED;
     }
-    let out: any[] = data;
-    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
+    // Same algorithm as the generated skeleton: every slot's result is held in `vals` (the
+    // generated skeleton holds them in locals) and `vals` is the output whenever the tuple is
+    // dirty, so no element is read twice on any path (#65)
+    const vals: any[] = new Array(n);
+    let dirty = ctx.force; // stock's rebuild mode: the copy from the start
     if (data.length > n) {
-      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
+      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to
+      // them; stock's spread reads the extra elements once, so they are read here too
       pushIssue(ctx, data, em, {
         code: "too_big",
         maximum: n,
@@ -1021,10 +1026,8 @@ function makeTuple(def: any): Validator {
         exact: false,
         type: "array",
       });
-      out = data.slice(0, n);
       dirty = true;
-    } else if (dirty) {
-      out = data.slice();
+      for (let i = n; i < data.length; i++) data[i];
     }
     let anyFailed = false;
     for (let i = 0; i < n; i++) {
@@ -1043,23 +1046,13 @@ function makeTuple(def: any): Validator {
         anyFailed = true;
         continue;
       }
-      if (outVal !== inVal && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = outVal;
-      } else if (inVal === undefined && !anyFailed && !(i in out)) {
-        // A hole is materialized as an own slot, as stock's spread of the input does
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = undefined;
-      }
+      vals[i] = outVal;
+      if (outVal !== inVal) dirty = true;
+      // A hole is materialized as an own slot, as stock's spread of the input does
+      else if (!dirty && inVal === undefined && !(i in data)) dirty = true;
     }
     if (anyFailed) return FAILED;
-    return out;
+    return dirty ? vals : data;
   };
 }
 
@@ -1081,8 +1074,9 @@ function makeRecord(def: any): Validator {
     // path returns the input by reference; the first forced change rebuilds the clean prefix in
     // order and every later pair is written after it, so a transformed key that collides with a
     // later entry is overwritten by that entry as in stock. Stock's rebuild mode starts out dirty
-    // and writes every pair.
-    let dirty = ctx.force;
+    // and writes every pair, and so does an input carrying an own symbol key, which `for...in`
+    // never sees and stock's assembly therefore drops (#65).
+    let dirty = ctx.force || Object.getOwnPropertySymbols(data).length !== 0;
     let out: any = dirty ? {} : data;
     let anyFailed = false;
     for (const k in data) {

@@ -164,6 +164,29 @@ await z.object({ a: L() }).safeParseAsync({ a: "x" }); // { success: true, data:
 
 Our layer routes every official subtree holding a `lazy` to the interpreter, whose `_zod.run` throws `$ZodAsyncError` at the transform node, and pins the compiler row in a version canary; the object-runtime row is left as stock's answer.
 
+### Bonus 4: `readonly` over a pass-through leaf freezes the caller's input in place
+
+`readonly` returns whatever the inner schema produced, frozen: `handleReadonlyResult` in `schemas.js` runs `payload.value = Object.freeze(payload.value)`, and the compiler emits `Object.freeze(innerOut)` (`compile.js`, the `readonly` case). Over a container the inner value is a fresh copy, so the freeze is harmless. Over a pass-through leaf — `any`, `unknown`, `custom`, `date`, or an `optional` / `nullable` / `default` / `union` / `lazy` / `transform` wrapper whose branch hands the value straight through — the inner value *is* the caller's argument, so `.parse(x)` freezes `x` itself (zod 4.5.4):
+
+```ts
+import { z } from "zod";
+const a = { x: 1 };
+z.any().readonly().parse(a) === a;   // true: the input is returned
+Object.isFrozen(a);                  // true: and frozen in place
+
+const d = new Date(0);
+z.date().readonly().parse(d) === d;  // true
+Object.isFrozen(d);                  // true: a Date argument is frozen in place too
+
+const c = { x: 1 };
+const out = z.object({ x: z.number() }).readonly().parse(c);
+out !== c && !Object.isFrozen(c) && Object.isFrozen(out); // true: a container freezes a copy
+```
+
+Freezing a value the caller still owns is a side effect on the argument, which is surprising for a validation call and easy to miss, since the returned value looks unchanged. It surfaces later when the caller mutates what it passed in. A fix would freeze a copy for a pass-through leaf as well (the container path already does), or leave the leaf unfrozen and document that `readonly` guarantees frozenness only for the value it constructs. Either is a behavior change gated on a major.
+
+We keep stock's behavior exactly (the zod4 line hands every `readonly` subtree to the official parser), pin both freezes with version-canary flags and a differential block with a frozenness oracle, and file this here so the surprise is on record.
+
 ### Compatibility & risk
 
 - The compiler is already load-bearing for `zod/compile`; promoting it formalizes what already exists and adds no surface.
@@ -179,5 +202,6 @@ Our layer routes every official subtree holding a `lazy` to the interpreter, who
 - [x] The minimal reproduction of the quirk in the "Bonus" section was verified in a `node` REPL of this project (ownKeys is stably "0,2,length", sync rest parses correctly)
 - [x] Every row of the table in the second bonus section was verified against zod 4.5.4 with `compileFn` from `zod/v4/core` and the interpreter's `safeParse` (`packages/zod-cow-v4/src/probe-z4-flags.ts` pins the length and range rows; smoke group 23 of `tests/smoke-z4.test.ts` holds the others).
 - [x] The four lines of the third bonus section were verified against zod 4.5.4 the same way (`compilerLazyCheckThrowsOnThenable` in `probe-z4-flags.ts` pins the compiler row; the lazy group of `tests/smoke-z4-tuple-async.test.ts` pins the object-runtime row on both sides).
+- [x] The `readonly` freeze in the fourth bonus section was verified against zod 4.5.4 for pass-through leaves (`any` / `unknown` / `custom` / `date` and wrappers) and containers (`readonlyFreezesPassThroughInput` / `readonlyContainerFreezesCopy` in `probe-z4-flags.ts` pin two rows; the `readonly` differential block of `tests/differential-z4.test.ts` compares the frozenness footprint of both output and input against stock, #28).
 - [x] Tone: a request to promote an existing surface plus an attached bug report, not a wish list; the proposed API shape is deliberately minimal
 - [ ] Before submitting: check whether colinhacks/zod already has an issue or PR about `zod/compile`, and reference and extend it rather than opening a duplicate

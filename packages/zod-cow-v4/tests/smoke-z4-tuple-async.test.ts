@@ -4106,46 +4106,637 @@ head(
     ok("the fast path's own Promise signal still reaches stock's async runtime");
   }
 
-  // Residual: a callback that stock's generated code calls (a leaf refine, a custom check or a superRefine inside
-  // an official product) reports its Promise signal with the same class from a throw site this layer cannot mark,
-  // so a `$ZodAsyncError` such a callback throws is handed to stock's async runtime like the signal: a callback that
-  // throws on every call rejects with the same error after running twice (the documented failure-path duplicate),
-  // one that throws on the first call only passes on the rerun where stock rejects. Pinned here; tracked in #80.
+  // #80: a callback stock's generated code calls (a leaf `.refine`, `.check`, `.superRefine`, `z.custom`
+  // predicate, a custom string format's predicate, `overwrite` or `transform` inside an official product) reports
+  // its Promise signal from stock's own
+  // hoisted `throwAsync`, so a `$ZodAsyncError` such a callback throws used to be indistinguishable from the fast
+  // path's signal and took the fallback: the callback ran twice, and one that throws on the first call only passed
+  // on the rerun where stock rejects. It is recorded now. Stock's compiler reads those callbacks off writable `def`
+  // slots at compile time only (it hoists the reference into the generated closure), so `officialFn` /
+  // `compileAssertOnlyRecording` wrap each non-async callback for the duration of the compile: the generated code
+  // captures the recording wrapper as a constant and the slot is restored at once, leaving the caller's schema
+  // untouched. A callback stock would run inside a runtime island (an islandable refusal at or above it, e.g. a
+  // coercion sibling) cannot be reached that way, so the whole subtree is routed to this layer's island, whose
+  // `runIsland` records the throw. Both a throw on every call and a throw on the first call only now reject after
+  // one call, like stock.
   {
     const always = (log: string[]) => () => {
       log.push("c");
       nested.parse("x");
       return true;
     };
+    const superRefineOnce = (log: string[]) => (_v: unknown) => {
+      log.push("c");
+      if (log.length === 1) nested.parse("x");
+    };
+    // Every position: the callback is inlined into an official product (compiled fast path) or, for the coercion
+    // case, run inside a runtime island of one. The last row is the one position stock runtime-islands the
+    // callback (`z.coerce.string()` refuses islandable), so it exercises the `wouldRuntimeIslandCallback` route.
     const leafCases: [string, (fn: () => boolean) => z.ZodType, unknown][] = [
+      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
       [
         "leaf refine under an object key",
         (fn) => z.object({ a: z.string().refine(fn) }),
         { a: "x" },
       ],
-      ["top-level leaf refine", (fn) => z.string().refine(fn), "x"],
+      ["leaf refine in an array", (fn) => z.array(z.string().refine(fn)), ["x"]],
+      [
+        "leaf refine in a union of leaves",
+        (fn) => z.union([z.string().refine(fn), z.number()]),
+        "x",
+      ],
+      [
+        "leaf overwrite (tx) that throws",
+        (fn) =>
+          z.string().overwrite((v) => {
+            fn();
+            return v;
+          }),
+        "x",
+      ],
+      [
+        "leaf transform that throws",
+        (fn) =>
+          z.string().transform((v) => {
+            fn();
+            return v;
+          }),
+        "x",
+      ],
+      ["z.custom predicate that throws", (fn) => z.custom<unknown>((v) => fn() && v === "x"), "x"],
+      // A custom string format is a `string` schema carrying its predicate on its own `def.fn` (third review of #112).
+      [
+        "custom string format (z.stringFormat) at the top level",
+        (fn) => z.stringFormat("fmt", (v) => fn() && v.length > 0),
+        "x",
+      ],
+      [
+        "custom string format under an object key",
+        (fn) => z.object({ a: z.stringFormat("fmt", (v) => fn() && v.length > 0) }),
+        { a: "x" },
+      ],
+      [
+        "custom string format in an array",
+        (fn) => z.array(z.stringFormat("fmt", (v) => fn() && v.length > 0)),
+        ["x"],
+      ],
+      [
+        "custom string format used as a check",
+        (fn) => z.string().check(z.stringFormat("fmt", (v) => fn() && v.length > 0)),
+        "x",
+      ],
+      [
+        "leaf refine under a coercion (stock runtime-islands it)",
+        (fn) =>
+          z.object({ a: z.coerce.string().refine(fn) as unknown as z.ZodType }).overwrite((v) => v),
+        { a: "x" },
+      ],
     ];
     for (const [name, make, input] of leafCases) {
-      const stockLog: string[] = [];
-      await assert.rejects(make(always(stockLog)).safeParseAsync(input), $ZodAsyncError);
-      assert.equal(stockLog.length, 1);
+      // throws on every call → both sides reject after one call
+      const stockAlways: string[] = [];
+      await assert.rejects(make(always(stockAlways)).safeParseAsync(input), $ZodAsyncError);
+      assert.equal(stockAlways.length, 1, `${name}: stock runs the callback once`);
       const log: string[] = [];
       const C = compile(make(always(log)));
-      assert.ok(!C.async && !C.stock);
+      assert.ok(!C.async && !C.stock, `${name}: sync compiled product`);
       await assert.rejects(C.safeParseAsync(input), $ZodAsyncError, `${name}: the same rejection`);
-      assert.equal(
-        log.length,
-        2,
-        `${name}: the fast path and stock's async runtime each ran the callback`,
-      );
+      assert.equal(log.length, 1, `${name}: the callback ran once, no rerun (#80)`);
+      // throws on the first call only → the parse rejects, not the pre-#80 success on the rerun
       const onceLog: string[] = [];
       const CO = compile(make(once(onceLog, () => nested.parse("x"))));
-      const r = await CO.safeParseAsync(input);
-      assert.ok(r.success, `${name}: a first-call-only throw passes on the rerun (known, #80)`);
-      assert.equal(onceLog.length, 2);
+      await assert.rejects(
+        CO.safeParseAsync(input),
+        $ZodAsyncError,
+        `${name}: a first-call-only throw rejects, no rerun (#80)`,
+      );
+      assert.equal(onceLog.length, 1, `${name}: one call`);
+    }
+    // superRefine carries its callback on `_zod.check`, not `def.fn`; pinned separately
+    {
+      const stockLog: string[] = [];
+      await assert.rejects(
+        z.string().superRefine(superRefineOnce(stockLog)).safeParseAsync("x"),
+        $ZodAsyncError,
+      );
+      assert.equal(stockLog.length, 1);
+      const log: string[] = [];
+      const C = compile(z.string().superRefine(superRefineOnce(log)));
+      assert.ok(!C.async && !C.stock);
+      await assert.rejects(
+        C.safeParseAsync("x"),
+        $ZodAsyncError,
+        "superRefine: the same rejection",
+      );
+      assert.equal(log.length, 1, "superRefine: one call, no rerun (#80)");
+    }
+    // The wrappers live for the duration of the compile only: every slot stock's compiler reads (`def.fn`,
+    // `_zod.check`, `def.tx`, `def.transform`) reads back as the caller's own function once `compile()` returned,
+    // while the compiled product keeps recording through the wrapper it captured (review of #112).
+    {
+      const f = (v: string) => v.length > 0;
+      const g = (_v: unknown) => {};
+      const tx = (v: string) => v;
+      const tr = (v: string) => v;
+      const cust = (v: unknown) => typeof v === "string";
+      const S = z.object({
+        a: z.string().refine(f).superRefine(g).overwrite(tx),
+        b: z.string().transform(tr),
+        c: z.custom<string>(cust),
+      });
+      const slotsOf = (): unknown[] => {
+        const a = (S.shape.a as any)._zod.def.checks;
+        return [
+          a[0]._zod.def.fn,
+          a[1]._zod.check,
+          a[2]._zod.def.tx,
+          (S.shape.b as any)._zod.def.out._zod.def.transform,
+          (S.shape.c as any)._zod.def.fn,
+        ];
+      };
+      const before = slotsOf();
+      // superRefine stores a closure of its own around `g` on `_zod.check`; the other slots hold the functions as given
+      assert.ok(before.every((x) => typeof x === "function"));
+      assert.ok(before[0] === f && before[2] === tx && before[3] === tr && before[4] === cust);
+      const C = compile(S);
+      assert.ok(!C.async && !C.stock);
+      assert.deepEqual(C.parse({ a: "x", b: "x", c: "x" }), { a: "x", b: "x", c: "x" });
+      assert.deepEqual(C.validate({ a: "x", b: "x", c: "x" }), { a: "x", b: "x", c: "x" });
+      const after = slotsOf();
+      for (let i = 0; i < before.length; i++)
+        assert.ok(
+          after[i] === before[i],
+          `slot ${i} reads back as the caller's function after compile`,
+        );
+    }
+    // The install is all or none (review of #112): a slot that refuses the wrapper (a frozen `def`, which stock's
+    // `compileFn` never writes, so such a schema parses on stock) undoes the slots already wrapped, nothing leaks
+    // into the caller's schema, `compile()` does not throw, and the subtree takes this layer's island, whose
+    // `runIsland` records the callback's own throw. Both orders: the frozen slot after a writable one (the
+    // writable one is wrapped, then undone) and before it (nothing was wrapped).
+    {
+      const keep = (v: string) => v.length > 0;
+      const frozenPair = (cb: () => boolean, frozenAt: 0 | 1): z.ZodType => {
+        const s =
+          frozenAt === 0 ? z.string().refine(cb).refine(keep) : z.string().refine(keep).refine(cb);
+        Object.freeze((s as any)._zod.def.checks[frozenAt]._zod.def);
+        return s;
+      };
+      for (const frozenAt of [0, 1] as const) {
+        const plain = frozenPair(() => true, frozenAt);
+        const fns = (plain as any)._zod.def.checks.map((c: any) => c._zod.def.fn);
+        const C = compile(plain);
+        assert.ok(!C.async && !C.stock, `frozen def at ${frozenAt}: compiles like stock`);
+        assert.deepEqual(
+          (plain as any)._zod.def.checks.map((c: any) => c._zod.def.fn),
+          fns,
+          `frozen def at ${frozenAt}: no wrapper leaks into the schema`,
+        );
+        assert.equal(C.parse("x"), "x");
+        assert.equal(C.validate("x"), "x");
+        assert.equal(plain.parse("x"), "x", "stock parses the frozen schema too");
+        const positions: [string, (s: z.ZodType) => z.ZodType, unknown][] = [
+          ["top level", (s) => s, "x"],
+          ["under an object key", (s) => z.object({ a: s }), { a: "x" }],
+          ["in an array", (s) => z.array(s), ["x"]],
+        ];
+        for (const [name, make, input] of positions) {
+          const log: string[] = [];
+          const CA = compile(make(frozenPair(always(log), frozenAt)));
+          await assert.rejects(
+            CA.safeParseAsync(input),
+            $ZodAsyncError,
+            `${name}: the same rejection`,
+          );
+          assert.equal(
+            log.length,
+            1,
+            `${name}, frozen def at ${frozenAt}: one call through the island`,
+          );
+          const onceLog: string[] = [];
+          const CO = compile(
+            make(
+              frozenPair(
+                once(onceLog, () => nested.parse("x")),
+                frozenAt,
+              ),
+            ),
+          );
+          await assert.rejects(CO.safeParseAsync(input), $ZodAsyncError);
+          assert.equal(
+            onceLog.length,
+            1,
+            `${name}, frozen def at ${frozenAt}: a first-call-only throw rejects`,
+          );
+        }
+      }
+      // The container above a frozen leaf keeps its skeleton and the CoW reference.
+      const CK = compile(z.object({ a: frozenPair(() => true, 1), b: z.number() }));
+      const input = { a: "x", b: 1 };
+      assert.ok(
+        CK.parse(input) === input,
+        "the object above a frozen leaf keeps the CoW reference",
+      );
+      assert.throws(
+        () => CK.parse({ a: "", b: 1 }),
+        "the frozen leaf still validates through the island",
+      );
+    }
+    // The install refuses a slot that fights the write in any way, with nothing leaked, and the restore puts every
+    // slot back as it was, not only its value (third review of #112). Proxy traps on the second check's `def`: a
+    // `set` that throws, a `set` that swallows the write, a `get` that throws on the read verifying the write, a
+    // `getOwnPropertyDescriptor` that throws. The first check's `def` is plain, so a leak would show there.
+    {
+      const keep = (v: string) => v.length > 0;
+      const zodOf = (s: z.ZodType, i: number): any => (s as any)._zod.def.checks[i]._zod;
+      const refusals: [string, () => ProxyHandler<any>][] = [
+        [
+          "a set trap that throws",
+          () => ({
+            set: () => {
+              throw new Error("no write");
+            },
+          }),
+        ],
+        ["a set trap that swallows the write", () => ({ set: () => true })],
+        [
+          "a get trap that throws on the read after the write",
+          () => {
+            let armed = false;
+            return {
+              set: (t, k, v) => {
+                t[k] = v;
+                if (k === "fn") armed = true;
+                return true;
+              },
+              get: (t, k) => {
+                if (k === "fn" && armed) {
+                  armed = false;
+                  throw new Error("no read");
+                }
+                return t[k];
+              },
+            };
+          },
+        ],
+        [
+          "a getOwnPropertyDescriptor trap that throws",
+          () => ({
+            getOwnPropertyDescriptor: () => {
+              throw new Error("no descriptor");
+            },
+          }),
+        ],
+      ];
+      for (const [name, handler] of refusals) {
+        const make = (cb: () => boolean): z.ZodType => {
+          const s = z.string().refine(keep).refine(cb);
+          const z1 = zodOf(s, 1);
+          z1.def = new Proxy(z1.def, handler());
+          return s;
+        };
+        const plain = make(() => true);
+        const f0 = zodOf(plain, 0).def.fn;
+        assert.equal(plain.parse("x"), "x", `${name}: stock parses the schema`);
+        const C = compile(plain);
+        assert.ok(!C.async && !C.stock, `${name}: compiles`);
+        assert.ok(
+          zodOf(plain, 0).def.fn === f0,
+          `${name}: the plain slot reads back as the caller's function`,
+        );
+        assert.equal(C.parse("x"), "x");
+        assert.throws(
+          () => C.parse(""),
+          `${name}: the refined leaf still validates through the island`,
+        );
+        const log: string[] = [];
+        const CA = compile(make(always(log)));
+        await assert.rejects(CA.safeParseAsync("x"), $ZodAsyncError, `${name}: the same rejection`);
+        assert.equal(log.length, 1, `${name}: one call through the island`);
+        const onceLog: string[] = [];
+        const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+        await assert.rejects(CO.safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(onceLog.length, 1, `${name}: a first-call-only throw rejects`);
+      }
+      // An inherited slot is inherited again after the compile, not an own property; the wrapper was in force.
+      {
+        const inherit = (cust: z.ZodType): { def: any; fn: unknown } => {
+          const def = (cust as any)._zod.def;
+          const fn = def.fn;
+          delete def.fn;
+          Object.setPrototypeOf(def, { fn });
+          return { def, fn };
+        };
+        const cust = z.custom<string>((v) => typeof v === "string");
+        const { def, fn } = inherit(cust);
+        assert.ok(
+          cust.safeParse("x").success && !cust.safeParse(1).success,
+          "stock reads the inherited slot",
+        );
+        const C = compile(cust);
+        assert.ok(!C.stock);
+        assert.equal(C.parse("x"), "x");
+        assert.throws(() => C.parse(1));
+        assert.ok(
+          !Object.hasOwn(def, "fn") && def.fn === fn,
+          "an inherited slot is inherited again after compile, not an own property",
+        );
+        const onceLog: string[] = [];
+        const custOnce = z.custom<unknown>(once(onceLog, () => nested.parse("x")));
+        inherit(custOnce);
+        await assert.rejects(compile(custOnce).safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(
+          onceLog.length,
+          1,
+          "inherited slot: a first-call-only throw rejects after one call",
+        );
+      }
+      // An accessor slot keeps its getter and setter and answers the caller's function; a non-enumerable data slot
+      // keeps its attributes.
+      {
+        const accessor = (
+          s: z.ZodType,
+        ): { def: any; get: () => unknown; set: (v: unknown) => void } => {
+          const def = zodOf(s, 0).def;
+          let store: unknown = def.fn;
+          const get = (): unknown => store;
+          const set = (v: unknown): void => {
+            store = v;
+          };
+          Object.defineProperty(def, "fn", { get, set, configurable: true, enumerable: true });
+          return { def, get, set };
+        };
+        const s = z.string().refine(keep);
+        const { def, get, set } = accessor(s);
+        const C = compile(s);
+        assert.ok(!C.stock);
+        assert.equal(C.parse("x"), "x");
+        assert.throws(() => C.parse(""));
+        const d = Object.getOwnPropertyDescriptor(def, "fn")!;
+        assert.ok(
+          d.get === get && d.set === set && def.fn === keep,
+          "an accessor slot keeps its getter and setter and answers the caller's function",
+        );
+        const onceLog: string[] = [];
+        const sOnce = z.string().refine(once(onceLog, () => nested.parse("x")));
+        accessor(sOnce);
+        await assert.rejects(compile(sOnce).safeParseAsync("x"), $ZodAsyncError);
+        assert.equal(
+          onceLog.length,
+          1,
+          "accessor slot: a first-call-only throw rejects after one call",
+        );
+
+        const t = z.string().refine(keep);
+        const tdef = zodOf(t, 0).def;
+        Object.defineProperty(tdef, "fn", {
+          value: keep,
+          writable: true,
+          enumerable: false,
+          configurable: true,
+        });
+        const CT = compile(t);
+        assert.equal(CT.parse("x"), "x");
+        assert.deepEqual(
+          Object.getOwnPropertyDescriptor(tdef, "fn"),
+          { value: keep, writable: true, enumerable: false, configurable: true },
+          "a non-enumerable data slot keeps its attributes",
+        );
+      }
+      // A slot whose install write fails holds no wrapper, so its restore must not write it again (fourth review of
+      // #112): an own accessor without a setter (the review's row), an inherited one whose getter answers a fresh
+      // function per read, and a Proxy whose `set` and `defineProperty` traps both refuse. Each compiles, takes the
+      // island, keeps its descriptor and records a callback's own throw once; the plain sibling slot is restored.
+      {
+        const getterOnly = (def: any): (() => unknown) => {
+          const orig = def.fn;
+          const get = (): unknown => orig;
+          Object.defineProperty(def, "fn", { get, configurable: true, enumerable: true });
+          return get;
+        };
+        const inheritedFresh = (def: any): void => {
+          const orig = def.fn;
+          delete def.fn;
+          const proto = {};
+          Object.defineProperty(proto, "fn", { get: () => orig.bind(null), configurable: true });
+          Object.setPrototypeOf(def, proto);
+        };
+        const refuseBoth = (cz: any): void => {
+          cz.def = new Proxy(cz.def, {
+            set: () => {
+              throw new Error("no write");
+            },
+            defineProperty: () => {
+              throw new Error("no define");
+            },
+          });
+        };
+        const refuseBothSilently = (cz: any): void => {
+          cz.def = new Proxy(cz.def, {
+            set: () => false,
+            defineProperty: () => {
+              throw new Error("no define");
+            },
+          });
+        };
+        const rows: [string, (s: z.ZodType) => void, boolean][] = [
+          ["an own getter-only accessor", (s) => void getterOnly(zodOf(s, 1).def), true],
+          [
+            "an inherited getter-only accessor answering a fresh function per read",
+            (s) => inheritedFresh(zodOf(s, 1).def),
+            false,
+          ],
+          [
+            "a set trap that throws beside a defineProperty trap that throws",
+            (s) => refuseBoth(zodOf(s, 1)),
+            false,
+          ],
+          [
+            "a set trap that answers false beside a defineProperty trap that throws",
+            (s) => refuseBothSilently(zodOf(s, 1)),
+            false,
+          ],
+        ];
+        for (const [name, shape, ownAccessor] of rows) {
+          const make = (cb: () => boolean): z.ZodType => {
+            const s = z.string().refine(keep).refine(cb);
+            shape(s);
+            return s;
+          };
+          const plain = make(() => true);
+          const f0 = zodOf(plain, 0).def.fn;
+          const before = Object.getOwnPropertyDescriptor(zodOf(plain, 1).def, "fn");
+          assert.equal(plain.parse("x"), "x", `${name}: stock parses the schema`);
+          const C = compile(plain);
+          assert.ok(!C.async && !C.stock, `${name}: compiles`);
+          assert.equal(C.parse("x"), "x");
+          assert.throws(
+            () => C.parse(""),
+            `${name}: the refined leaf still validates through the island`,
+          );
+          assert.ok(
+            zodOf(plain, 0).def.fn === f0,
+            `${name}: the plain slot reads back as the caller's function`,
+          );
+          assert.deepEqual(
+            Object.getOwnPropertyDescriptor(zodOf(plain, 1).def, "fn"),
+            before,
+            `${name}: the refusing slot keeps its descriptor`,
+          );
+          if (ownAccessor)
+            assert.ok(
+              before?.get !== undefined && before.set === undefined,
+              `${name}: the fixture is a getter-only accessor`,
+            );
+          const log: string[] = [];
+          const CA = compile(make(always(log)));
+          await assert.rejects(
+            CA.safeParseAsync("x"),
+            $ZodAsyncError,
+            `${name}: the same rejection`,
+          );
+          assert.equal(log.length, 1, `${name}: one call through the island`);
+          const onceLog: string[] = [];
+          const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+          await assert.rejects(CO.safeParseAsync("x"), $ZodAsyncError);
+          assert.equal(onceLog.length, 1, `${name}: a first-call-only throw rejects`);
+        }
+        // A getter-only accessor on a `z.custom` node's own `def.fn` is the same case at the schema level.
+        {
+          const cust = z.custom<string>((v) => typeof v === "string");
+          const get = getterOnly((cust as any)._zod.def);
+          const C = compile(cust);
+          assert.ok(!C.stock);
+          assert.equal(C.parse("x"), "x");
+          assert.throws(() => C.parse(1));
+          const d = Object.getOwnPropertyDescriptor((cust as any)._zod.def, "fn");
+          assert.ok(
+            d?.get === get && d.set === undefined,
+            "z.custom: a getter-only slot keeps its descriptor",
+          );
+        }
+        // A set trap that stores the wrapper and then throws, beside a defineProperty trap that throws: the slot
+        // holds the wrapper, so the write-back failure still surfaces (the refusal below is the same rule).
+        {
+          const s = z
+            .string()
+            .refine(keep)
+            .refine(() => true);
+          const z1 = zodOf(s, 1);
+          const refused = new Error("no define");
+          z1.def = new Proxy(z1.def, {
+            set: (t, k, v) => {
+              t[k] = v;
+              throw new Error("stored, then refused");
+            },
+            defineProperty: () => {
+              throw refused;
+            },
+          });
+          const f0 = zodOf(s, 0).def.fn;
+          assert.throws(
+            () => compile(s),
+            (e: unknown) => e instanceof TypeError && (e as { cause?: unknown }).cause === refused,
+            "a set trap that stored the wrapper before throwing still surfaces the write-back failure",
+          );
+          assert.ok(zodOf(s, 0).def.fn === f0, "the plain slot was restored first");
+        }
+      }
+      // A trap that accepted the wrapper but refuses the write back: the other slots are restored first, then a
+      // `TypeError` with the trap's error as `cause` surfaces from `compile()` (the slot it guards still holds the
+      // transparent wrapper, and a second install would read it as the caller's function).
+      {
+        const s = z
+          .string()
+          .refine(keep)
+          .refine(() => true);
+        const z1 = zodOf(s, 1);
+        const refused = new Error("restore refused");
+        let n = 0;
+        z1.def = new Proxy(z1.def, {
+          defineProperty: (t, k, d) => {
+            if (k === "fn" && ++n === 2) throw refused;
+            return Reflect.defineProperty(t, k, d);
+          },
+        });
+        const f0 = zodOf(s, 0).def.fn;
+        assert.throws(
+          () => compile(s),
+          (e: unknown) =>
+            e instanceof TypeError &&
+            (e as { cause?: unknown }).cause === refused &&
+            /refused the write back/.test(e.message),
+          "a trap that refuses the write back surfaces a TypeError with its error as cause from compile()",
+        );
+        assert.ok(
+          zodOf(s, 0).def.fn === f0,
+          "the other slot was restored before the error surfaced",
+        );
+        assert.equal(
+          s.parse("x"),
+          "x",
+          "the schema still parses on stock (the wrapper is transparent)",
+        );
+      }
+    }
+    // A plain function that returns a Promise is still the fast path's own signal (unrecorded), so it reaches
+    // stock's async runtime and the parse succeeds; the callback runs on the fast path and again in stock's
+    // runtime (the documented failure-path duplicate), which is deliberately unchanged.
+    {
+      const log: string[] = [];
+      const C = compile(
+        z.string().refine((v) => {
+          log.push("c");
+          return Promise.resolve(v === "x") as unknown as boolean;
+        }),
+      );
+      const r = await C.safeParseAsync("x");
+      assert.ok(r.success, "a returned Promise still reaches stock's async runtime");
+      assert.equal(log.length, 2, "a returned Promise runs the callback on both paths (unchanged)");
     }
     ok(
-      "inside an official product the callback's $ZodAsyncError still takes the fallback (pinned, #80)",
+      "a callback's own $ZodAsyncError inside an official product rejects after one call, like stock (#80)",
+    );
+  }
+
+  // The one residual left, tracked in #80: a `.default()` / `.prefault()` value factory is a getter, not a
+  // writable slot, so this layer cannot wrap it. A factory that throws `$ZodAsyncError` on the shortcut still
+  // takes the fallback and runs twice, and a first-call-only throw passes on the rerun where stock rejects.
+  {
+    const stockLog: string[] = [];
+    let sn = 0;
+    await assert.rejects(
+      z
+        .object({
+          a: z.string().default(() => {
+            sn++;
+            if (sn === 1) nested.parse("x");
+            return "d";
+          }),
+        })
+        .safeParseAsync({}),
+      $ZodAsyncError,
+    );
+    assert.equal(stockLog.length + sn, 1, "stock runs the default factory once and rejects");
+    let n = 0;
+    const C = compile(
+      z.object({
+        a: z.string().default(() => {
+          n++;
+          if (n === 1) nested.parse("x");
+          return "d";
+        }),
+      }),
+    );
+    assert.ok(!C.async && !C.stock);
+    const r = await C.safeParseAsync({});
+    assert.ok(
+      r.success,
+      "a first-call-only throw in a default factory passes on the rerun (known residual, #80)",
+    );
+    assert.equal(n, 2, "the default factory ran on the fast path and again in stock's runtime");
+    ok(
+      "a .default() value factory's $ZodAsyncError is the one residual (getter, not a writable slot, #80)",
     );
   }
 }

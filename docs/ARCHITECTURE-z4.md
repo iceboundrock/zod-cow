@@ -904,11 +904,44 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    parse chain sites fire only under `async: false`, the sync island's empty context chains a Promise instead; the
    core transform node's site only under a falsy `async`, and the async island runs under `async: true`, the context
    stock's async runtime hands the subtree), so a synchronous throw of that class out of `_zod.run` is a callback's.
-   A callback that stock's generated code calls (a leaf `.refine` / `.check` / `.superRefine` inside an official
-   product) reports its `Promise` from stock's own `throwAsync`, which this layer cannot mark, so its
-   `$ZodAsyncError` still takes the fallback and the callback runs twice; tracked in #80 with the options (an upstream
-   marker on that throw is the cheap exact fix). A callback inside a `lazy` is not such a callback since #81 / #90 /
-   #91: the official subtree holding the lazy is an island, whose `runIsland` records the throw.
+   A callback that stock's generated code calls (a leaf `.refine` / `.check` / `.superRefine` / `z.custom` predicate,
+   a custom string format's predicate, `overwrite` or `transform` inside an official product) reports its `Promise`
+   from stock's own hoisted `throwAsync`, which this layer cannot mark, so its `$ZodAsyncError` used to be
+   indistinguishable from the signal and took the fallback, running twice (#80). Stock's compiler reads those
+   callbacks off writable `def` slots (`def.fn` of a check, a `custom` node or a custom string format such as
+   `z.stringFormat`, `_zod.check`, `def.tx`, `def.transform`) at compile time only — it hoists the reference into the
+   generated closure with `addConstant` — so `officialFn` and `compileAssertOnlyRecording` wrap each non-async
+   callback for the duration of the `compileFn` call (`collectCallbackSlots` / `installWrappers` in `official.ts`):
+   the generated code captures the recording wrapper as its constant, the slot is restored the moment the compile
+   returns, and the caller's schema is left as it was. The install is all or none: a slot that refuses the write (a
+   frozen `def`, a non-writable property, an accessor that swallows the write, a Proxy trap that throws on the
+   descriptor read, the write or the read that verifies it) undoes the slots already wrapped and the subtree takes one
+   of this layer's islands instead, so a frozen schema, which stock's `compileFn` never writes, compiles and parses
+   here too (review of #112). The restore puts each slot back as it was, not only its value: an own data property
+   gets its descriptor back (value and attributes), an own accessor is handed the original through its setter, and a
+   slot the schema inherited is deleted again instead of becoming an own property. It puts back only what holds the
+   wrapper (fourth review of #112): a slot whose write failed usually holds nothing (an own accessor without a setter,
+   declined before any write since a strict-mode assignment to it can only throw; an inherited getter answering a
+   fresh function per read; a Proxy whose `set` and `defineProperty` traps both refuse), and writing it a second time
+   threw again and surfaced from `compile()` where stock, which writes nothing, parses the schema, so the restore
+   reads the slot first and skips one that shows no wrapper, and the subtree takes the island. Every slot is
+   restored even when one throws on the write back (a Proxy trap that accepted the wrapper, or one that stored it
+   and then threw from `set`), and a `TypeError` naming the slot, with the trap's error as `cause`, then surfaces
+   from `compile()` (through the pure branch of `emitNode` too, which swallows
+   a refused compile but not this), since the slot it guards still holds the wrapper and a later install would read
+   it as the caller's function; the wrapper is transparent to every call, so the schema parses like stock either way
+   (third review of #112). The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a
+   callback's own throw inside an official product now rejects after one call like stock, while a returned `Promise`
+   still reaches stock's unrecorded `throwAsync` as the signal it is. Only a non-async callback is wrapped, so stock's
+   `isAsyncFunction` still sees an async one and routes the subtree to an async island. A callback stock would run
+   inside a runtime island of its own generated code (an islandable `ZodCompileUnsupportedError` at or above it, a
+   coercion or unsupported-format sibling) cannot be reached by a compile-time wrapper — the island reads the schema
+   through `runtimeRun` at parse time, after the slot is restored — so `officialFn` routes the whole subtree to one of
+   this layer's islands instead (`wouldRuntimeIslandCallback` probes `compileFn` per callback-bearing node), whose
+   `runIsland` records the throw. A callback inside a `lazy` was already such an island since #81 / #90 / #91. The one
+   residual left is a `.default()` / `.prefault()` value factory: it is a getter, not a writable slot, so a factory
+   that throws `$ZodAsyncError` on the shortcut still takes the fallback (an upstream marker on `throwAsync` is the
+   cheap exact fix for it, still tracked in #80).
 
 A semantic the layer preserves: a sync island (`makeIsland`) throws `$ZodAsyncError` when it meets a Promise (the same comment as the official
 compile.js `throwAsync`: returning INVALID would be read by a union as a branch rejection, so the throw must survive). That throw
@@ -1064,7 +1097,7 @@ The unsupported surface we depend on (all reachable through the public `zod/v4/c
 | `compileFn(schema, {assertOnly, debug})` | leaf/subtree products | signature change (low); behavior changes are backstopped by the differential tests |
 | `INVALID` | failure sentinel | extremely low (Symbol.for is stable) |
 | `ZodCompileUnsupportedError/AsyncError` | degradation verdict + the async detector (v0.5) | low |
-| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton; the fast path's Promise signal the async entries catch (§5.5 item 6), a public class a callback can throw too, which is why a callback's own throw inside an official product is indistinguishable (#80) | low |
+| `$ZodAsyncError` | the official semantics of throwing when a sync island meets a Promise; the sync API on an async skeleton; the fast path's Promise signal the async entries catch (§5.5 item 6), a public class a callback can throw too, which this layer records by wrapping every non-async callback stock's generated code calls for the duration of the compile (`collectCallbackSlots`, #80; the residual is a `.default()` value factory getter) | low |
 | `regexes.number` / `util.isPlainObject` | record skeleton | low (the official internals depend on the same ones for consistency) |
 | `WHEN_DEFAULTED_CHECKS` / `fastPathAcceptsAbsence` and other semantic predicates (implementation copied, not imported) | purity analysis | medium: must be synced when zod changes the `when` semantics |
 | `getTupleOptStart` / `dropsWhenAbsent` (implementation copied, not imported) | tuple trailing-slot truncation semantics (v0.5) | medium: must be synced when zod changes the optin/optout ladder |

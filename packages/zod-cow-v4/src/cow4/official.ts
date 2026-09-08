@@ -2,7 +2,7 @@
  * Official-product wrappers: assertOnly validator, parser, runtime island and async island
  * (the per-subtree degradation chain).
  */
-import { INVALID, compileFn, ZodCompileAsyncError } from "zod/v4/core";
+import { INVALID, compileFn, ZodCompileAsyncError, ZodCompileUnsupportedError } from "zod/v4/core";
 import {
   type Fn,
   isAsyncFn,
@@ -247,11 +247,298 @@ function childrenOf(schema: Node): Node[] {
   return kids;
 }
 
+/* ═══════════════════ #80: recording the $ZodAsyncError a plain-function callback throws ═══════════════════ */
+
+/**
+ * A plain function that returns a `Promise` reaches the synchronous fast path as stock's `$ZodAsyncError`,
+ * thrown by the `throwAsync` stock hoists into an official product's generated code (§5.5 item 6). A callback
+ * can throw the same public class itself (a nested sync `parse` of an async schema does, or `new $ZodAsyncError()`),
+ * and that throw is the caller's: stock rejects the parse with it after one call. This layer records the ones its
+ * own call sites see (a container / wrapper / union `.refine`, an awaited predicate, an island's run) in a WeakSet
+ * so the async entries reject after one call instead of rerunning (`rethrowCallerError` / `isPromiseSignal`).
+ *
+ * A callback stock's generated code calls — a leaf `.refine`, `.check`, `.superRefine`, `z.custom` predicate, a
+ * custom string format's predicate, `overwrite` or `transform` inside an official product — was not recorded (#80):
+ * stock calls the hoisted `def.fn` / `_zod.check` / `def.tx` / `def.transform` directly and reports a `Promise` from its own `throwAsync`. But those
+ * slots are plain, writable data properties that stock's compiler reads only at compile time (`addConstant` hoists
+ * the reference into the generated closure). So a wrapper installed on each such slot for the duration of the
+ * `compileFn` call is captured by the generated code as a constant and stays in force at parse time, while the
+ * slot itself is restored immediately, descriptor and all, leaving the caller's schema as it was. The wrapper records a
+ * thrown `$ZodAsyncError` (and rethrows every throw unchanged), so a callback's own throw inside an official
+ * product now rejects after one call like stock, and a returned `Promise` still reaches stock's `throwAsync` as
+ * the unrecorded signal it is.
+ *
+ * Only a non-async callback is wrapped: an async function must stay visible to stock's `isAsyncFunction`, which
+ * decides the `ZodCompileAsyncError` that routes the subtree to an async island. A `.default()` / `.prefault()`
+ * value factory is a getter, not a writable slot, so its throw stays the one documented residual.
+ */
+type CallbackSlot = { obj: Record<string, unknown>; key: string; fn: unknown };
+/**
+ * A slot the install wrote (or tried to write): `desc` is the own descriptor it had before the write, `undefined`
+ * for an inherited one; `wrapper` is the function the write handed it, which the restore looks for.
+ */
+type InstalledSlot = CallbackSlot & { desc: PropertyDescriptor | undefined; wrapper: unknown };
+
+function wrapCallback(orig: unknown): (this: unknown, ...args: unknown[]) => unknown {
+  return function (this: unknown, ...args: unknown[]): unknown {
+    try {
+      return (orig as (...a: unknown[]) => unknown).apply(this, args);
+    } catch (e) {
+      rethrowCallerError(e); // records a $ZodAsyncError, rethrows everything
+    }
+  };
+}
+
+/**
+ * Walk the subtree stock's `compileFn` would inline (never a `lazy`, which is already island-routed by
+ * `subtreeFollowsRuntime` before this runs) and collect every non-async user-callback slot stock's compiler
+ * reads, plus the set of nodes that carry one. `childrenOf` supplies the structural descent, including the shape
+ * a `z.property` / `z.properties` check carries, which stock compiles inline.
+ */
+function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Node[] } {
+  const slots: CallbackSlot[] = [];
+  const nodes: Node[] = [];
+  const seen = new Set<Node>();
+  const visit = (node: Node): void => {
+    if (!node?._zod || seen.has(node)) return;
+    seen.add(node);
+    const def = node._zod.def;
+    if (!def || def.type === "lazy") return;
+    let hasCb = false;
+    const add = (obj: unknown, key: string, fn: unknown): void => {
+      slots.push({ obj: obj as Record<string, unknown>, key, fn });
+      hasCb = true;
+    };
+    const checks: Node[] = Array.isArray(def.checks) ? def.checks : [];
+    for (const c of checks) {
+      const cz = c?._zod;
+      if (!cz) continue;
+      const cdef = cz.def ?? {};
+      // refine / z.custom predicate / string_format all live on def.fn (stock reads it first); superRefine and
+      // .check() carry a check function on _zod.check; overwrite carries its transform on def.tx.
+      if (typeof cdef.fn === "function" && !isAsyncFn(cdef.fn)) add(cdef, "fn", cdef.fn);
+      else if (typeof cz.check === "function" && !isAsyncFn(cz.check)) add(cz, "check", cz.check);
+      if (typeof cdef.tx === "function" && !isAsyncFn(cdef.tx)) add(cdef, "tx", cdef.tx);
+    }
+    if (
+      (def.type === "transform" || def.type === "pipe") &&
+      typeof def.transform === "function" &&
+      !isAsyncFn(def.transform)
+    )
+      add(def, "transform", def.transform);
+    if (def.type === "custom" && typeof def.fn === "function" && !isAsyncFn(def.fn))
+      add(def, "fn", def.fn);
+    // A custom string format (`z.stringFormat(name, fn)`, and the regex closures of `z.hostname()` / `z.hex()` /
+    // `z.hash()`) is a `string` schema whose predicate sits on its own `def.fn`, which stock's
+    // `generateStringFormatCheck` hoists like a check's (third review of #112).
+    if (def.type === "string" && typeof def.fn === "function" && !isAsyncFn(def.fn))
+      add(def, "fn", def.fn);
+    if (hasCb) nodes.push(node);
+    // A shape getter that throws (the #82 / #100 case) is contained like every other walk here: stock's own
+    // `compileFn` reads the shape in its cycle check and counts the throw as recursion, so `officialFn`'s compile
+    // below throws and islands the subtree; the slots gathered so far are harmless (the island uses the schema).
+    let kids: Node[];
+    try {
+      kids = childrenOf(node);
+    } catch {
+      return;
+    }
+    for (const k of kids) visit(k);
+  };
+  visit(schema);
+  return { slots, nodes };
+}
+
+/**
+ * Install the recording wrappers, all or none. A slot that refuses the write (a frozen or sealed `def`, a
+ * non-writable property, an accessor that swallows the write, a Proxy trap that throws on the write or on the read
+ * that verifies it) undoes the slots already wrapped and answers `null`, so the caller's schema is never left partly
+ * wrapped and the caller takes the island instead, whose `runIsland` records the throw without writing the schema
+ * (review of #112). Stock's `compileFn` never writes a schema, so a frozen one parses on stock and must keep
+ * compiling and parsing here.
+ *
+ * The restore puts the slot back as it was, not only its value (third review of #112): an own data property gets
+ * its original descriptor back through `defineProperty` (value and attributes), an own accessor is handed the
+ * original through its setter (the descriptor itself was never replaced), and a slot the schema inherited is deleted
+ * again so it does not become an own property. It puts back only what holds the wrapper (fourth review of #112): a
+ * slot whose write failed usually holds nothing (an own accessor without a setter, which is declined before any
+ * write since a strict-mode assignment to it can only throw; an inherited getter whose function differs per read; a
+ * Proxy `set` trap that throws or answers `false`), and writing it a second time would throw again or hand the
+ * schema a function it never held, where stock, which writes nothing, parses the schema; so the restore reads the
+ * slot first (its own descriptor for a data property, the value for an accessor or an inherited slot) and skips a
+ * slot that shows no wrapper. Every slot is restored even when one of them throws (a Proxy trap that accepted the
+ * wrapper and refuses the write back, or one that stored it and then threw from `set`): the others are put back
+ * first, then a `TypeError` naming the slot, with the trap's error as `cause`, surfaces from `compile()`
+ * (`isSlotRestoreFailure` lets it through the pure branch of `emitNode`, which swallows a refused compile), since the
+ * slot it guards holds the wrapper and silence would hide the mutation; a later install would otherwise read that
+ * wrapper as the caller's function. The wrapper is transparent to every call (it applies the original with the same
+ * receiver and arguments), so such a schema still parses like stock.
+ */
+const slotRestoreFailures = new WeakSet<TypeError>();
+
+/** Whether `e` is the `TypeError` `installWrappers` throws when a slot refused the write back after the compile. */
+export function isSlotRestoreFailure(e: unknown): boolean {
+  return e instanceof TypeError && slotRestoreFailures.has(e);
+}
+
+function installWrappers(slots: CallbackSlot[]): (() => void) | null {
+  const done: InstalledSlot[] = [];
+  const restore = (): void => {
+    let failure: TypeError | null = null;
+    for (const s of done) {
+      try {
+        restoreSlot(s);
+      } catch (e) {
+        if (failure === null) {
+          failure = new TypeError(
+            `zod-cow: the callback slot "${s.key}" refused the write back of the caller's function after the compile; the schema still holds the recording wrapper`,
+            { cause: e },
+          );
+          slotRestoreFailures.add(failure);
+        }
+      }
+    }
+    done.length = 0;
+    if (failure) throw failure;
+  };
+  for (const s of slots) {
+    const w = wrapCallback(s.fn);
+    let desc: PropertyDescriptor | undefined;
+    try {
+      desc = Object.getOwnPropertyDescriptor(s.obj, s.key);
+    } catch {
+      restore();
+      return null;
+    }
+    // An own accessor without a setter cannot take the write (a strict-mode assignment to it throws before any
+    // code runs), so it is declined before the write, with nothing to restore on it (fourth review of #112).
+    if (desc !== undefined && isAccessor(desc) && typeof desc.set !== "function") {
+      restore();
+      return null;
+    }
+    // Recorded before the write: a write that throws or a read-back that refuses may still have taken effect.
+    done.push({ ...s, desc, wrapper: w });
+    try {
+      s.obj[s.key] = w;
+      if (s.obj[s.key] !== w) {
+        restore();
+        return null;
+      }
+    } catch {
+      restore();
+      return null;
+    }
+  }
+  return restore;
+}
+
+function isAccessor(desc: PropertyDescriptor): boolean {
+  return "get" in desc || "set" in desc;
+}
+
+/** Whether two own descriptors read the same (every attribute, `value` by identity). */
+function sameDescriptor(a: PropertyDescriptor, b: PropertyDescriptor): boolean {
+  return (
+    Object.is(a.value, b.value) &&
+    a.writable === b.writable &&
+    a.get === b.get &&
+    a.set === b.set &&
+    a.enumerable === b.enumerable &&
+    a.configurable === b.configurable
+  );
+}
+
+/**
+ * Put one slot back as it was, touching only what holds the wrapper: a slot whose write failed may hold nothing,
+ * and a write to it would throw again (fourth review of #112). A read that throws here counts as "holds it", so
+ * the restore is attempted and its throw surfaces through `restore`.
+ */
+function restoreSlot(s: InstalledSlot): void {
+  if (s.desc === undefined) {
+    // Inherited before the write (or absent): a write that took effect created an own property, so delete it; an
+    // inherited accessor that stored the wrapper elsewhere still answers it, so hand the original back through it
+    // then.
+    let own = true;
+    try {
+      own = Object.getOwnPropertyDescriptor(s.obj, s.key) !== undefined;
+    } catch {}
+    if (own) delete s.obj[s.key];
+    let answersWrapper = true;
+    try {
+      answersWrapper = s.obj[s.key] === s.wrapper;
+    } catch {}
+    if (answersWrapper) s.obj[s.key] = s.fn;
+  } else if (isAccessor(s.desc)) {
+    let answersWrapper = true;
+    try {
+      answersWrapper = s.obj[s.key] === s.wrapper;
+    } catch {}
+    if (answersWrapper) s.obj[s.key] = s.fn;
+  } else {
+    let unchanged = false;
+    try {
+      const now = Object.getOwnPropertyDescriptor(s.obj, s.key);
+      unchanged = now !== undefined && sameDescriptor(now, s.desc);
+    } catch {}
+    if (!unchanged) Object.defineProperty(s.obj, s.key, s.desc);
+  }
+}
+
+/**
+ * Whether stock would run this callback-bearing node inside a runtime island of its own generated code (an
+ * islandable `ZodCompileUnsupportedError` at the node: a coercion, an unsupported format, a custom-`when` check,
+ * …). A compile-time wrapper cannot reach such a callback — the island reads the schema through `runtimeRun` at
+ * parse time, after the slot is restored — so the whole subtree is routed to this layer's island instead, whose
+ * `runIsland` records the throw. A non-islandable refusal (a `catch` callback) and an async throw are left to the
+ * whole-subtree `compileFn` below, which throws and lets `officialFn` island the tree the usual way.
+ */
+function wouldRuntimeIslandCallback(node: Node): boolean {
+  try {
+    compileFn(node);
+    return false;
+  } catch (e) {
+    return (
+      e instanceof ZodCompileUnsupportedError &&
+      (e as { islandable?: boolean }).islandable !== false
+    );
+  }
+}
+
+/**
+ * The pure-subtree assertOnly validator (`emitNode`'s pure branch) with the same callback recording (#80).
+ * Throws whatever `compileFn` throws, so the caller keeps its `ZodCompileAsyncError` handling; the wrappers are
+ * always restored. Answers `null` when a slot refuses the wrapper (a frozen `def`), so the caller falls through to
+ * `officialFn`, which islands the subtree. A pure subtree that compiles here has no islandable refusal (it
+ * compiled), so no island check is needed on the success path; a callback stock would runtime-island is caught by
+ * `pureSubtreeNeedsIsland`, which the caller consults first.
+ */
+export function compileAssertOnlyRecording(schema: Node): Fn | null {
+  const restore = installWrappers(collectCallbackSlots(schema).slots);
+  if (restore === null) return null;
+  try {
+    return compileFn(schema, { assertOnly: true }) as Fn;
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * Whether a pure subtree holds a callback stock would run inside a runtime island (#80): the validator baked from
+ * `compileFn` cannot record such a callback's throw, so the caller sends the subtree down the island path instead.
+ */
+export function pureSubtreeNeedsIsland(schema: Node): boolean {
+  return collectCallbackSlots(schema).nodes.some(wouldRuntimeIslandCallback);
+}
+
 /**
  * Get the official product for a subtree. pure → assertOnly validator (validation semantics intact, output = input);
  * otherwise → parser (stock output semantics). On product generation failure it degrades step by step.
  * async is no longer rethrown upwards (Task 6): a subtree for which the official compileFn throws ZodCompileAsyncError
  * is routed to an async island instead (returns a Promise, awaited at the call site); lazy(async·…) is covered by the static detection.
+ *
+ * Callbacks stock's generated code calls are wrapped for the duration of the compile so a `$ZodAsyncError` they throw
+ * is recorded like this layer's own (#80); a callback stock would run in a runtime island is unreachable that way, so
+ * the subtree takes an island instead.
  */
 export function officialFn(schema: Node, pure: boolean): Fn {
   // A subtree stock's compiled product would answer differently from its runtime takes one of this layer's islands
@@ -264,23 +551,34 @@ export function officialFn(schema: Node, pure: boolean): Fn {
   // on such a subtree. The static walk decides which island: inner async raises no compile-time error inside a lazy.
   const island = (): Fn => (inspectSubtree(schema) ? makeAsyncIsland(schema) : makeIsland(schema));
   if (subtreeFollowsRuntime(schema)) return island();
-  if (pure) {
-    try {
-      return compileFn(schema, { assertOnly: true }) as Fn;
-    } catch (e) {
-      if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema); // the isPure whitelist already blocks async; this is defensive
-      // everything else → fall through to the parser (harmless when nobody reads the output value, just extra construction)
-    }
-  }
+  const { slots, nodes } = collectCallbackSlots(schema);
+  // #80: a callback stock would run inside a runtime island cannot be reached by a compile-time wrapper;
+  // route the whole subtree to this layer's island so its `runIsland` records the throw.
+  if (nodes.some(wouldRuntimeIslandCallback)) return island();
+  const restore = installWrappers(slots);
+  // A slot refused the write (a frozen `def`, a Proxy trap): the island records the throw without writing the schema.
+  if (restore === null) return island();
   try {
-    return compileFn(schema) as Fn;
-  } catch (e) {
-    if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema);
-    // Any other failure (a symbol literal, coercion, `z.xor`, a `catch` callback) was thrown before stock's
-    // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
-    // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
-    // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
-    return island();
+    if (pure) {
+      try {
+        return compileFn(schema, { assertOnly: true }) as Fn;
+      } catch (e) {
+        if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema); // the isPure whitelist already blocks async; this is defensive
+        // everything else → fall through to the parser (harmless when nobody reads the output value, just extra construction)
+      }
+    }
+    try {
+      return compileFn(schema) as Fn;
+    } catch (e) {
+      if (e instanceof ZodCompileAsyncError) return makeAsyncIsland(schema);
+      // Any other failure (a symbol literal, coercion, `z.xor`, a `catch` callback) was thrown before stock's
+      // codegen reached the checks, so it says nothing about async: the static walk decides the island, as for
+      // `lazy`. A sync island here would meet the Promise at parse time, and the async entries would then rerun
+      // the parse in stock's async runtime, twice the callbacks and no CoW reference (#75).
+      return island();
+    }
+  } finally {
+    restore(); // the generated closure captured the wrappers as constants; the caller's schema is left as it was
   }
 }
 
@@ -292,9 +590,15 @@ export function officialFn(schema: Node, pure: boolean): Fn {
  */
 export function officialValidator(schema: Node): Fn | null {
   if (subtreeFollowsRuntime(schema)) return null;
+  // Record a plain-function callback's own `$ZodAsyncError` in the validator too (#80); `validate` is sync,
+  // so the result parity here is a thrown error either way, but the wrapper keeps the two paths consistent.
+  const restore = installWrappers(collectCallbackSlots(schema).slots);
+  if (restore === null) return null; // a frozen `def`: `validate` runs the skeleton, whose subtree islands
   try {
     return compileFn(schema, { assertOnly: true }) as Fn;
   } catch {
     return null;
+  } finally {
+    restore();
   }
 }

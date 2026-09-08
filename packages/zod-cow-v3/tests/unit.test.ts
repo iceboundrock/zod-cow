@@ -1262,12 +1262,15 @@ test("array / tuple: a hole is materialized as an own undefined slot like stock"
   assert.equal(compile(T).parse(tdense), tdense);
 });
 
-test("array / tuple: no hole probe after an aborted child: a Proxy `has` trap never runs once a slot has failed, as stock validates its captured spread (review of #115)", () => {
+test("array / tuple: no hole probe once the parse holds an issue: a Proxy `has` trap never runs after an aborted child, a failed check, a length check or a sibling's issue, as stock validates its captured spread (third and fourth reviews of #115)", () => {
   // Stock spreads the input (`[...ctx.data]`: the length and the index reads only) and validates
   // the copy, so it never performs a `has` on the input. The skeletons ask `i in data` only to
-  // decide whether the input can be returned by reference, which a failed parse never does, so
-  // the probe stays out of every path after an aborted child: a trap there would run user code
-  // stock never runs (rewriting a later element turns one stock issue into two, a throw escapes).
+  // decide whether the input can be returned by reference, which a parse holding an issue never
+  // does, so the probe stays out of every path once an issue is recorded: a trap there would run
+  // user code stock never runs (rewriting a later element turns one stock issue into two, a throw
+  // escapes). An aborted child is one source (third review); a non-aborting check failure of an
+  // earlier element, a length check of the array itself and an issue a sibling left before the
+  // container was entered are the others (fourth review): all of them end the parse.
   const trapped = (target: unknown[], onHas: (t: any, k: string | symbol) => void) => {
     let hasCalls = 0;
     const input = new Proxy(target, {
@@ -1332,6 +1335,56 @@ test("array / tuple: no hole probe after an aborted child: a Proxy `has` trap ne
     const T = z.tuple([z.string(), tail]);
     sameFailure(T, () => trapped(sparse(2, { 0: 1 }), throwing));
     sameFailure(T, () => trapped(sparse(2, { 0: 1 }), rewrite));
+  }
+  // The fourth review's row: the earlier element fails a check and keeps its value (a dirty slot,
+  // not an aborted one), so the hole after it is still reached; the trap must not run there
+  // either. Under both leaf kinds of the generated skeleton (the inline predicate of `min` runs
+  // the closure only when it fails, which pushes the issue and returns the value), on the array
+  // and the tuple, with the input the review used (`["x", ,]`, a hole at index 1)
+  for (const rewriteOrThrow of [rewrite, throwing]) {
+    for (const leaf of [
+      z.string().min(2),
+      z
+        .string()
+        .min(2)
+        .refine(() => true),
+    ]) {
+      sameFailure(z.array(leaf.optional()), () => trapped(sparse(2, { 0: "x" }), rewriteOrThrow));
+      sameFailure(z.tuple([leaf, z.string().optional()]), () =>
+        trapped(sparse(2, { 0: "x" }), rewriteOrThrow),
+      );
+    }
+    // A length check of the array itself (`min`, `max`, `length`): the issue is recorded before
+    // any element runs, so no hole probe runs at all
+    for (const A of [
+      z.array(z.string().optional()).min(3),
+      z.array(z.string().optional()).max(1),
+      z.array(z.string().optional()).length(3),
+    ]) {
+      sameFailure(A, () => trapped(sparse(2, { 0: "x" }), rewriteOrThrow));
+    }
+    // An issue a sibling left before the container was entered: the object's earlier key fails a
+    // check, then the array or tuple under the later key is parsed (stock parses every key)
+    sameFailure(z.object({ a: z.string().min(2), b: z.array(z.string().optional()) }), () => {
+      const t = trapped(sparse(2, { 0: "x" }), rewriteOrThrow);
+      return { input: { a: "x", b: t.input }, calls: t.calls };
+    });
+    sameFailure(
+      z.object({ a: z.string().min(2), b: z.tuple([z.string(), z.string().optional()]) }),
+      () => {
+        const t = trapped(sparse(2, { 0: "x" }), rewriteOrThrow);
+        return { input: { a: "x", b: t.input }, calls: t.calls };
+      },
+    );
+  }
+  // The probe is what decides the reference on a clean parse (#117), so it still runs there: the
+  // same input without the failing check parses in both, the hole materialized as an own slot
+  for (const S of [z.array(z.string().optional()), z.tuple([z.string(), z.string().optional()])]) {
+    const t = trapped(sparse(2, { 0: "x" }), () => {});
+    const r = compile(S).safeParse(t.input);
+    assert.equal(r.success, true);
+    assert.deepEqual(Object.keys(r.data as object), ["0", "1"]);
+    assert.equal(t.calls(), 1, "the clean path asks the input once for the hole");
   }
 });
 test("array / tuple copy path: the copy is assembled from the element results, a getter at or after the first change is read once like stock", () => {

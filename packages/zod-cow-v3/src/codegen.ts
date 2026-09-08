@@ -190,6 +190,8 @@ const lit = (s: string): string => JSON.stringify(s);
 /**
  * The closure call of one child slot: `outVal` receives the closure's result for `inVar`; the
  * issues it left are prefixed lazily with the key, or the call is bracketed by push/pop (eager).
+ * `onIssues` is a statement run when the child left an issue (the array and tuple skeletons clear
+ * their `noIssue` flag there); the eager call then reads the issue count around the call too.
  */
 function childCall(
   g: Gen,
@@ -197,11 +199,16 @@ function childCall(
   eager: boolean,
   keyExpr: string,
   inVar: string,
+  onIssues = "",
 ): string {
   const c = g.hoist(child.validator, "c");
-  return eager
-    ? `ctx.path.push(${keyExpr}); const outVal = ${c}(${inVar}, ctx); ctx.path.pop();`
-    : `const before = ctx.issues.length; const outVal = ${c}(${inVar}, ctx); if (ctx.issues.length !== before) prefixIssues(ctx, before, ${keyExpr});`;
+  if (eager) {
+    const call = `ctx.path.push(${keyExpr}); const outVal = ${c}(${inVar}, ctx); ctx.path.pop();`;
+    return onIssues === ""
+      ? call
+      : `const before = ctx.issues.length; ${call} if (ctx.issues.length !== before) { ${onIssues} }`;
+  }
+  return `const before = ctx.issues.length; const outVal = ${c}(${inVar}, ctx); if (ctx.issues.length !== before) { prefixIssues(ctx, before, ${keyExpr}); ${onIssues} }`;
 }
 
 /**
@@ -233,7 +240,7 @@ function predicateAcceptsUndefined(schema: z.ZodTypeAny): boolean {
  * One slot of an array or tuple: `inVal` holds the value read. When the leaf has an inline
  * predicate, `onPass` runs when it holds (the value is then the output) and the closure runs only
  * when it fails; `onResult` runs after the closure with `outVal` holding its result (a value or
- * FAILED).
+ * FAILED). The closure call clears the skeleton's `noIssue` flag when the child left an issue.
  */
 function slotBlock(
   g: Gen,
@@ -244,7 +251,7 @@ function slotBlock(
   onResult: string,
 ): string {
   const pred = inlinePredicate(child.schema, g, "inVal", spec.regexOf);
-  const call = `${childCall(g, child, spec.eager, keyExpr, "inVal")} ${onResult}`;
+  const call = `${childCall(g, child, spec.eager, keyExpr, "inVal", "noIssue = false;")} ${onResult}`;
   if (pred === null) return call;
   return `if (${pred}) { ${onPass(predicateAcceptsUndefined(child.schema))} } else { ${call} }`;
 }
@@ -384,10 +391,15 @@ export function genArray(spec: ArraySpec): Validator {
     );
   }
   // The first forced change: a fresh array of the input's length takes the clean prefix. The hole
-  // probe (`i in data`) decides only whether the input can be returned by reference, which a failed
-  // parse never is, so it runs while no element has failed: stock validates its spread and never
-  // performs a `has` on the input, and a Proxy trap there would run user code stock never runs
-  // (third review of #115).
+  // probe (`i in data`) decides only whether the input can be returned by reference, which a parse
+  // holding an issue never is (an aborted or dirty element, a length check of this array, an issue
+  // a sibling left before entry; a union truncates a discarded option's issues, a catch its inner's,
+  // so a recorded issue always ends the parse or discards this output), so it runs only while
+  // `ctx.issues` is empty: stock validates its spread and never performs a `has` on the input, and
+  // a Proxy trap there would run user code stock never runs (third and fourth reviews of #115).
+  // `noIssue` tracks that emptiness in a local: read once after the length checks, cleared by the
+  // closure call when the child left an issue (an inline predicate that holds adds none), so the
+  // clean path costs what it did.
   const copy =
     "dirty = true; out = new Array(data.length); for (let j = 0; j < i; j++) out[j] = data[j];";
   const slot = slotBlock(
@@ -396,15 +408,15 @@ export function genArray(spec: ArraySpec): Validator {
     spec,
     "i",
     (holeTest) =>
-      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && !anyFailed && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
+      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && noIssue && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
     `if (outVal === FAILED) anyFailed = true;
       else if (dirty) out[i] = outVal;
-      else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) { ${copy} out[i] = outVal; }`,
+      else if (!anyFailed && (outVal !== inVal || (inVal === undefined && noIssue && !(i in data)))) { ${copy} out[i] = outVal; }`,
   );
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false;
+    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false, noIssue = ctx.issues.length === 0;
     for (let i = 0; i < data.length; i++) { const inVal = data[i]; ${slot} }
     if (anyFailed) return FAILED;
     return out;
@@ -463,9 +475,10 @@ export function genTuple(spec: TupleSpec): Validator {
   const fill = spec.items.map((_, i) => `v${i} = cap[${i}];`).join(" ");
   const slots = spec.items.map((item, i) => {
     const V = `v${i}`;
-    // The probe runs while no slot has failed, as in the array skeleton: stock never performs a
-    // `has` on the input, and a failed parse never returns it by reference
-    const hole = `if (!dirty && inVal === undefined && !anyFailed && !(${i} in data)) dirty = true;`;
+    // The probe runs only while the parse holds no issue (`noIssue`, as in the array skeleton):
+    // stock never performs a `has` on the input, and a parse holding an issue never returns it by
+    // reference
+    const hole = `if (!dirty && inVal === undefined && noIssue && !(${i} in data)) dirty = true;`;
     return `if (k === ${i}) break slots; { const inVal = ${V}; ${slotBlock(
       g,
       item,
@@ -480,6 +493,7 @@ export function genTuple(spec: TupleSpec): Validator {
     if (data.length < ${n}) { pushIssue(ctx, data, ${em}, { code: "too_small", minimum: ${n}, inclusive: true, exact: false, type: "array" }); return FAILED; }
     let dirty = ctx.force, anyFailed = false;
     if (data.length > ${n}) { pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${n}, inclusive: true, exact: false, type: "array" }); dirty = true; }
+    let noIssue = ctx.issues.length === 0;
     ${n === 0 ? "" : `let ${spec.items.map((_, i) => `v${i}`).join(", ")};`}
     let k, len, cap;
     const iter = data[Symbol.iterator];

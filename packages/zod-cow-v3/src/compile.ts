@@ -955,17 +955,24 @@ function makeArray(def: any): Validator {
     let dirty = ctx.force;
     let out: any[] = dirty ? new Array(data.length) : data;
     let anyFailed = false;
+    // Whether the parse holds no issue, the condition of the hole probe below (see `genArray` in
+    // codegen.ts): read once after the length checks, cleared when an element left an issue
+    let noIssue = ctx.issues.length === 0;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
       let outVal: any;
+      const before = ctx.issues.length;
       if (eager) {
         ctx.path.push(i);
         outVal = el(inVal, ctx);
         ctx.path.pop();
+        if (ctx.issues.length !== before) noIssue = false;
       } else {
-        const before = ctx.issues.length;
         outVal = el(inVal, ctx);
-        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+        if (ctx.issues.length !== before) {
+          prefixIssues(ctx, before, i);
+          noIssue = false;
+        }
       }
       if (outVal === FAILED) {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
@@ -973,7 +980,10 @@ function makeArray(def: any): Validator {
       }
       if (dirty) {
         out[i] = outVal;
-      } else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) {
+      } else if (
+        !anyFailed &&
+        (outVal !== inVal || (inVal === undefined && noIssue && !(i in data)))
+      ) {
         dirty = true;
         out = new Array(data.length);
         for (let j = 0; j < i; j++) out[j] = data[j];
@@ -1065,17 +1075,22 @@ function makeTuple(def: any): Validator {
       dirty = true;
     }
     let anyFailed = false;
+    let noIssue = ctx.issues.length === 0; // as in `makeArray`, after the length checks
     for (let i = 0; i < k; i++) {
       const inVal = vals[i];
       let outVal: any;
+      const before = ctx.issues.length;
       if (eager) {
         ctx.path.push(i);
         outVal = items[i]!(inVal, ctx);
         ctx.path.pop();
+        if (ctx.issues.length !== before) noIssue = false;
       } else {
-        const before = ctx.issues.length;
         outVal = items[i]!(inVal, ctx);
-        if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
+        if (ctx.issues.length !== before) {
+          prefixIssues(ctx, before, i);
+          noIssue = false;
+        }
       }
       if (outVal === FAILED) {
         anyFailed = true;
@@ -1084,9 +1099,10 @@ function makeTuple(def: any): Validator {
       vals[i] = outVal;
       if (outVal !== inVal) dirty = true;
       // A hole is materialized as an own slot, as stock's spread of the input does; the probe runs
-      // while no slot has failed, since stock never performs a `has` on the input and a failed parse
-      // never returns it by reference (third review of #115)
-      else if (!dirty && inVal === undefined && !anyFailed && !(i in data)) dirty = true;
+      // only while the parse holds no issue (see `genArray` in codegen.ts), since stock never
+      // performs a `has` on the input and a parse holding an issue never returns it by reference
+      // (third and fourth reviews of #115)
+      else if (!dirty && inVal === undefined && noIssue && !(i in data)) dirty = true;
     }
     if (anyFailed) return FAILED;
     // The clean path returns the input when every captured slot came back unchanged and the length

@@ -14,12 +14,14 @@
  *      nested skeletons after the top-level one, #46). Its sharing rate is expected at or above the
  *      first pass (the inputs that carried the symbol are clean now).
  */
+import assert from "node:assert/strict";
 import { deepEqual as assertDeepEqual } from "./harness.js";
 import { z } from "zod";
 import { MAX_INLINE_KEY_COMPARISONS } from "../src/cow4/codectx.js";
 import { compile, type CompileOptions } from "../src/index.js";
 
 interface RNG {
+  readonly draws: number;
   next(): number;
   chance(p: number): boolean;
   int(n: number): number;
@@ -28,7 +30,9 @@ interface RNG {
 
 function makeRng(seed: number): RNG {
   let s = seed >>> 0 || 1;
+  let draws = 0;
   const next = () => {
+    draws++;
     s |= 0;
     s = (s + 0x6d2b79f5) | 0;
     let t = Math.imul(s ^ (s >>> 15), 1 | s);
@@ -36,6 +40,9 @@ function makeRng(seed: number): RNG {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
   return {
+    get draws() {
+      return draws;
+    },
     next,
     chance: (p) => next() < p,
     int: (n) => Math.floor(next() * n),
@@ -46,6 +53,9 @@ function makeRng(seed: number): RNG {
 /* ─────────────────────────── data pool ─────────────────────────── */
 
 const ABSENT = Symbol("absent");
+const PROPERTY_EXTRA = "propertyExtra";
+// Only these prototypes may be normalized on the CoW output's clean path (#99).
+const generatedPrototypes = new WeakMap<object, symbol>();
 
 const STRINGS = [
   "",
@@ -75,31 +85,26 @@ const DATES = [
 ] as const;
 
 /**
- * Deep copy of a generated input for the mutation check. `structuredClone` drops symbol-keyed
- * properties, which the object generator emits (declared and extra symbol keys) and the harness
- * comparator does see. The generators only produce plain data: primitives, Date, Array, Map, Set and
- * plain objects with own enumerable keys.
+ * Mutation view of generated data: descriptors include hidden/symbol keys and array holes.
+ * Generated prototypes carry an identity token plus a snapshot of their own descriptors, so neither
+ * replacing a prototype nor mutating it in place can disappear behind output normalization.
  */
 function snapshotInput(v: unknown): unknown {
   if (typeof v !== "object" || v === null) return v;
   if (v instanceof Date) return new Date(v.getTime());
-  if (Array.isArray(v)) return v.map(snapshotInput);
   if (v instanceof Map)
     return new Map([...v].map(([k, x]) => [snapshotInput(k), snapshotInput(x)]));
   if (v instanceof Set) return new Set([...v].map(snapshotInput));
-  const out: Record<PropertyKey, unknown> = {};
-  for (const k of Reflect.ownKeys(v)) {
-    // Keep enumerability: the record generator emits a non-enumerable extra symbol (#51), and the
-    // comparator ignores non-enumerable keys, so the snapshot must not turn it into an enumerable one
-    const d = Object.getOwnPropertyDescriptor(v, k)!;
-    Object.defineProperty(out, k, {
-      value: snapshotInput(d.value),
-      enumerable: d.enumerable,
-      writable: true,
-      configurable: true,
-    });
-  }
-  return out;
+  const proto = Object.getPrototypeOf(v);
+  return {
+    prototype: generatedPrototypes.get(proto) ?? proto,
+    inherited: generatedPrototypes.has(proto) ? snapshotInput(proto) : undefined,
+    extensible: Object.isExtensible(v),
+    descriptors: Reflect.ownKeys(v).map((k) => {
+      const d = Object.getOwnPropertyDescriptor(v, k)!;
+      return [k, "value" in d ? { ...d, value: snapshotInput(d.value) } : d];
+    }),
+  };
 }
 
 /** Whether `v` is an object carrying the extra own symbol, enumerable or not */
@@ -111,9 +116,8 @@ function carriesExtraSymbol(v: unknown): boolean {
 
 /**
  * Case description of a value. `JSON.stringify` drops symbol-keyed entries, which the object and
- * enum-record generators emit as declared keys (#61) and every generator as the extra symbol, so a
- * plain object's own symbol keys are shown as `[Symbol(name)]` string keys (a non-enumerable one
- * included, the record generator's hidden extra symbol of #51)
+ * enum-record generators emit as declared keys (#61) and every generator as the extra symbol, so
+ * own symbol and hidden keys and generated inherited keys are annotated, including inside containers.
  */
 function repr(v: unknown): string {
   try {
@@ -122,11 +126,23 @@ function repr(v: unknown): string {
         if (typeof x === "bigint") return `${x}n`;
         if (x instanceof Date) return Number.isNaN(x.getTime()) ? "Date(NaN)" : x.toISOString();
         if (typeof x === "symbol") return String(x);
-        if (typeof x === "object" && x !== null && Object.getPrototypeOf(x) === Object.prototype) {
-          const syms = Object.getOwnPropertySymbols(x);
-          if (syms.length === 0) return x;
+        if (x === undefined) return "[undefined]";
+        if (x instanceof Map) return { $map: [...x] };
+        if (x instanceof Set) return { $set: [...x] };
+        if (
+          typeof x === "object" &&
+          x !== null &&
+          (Object.getPrototypeOf(x) === Object.prototype ||
+            generatedPrototypes.has(Object.getPrototypeOf(x)))
+        ) {
           const shown: Record<string, unknown> = { ...x };
-          for (const sym of syms) shown[`[${String(sym)}]`] = (x as Record<symbol, unknown>)[sym];
+          for (const key of Reflect.ownKeys(x)) {
+            const d = Object.getOwnPropertyDescriptor(x, key)!;
+            if (!d.enumerable) shown[`[hidden own ${String(key)}]`] = d.value;
+            else if (typeof key === "symbol") shown[`[${String(key)}]`] = d.value;
+          }
+          const proto = Object.getPrototypeOf(x);
+          if (generatedPrototypes.has(proto)) shown["[generated prototype]"] = proto;
           return shown;
         }
         return x;
@@ -168,8 +184,9 @@ function orderedView(v: unknown, seen = new Map<object, unknown>()): unknown {
     return out;
   }
   const proto = Object.getPrototypeOf(v);
-  if (proto !== Object.prototype && proto !== null) return v; // class instance: as it is
-  const out = Object.create(proto);
+  const generated = generatedPrototypes.has(proto);
+  if (proto !== Object.prototype && proto !== null && !generated) return v; // class instance: as it is
+  const out = Object.create(generated ? Object.prototype : proto);
   seen.set(v, out);
   for (const k of Object.keys(v)) {
     Object.defineProperty(out, k, {
@@ -523,7 +540,8 @@ function bObject(rng: RNG, depth: number): Built {
     `${typeof f.key === "symbol" ? "[sym]" : f.key}: ${f.built.desc}`;
   const shown = large ? [...fields.slice(0, nFields), ...fields.slice(nFields + 1)] : fields;
   let desc = `object({${shown.map(keyDesc).join(", ")}${large ? `, …${fields.length - shown.length} more string keys` : ""}})${modeDesc}`;
-  // One object in forty carries a `z.property` check on its first field whose schema is an optional string
+  // One object in forty carries a `z.property` check; one third target the reserved undeclared key
+  // with equal required/optional string draws (#99). The rest keep the first-field optional string
   // wrapper with a length check (#69 inside a schema-bearing check, review of #84): stock's compiler compiles
   // the carried schema inline, so the subtree walks must descend into it. Since #85 the object keeps its
   // skeleton and runs the carried schema's verdict-only product on the held value of the key (an island here,
@@ -532,10 +550,18 @@ function bObject(rng: RNG, depth: number): Built {
   // from here on.
 
   if (!symbolOnly && rng.chance(0.025)) {
-    const carried = bWrapperCheck(rng, z.string().optional(), "string.optional()");
-    if (carried) {
-      schema = (schema as any).check(z.property("f0", carried[0] as any)) as z.ZodType;
-      desc = `${desc}.check(property(f0, ${carried[1]}))`;
+    if (rng.chance(1 / 3)) {
+      const optional = rng.chance(0.5);
+      schema = (schema as any).check(
+        z.property(PROPERTY_EXTRA, optional ? z.string().optional() : z.string()),
+      );
+      desc += `.check(property(${PROPERTY_EXTRA}, string${optional ? ".optional()" : ""}))`;
+    } else {
+      const carried = bWrapperCheck(rng, z.string().optional(), "string.optional()");
+      if (carried) {
+        schema = (schema as any).check(z.property("f0", carried[0] as any)) as z.ZodType;
+        desc = `${desc}.check(property(f0, ${carried[1]}))`;
+      }
     }
   }
   let extraSeq = 0;
@@ -549,6 +575,24 @@ function bObject(rng: RNG, depth: number): Built {
         if (v !== ABSENT) out[f.key] = v;
       }
       if (r.chance(0.25)) out[`extra${extraSeq++}`] = r.pick([1, "x", null, true] as const); // extra key
+      // Independent of mode and symbol policy; hidden own keys may shadow hidden inherited keys.
+      if (r.chance(0.1)) {
+        const proto = {};
+        Object.defineProperty(proto, PROPERTY_EXTRA, {
+          value: r.chance(0.5) ? r.pick(STRINGS) : r.pick(NON_STRINGS),
+          writable: true,
+          configurable: true,
+        });
+        generatedPrototypes.set(proto, Symbol("generated prototype"));
+        Object.setPrototypeOf(out, proto);
+      }
+      if (r.chance(0.25)) {
+        Object.defineProperty(out, PROPERTY_EXTRA, {
+          value: r.chance(0.5) ? r.pick(STRINGS) : r.pick(NON_STRINGS),
+          writable: true,
+          configurable: true,
+        });
+      }
       // Extra own symbol, in every mode: stock's rebuild drops it and the skeleton probes for it
       // before returning the input by reference (strip since #33, strict and loose since #42), so
       // the default pass expects stock's output; the "ignore" pass never emits it
@@ -996,6 +1040,99 @@ function bAny(rng: RNG, depth: number): Built {
 
 /* ─────────────────────────── differential main loop (z4) ─────────────────────────── */
 
+// Pin the oracle itself: output normalization must not weaken the mutation check or hide class instances.
+function checkInputViews(): void {
+  const proto = Object.defineProperty({}, PROPERTY_EXTRA, {
+    value: "inherited",
+    configurable: true,
+  });
+  generatedPrototypes.set(proto, Symbol("generated prototype"));
+  const input = Object.create(proto, {
+    f0: { value: "x", enumerable: true },
+    [PROPERTY_EXTRA]: { value: undefined, writable: true, configurable: true },
+  });
+  const nested = [new Map([["x", new Set([input])]])];
+  assert(
+    assertDeepEqual(orderedView(nested), orderedView([new Map([["x", new Set([{ f0: "x" }])]])])),
+  );
+  const before = snapshotInput(nested);
+  assert(assertDeepEqual(snapshotInput(nested), before));
+  input[PROPERTY_EXTRA] = 1;
+  assert(!assertDeepEqual(snapshotInput(nested), before));
+  input[PROPERTY_EXTRA] = undefined;
+  Object.defineProperty(input, PROPERTY_EXTRA, { enumerable: true });
+  assert(!assertDeepEqual(snapshotInput(nested), before));
+  Object.defineProperty(input, PROPERTY_EXTRA, { enumerable: false });
+  Object.defineProperty(proto, PROPERTY_EXTRA, { value: "changed" });
+  assert(!assertDeepEqual(snapshotInput(nested), before));
+  Object.defineProperty(proto, PROPERTY_EXTRA, { value: "inherited" });
+  const replacement = Object.create(Object.prototype, Object.getOwnPropertyDescriptors(proto));
+  generatedPrototypes.set(replacement, Symbol("generated prototype"));
+  Object.setPrototypeOf(input, replacement);
+  assert(!assertDeepEqual(snapshotInput(nested), before));
+  Object.setPrototypeOf(input, proto);
+  assert(assertDeepEqual(snapshotInput(nested), before));
+  assert(repr(nested).includes("[hidden own propertyExtra]"));
+  assert(repr(nested).includes("[generated prototype]"));
+  assert(repr(nested).includes("inherited"));
+  class Other {
+    f0 = "x";
+  }
+  assert(!assertDeepEqual(orderedView(new Other()), orderedView({ f0: "x" })));
+  assert(!assertDeepEqual(snapshotInput([undefined]), snapshotInput(new Array(1))));
+  assert(
+    !assertDeepEqual(
+      orderedView(
+        new Map([
+          ["a", 1],
+          ["b", 2],
+        ]),
+      ),
+      orderedView(
+        new Map([
+          ["b", 2],
+          ["a", 1],
+        ]),
+      ),
+    ),
+  );
+  console.log(
+    "Input-view helper checks passed (hidden values/descriptors, prototype state/identity, replay, class and order guards)",
+  );
+  // Independent seeds exercise the actual generator, without changing either differential stream.
+  const covered = new Set<string>();
+  for (let seed = 1; seed <= 20_000 && covered.size < 18; seed++) {
+    const rng = makeRng(seed);
+    const built = bObject(rng, 0);
+    if (!built.desc.includes(`property(${PROPERTY_EXTRA},`)) continue;
+    const def = (built.schema as z.ZodObject)._zod.def;
+    assert(!Object.hasOwn(def.shape, PROPERTY_EXTRA));
+    const mode = def.catchall?._zod.def.type ?? "strip";
+    covered.add(`${mode}:${built.desc.endsWith("string.optional()))") ? "optional" : "required"}`);
+    for (let i = 0; i < 20; i++) {
+      const input = built.gen(rng) as object;
+      for (const [kind, target] of [
+        ["own", input],
+        ["inherited", Object.getPrototypeOf(input)],
+      ] as const) {
+        const d = Object.getOwnPropertyDescriptor(target, PROPERTY_EXTRA);
+        if (!d) continue;
+        assert.equal(d.enumerable, false);
+        covered.add(`${mode}:${kind}:${typeof d.value === "string" ? "string" : "non-string"}`);
+      }
+    }
+  }
+  assert.equal(
+    covered.size,
+    18,
+    "every object mode must draw both checks and both hidden-key value kinds",
+  );
+  console.log(
+    "Generator coverage checks passed (3 modes x required/optional checks and own/inherited string/non-string keys)",
+  );
+}
+checkInputViews();
+
 const SEEDS = Number(process.env.SEEDS ?? 200);
 const CASES_PER_SEED = Number(process.env.CASES ?? 100);
 const REPRO = process.env.REPRO ?? null;
@@ -1008,6 +1145,7 @@ interface PassStats {
   refShared: number;
   stockDowngraded: number;
   failures: string[];
+  rngDraws: number[];
 }
 
 async function runPass(
@@ -1015,21 +1153,35 @@ async function runPass(
   compileOptions: CompileOptions | undefined,
   withExtraSymbol: boolean,
 ): Promise<PassStats> {
-  emitExtraSymbol = withExtraSymbol;
   let total = 0;
   let bothOk = 0;
   let bothFail = 0;
   let refShared = 0;
   let stockDowngraded = 0;
   const failures: string[] = [];
+  const rngDraws: number[] = [];
+  const propertyCoverage = {
+    required: 0,
+    optional: 0,
+    nonObjectRoot: 0,
+    union: 0,
+    async: 0,
+    hiddenOwn: 0,
+    inherited: 0,
+  };
 
   for (let seed = 1; seed <= SEEDS; seed++) {
     const rng = makeRng(seed);
     for (let i = 0; i < CASES_PER_SEED; i++) {
+      // Default-value probing may retry a generated record when its extra symbol is rejected.
+      // Build identical schemas/defaults in both passes; omit symbols only from the case input.
+      emitExtraSymbol = true;
       const built = bAny(rng, 3);
+      emitExtraSymbol = withExtraSymbol;
       let input = built.gen(rng);
       if (input === ABSENT) input = undefined;
       if (REPRO && `${seed}:${i}` !== REPRO) continue;
+      rngDraws.push(rng.draws);
       const caseId = `[${label}] seed=${seed} case=${i} schema=[${built.desc}] input=${repr(input)}`;
       total++;
 
@@ -1045,6 +1197,19 @@ async function runPass(
         continue;
       }
       const useAsync = compiled.async; // async skeleton → both sides go through safeParseAsync
+      if (built.desc.includes(`property(${PROPERTY_EXTRA},`)) {
+        propertyCoverage[
+          built.desc.includes(`property(${PROPERTY_EXTRA}, string.optional())`)
+            ? "optional"
+            : "required"
+        ]++;
+        if (built.schema._zod.def.type !== "object") propertyCoverage.nonObjectRoot++;
+        if (/union\(|discriminatedUnion\(/.test(built.desc)) propertyCoverage.union++;
+        if (useAsync) propertyCoverage.async++;
+        const shown = repr(input);
+        if (shown.includes(`[hidden own ${PROPERTY_EXTRA}]`)) propertyCoverage.hiddenOwn++;
+        if (shown.includes("[generated prototype]")) propertyCoverage.inherited++;
+      }
 
       if (REPRO) {
         console.log("=== REPRO ===");
@@ -1089,7 +1254,7 @@ async function runPass(
         oursThrew = e as Error;
       }
 
-      if (!assertDeepEqual(input, snapshot)) {
+      if (!assertDeepEqual(snapshotInput(input), snapshot)) {
         failures.push(`INPUT MUTATED → ${caseId}`);
         continue;
       }
@@ -1153,7 +1318,10 @@ async function runPass(
       }
     }
   }
-  return { label, total, bothOk, bothFail, refShared, stockDowngraded, failures };
+  console.log(
+    `  ${label}: undeclared-property schema/input coverage (categories may overlap): ${JSON.stringify(propertyCoverage)}`,
+  );
+  return { label, total, bothOk, bothFail, refShared, stockDowngraded, failures, rngDraws };
 }
 
 function defRepr(schema: any, depth = 0): string {
@@ -1205,6 +1373,7 @@ for (const p of passes) {
     `    success-consistent: ${bothOk}   failure-consistent: ${bothFail}   top-level reference sharing: ${total ? ((refShared / total) * 100).toFixed(1) : "0"}% (${((refShared / Math.max(1, bothOk)) * 100).toFixed(1)}% among successful cases)`,
   );
   console.log(`    stock degradations (compile gave up): ${stockDowngraded}`);
+  console.log(`    top-level references shared: ${refShared} / ${total}`);
   if (failures.length > 0) {
     failed += failures.length;
     console.log(`\n✗ ${failures.length} differences in pass "${p.label}" (first 10):`);
@@ -1212,6 +1381,11 @@ for (const p of passes) {
   }
 }
 const [base, ignore] = passes as [PassStats, PassStats];
+assert.deepEqual(
+  ignore.rngDraws,
+  base.rngDraws,
+  "symbol-option passes must consume the same RNG stream",
+);
 if (ignore.refShared < base.refShared) {
   failed++;
   console.log(

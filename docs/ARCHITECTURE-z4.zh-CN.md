@@ -931,7 +931,7 @@ async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器�
 
 ## 附录 A. zod3 与 zod4 的结构差异（探测所得）
 
-这张表是为已移除的自研 zod4 前端（v0.2）写的，在 issue #7 中从 README 移到这里。它描述的是 stock zod3 与 zod4 的差异，所以仍然约束当前的线；每一行都由 `src/probe-z4.ts` 锚定。
+这张表是为已移除的自研 zod4 前端（v0.2）写的，在 issue #7 中从 README 移到这里。它描述的是 stock zod3 与 zod4 的差异，所以仍然约束当前的线；每一行都由探针锚定，今天在 `packages/zod-cow-v4/src/probe-z4.ts`（包拆分 #9 之前是 `src/probe-z4.ts`）。
 
 | 维度 | zod3 | zod4 |
 |---|---|---|

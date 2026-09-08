@@ -273,8 +273,11 @@ function childrenOf(schema: Node): Node[] {
  * value factory is a getter, not a writable slot, so its throw stays the one documented residual.
  */
 type CallbackSlot = { obj: Record<string, unknown>; key: string; fn: unknown };
-/** A slot with the wrapper installed: `desc` is the own descriptor it had before the write, `undefined` for an inherited one. */
-type InstalledSlot = CallbackSlot & { desc: PropertyDescriptor | undefined };
+/**
+ * A slot the install wrote (or tried to write): `desc` is the own descriptor it had before the write, `undefined`
+ * for an inherited one; `wrapper` is the function the write handed it, which the restore looks for.
+ */
+type InstalledSlot = CallbackSlot & { desc: PropertyDescriptor | undefined; wrapper: unknown };
 
 function wrapCallback(orig: unknown): (this: unknown, ...args: unknown[]) => unknown {
   return function (this: unknown, ...args: unknown[]): unknown {
@@ -357,13 +360,19 @@ function collectCallbackSlots(schema: Node): { slots: CallbackSlot[]; nodes: Nod
  * The restore puts the slot back as it was, not only its value (third review of #112): an own data property gets
  * its original descriptor back through `defineProperty` (value and attributes), an own accessor is handed the
  * original through its setter (the descriptor itself was never replaced), and a slot the schema inherited is deleted
- * again so it does not become an own property. Every slot is restored even when one of them throws (a Proxy trap
- * that accepted the wrapper and refuses the write back): the others are put back first, then a `TypeError` naming
- * the slot, with the trap's error as `cause`, surfaces from `compile()` (`isSlotRestoreFailure` lets it through the
- * pure branch of `emitNode`, which swallows a refused compile), since the slot it guards holds the wrapper and
- * silence would hide the mutation; a later install would otherwise read that wrapper as the caller's function. The
- * wrapper is transparent to every call (it applies the original with the same receiver and arguments), so such a
- * schema still parses like stock.
+ * again so it does not become an own property. It puts back only what holds the wrapper (fourth review of #112): a
+ * slot whose write failed usually holds nothing (an own accessor without a setter, which is declined before any
+ * write since a strict-mode assignment to it can only throw; an inherited getter whose function differs per read; a
+ * Proxy `set` trap that throws or answers `false`), and writing it a second time would throw again or hand the
+ * schema a function it never held, where stock, which writes nothing, parses the schema; so the restore reads the
+ * slot first (its own descriptor for a data property, the value for an accessor or an inherited slot) and skips a
+ * slot that shows no wrapper. Every slot is restored even when one of them throws (a Proxy trap that accepted the
+ * wrapper and refuses the write back, or one that stored it and then threw from `set`): the others are put back
+ * first, then a `TypeError` naming the slot, with the trap's error as `cause`, surfaces from `compile()`
+ * (`isSlotRestoreFailure` lets it through the pure branch of `emitNode`, which swallows a refused compile), since the
+ * slot it guards holds the wrapper and silence would hide the mutation; a later install would otherwise read that
+ * wrapper as the caller's function. The wrapper is transparent to every call (it applies the original with the same
+ * receiver and arguments), so such a schema still parses like stock.
  */
 const slotRestoreFailures = new WeakSet<TypeError>();
 
@@ -401,8 +410,14 @@ function installWrappers(slots: CallbackSlot[]): (() => void) | null {
       restore();
       return null;
     }
+    // An own accessor without a setter cannot take the write (a strict-mode assignment to it throws before any
+    // code runs), so it is declined before the write, with nothing to restore on it (fourth review of #112).
+    if (desc !== undefined && isAccessor(desc) && typeof desc.set !== "function") {
+      restore();
+      return null;
+    }
     // Recorded before the write: a write that throws or a read-back that refuses may still have taken effect.
-    done.push({ ...s, desc });
+    done.push({ ...s, desc, wrapper: w });
     try {
       s.obj[s.key] = w;
       if (s.obj[s.key] !== w) {
@@ -417,16 +432,55 @@ function installWrappers(slots: CallbackSlot[]): (() => void) | null {
   return restore;
 }
 
+function isAccessor(desc: PropertyDescriptor): boolean {
+  return "get" in desc || "set" in desc;
+}
+
+/** Whether two own descriptors read the same (every attribute, `value` by identity). */
+function sameDescriptor(a: PropertyDescriptor, b: PropertyDescriptor): boolean {
+  return (
+    Object.is(a.value, b.value) &&
+    a.writable === b.writable &&
+    a.get === b.get &&
+    a.set === b.set &&
+    a.enumerable === b.enumerable &&
+    a.configurable === b.configurable
+  );
+}
+
+/**
+ * Put one slot back as it was, touching only what holds the wrapper: a slot whose write failed may hold nothing,
+ * and a write to it would throw again (fourth review of #112). A read that throws here counts as "holds it", so
+ * the restore is attempted and its throw surfaces through `restore`.
+ */
 function restoreSlot(s: InstalledSlot): void {
   if (s.desc === undefined) {
-    // Inherited before the write (or absent): the write created an own property, so delete it; an inherited
-    // accessor that stored the wrapper elsewhere still answers it, so hand the original back through it then.
-    delete s.obj[s.key];
-    if (s.obj[s.key] !== s.fn) s.obj[s.key] = s.fn;
-  } else if ("get" in s.desc || "set" in s.desc) {
-    s.obj[s.key] = s.fn;
+    // Inherited before the write (or absent): a write that took effect created an own property, so delete it; an
+    // inherited accessor that stored the wrapper elsewhere still answers it, so hand the original back through it
+    // then.
+    let own = true;
+    try {
+      own = Object.getOwnPropertyDescriptor(s.obj, s.key) !== undefined;
+    } catch {}
+    if (own) delete s.obj[s.key];
+    let answersWrapper = true;
+    try {
+      answersWrapper = s.obj[s.key] === s.wrapper;
+    } catch {}
+    if (answersWrapper) s.obj[s.key] = s.fn;
+  } else if (isAccessor(s.desc)) {
+    let answersWrapper = true;
+    try {
+      answersWrapper = s.obj[s.key] === s.wrapper;
+    } catch {}
+    if (answersWrapper) s.obj[s.key] = s.fn;
   } else {
-    Object.defineProperty(s.obj, s.key, s.desc);
+    let unchanged = false;
+    try {
+      const now = Object.getOwnPropertyDescriptor(s.obj, s.key);
+      unchanged = now !== undefined && sameDescriptor(now, s.desc);
+    } catch {}
+    if (!unchanged) Object.defineProperty(s.obj, s.key, s.desc);
   }
 }
 

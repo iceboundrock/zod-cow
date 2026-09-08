@@ -919,9 +919,15 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    of this layer's islands instead, so a frozen schema, which stock's `compileFn` never writes, compiles and parses
    here too (review of #112). The restore puts each slot back as it was, not only its value: an own data property
    gets its descriptor back (value and attributes), an own accessor is handed the original through its setter, and a
-   slot the schema inherited is deleted again instead of becoming an own property; every slot is restored even when
-   one throws on the write back (a Proxy trap that accepted the wrapper), and a `TypeError` naming the slot, with the
-   trap's error as `cause`, then surfaces from `compile()` (through the pure branch of `emitNode` too, which swallows
+   slot the schema inherited is deleted again instead of becoming an own property. It puts back only what holds the
+   wrapper (fourth review of #112): a slot whose write failed usually holds nothing (an own accessor without a setter,
+   declined before any write since a strict-mode assignment to it can only throw; an inherited getter answering a
+   fresh function per read; a Proxy whose `set` and `defineProperty` traps both refuse), and writing it a second time
+   threw again and surfaced from `compile()` where stock, which writes nothing, parses the schema, so the restore
+   reads the slot first and skips one that shows no wrapper, and the subtree takes the island. Every slot is
+   restored even when one throws on the write back (a Proxy trap that accepted the wrapper, or one that stored it
+   and then threw from `set`), and a `TypeError` naming the slot, with the trap's error as `cause`, then surfaces
+   from `compile()` (through the pure branch of `emitNode` too, which swallows
    a refused compile but not this), since the slot it guards still holds the wrapper and a later install would read
    it as the caller's function; the wrapper is transparent to every call, so the schema parses like stock either way
    (third review of #112). The wrapper records a thrown `$ZodAsyncError` through `rethrowCallerError`, so a

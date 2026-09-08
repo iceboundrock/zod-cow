@@ -4503,6 +4503,145 @@ head(
           "a non-enumerable data slot keeps its attributes",
         );
       }
+      // A slot whose install write fails holds no wrapper, so its restore must not write it again (fourth review of
+      // #112): an own accessor without a setter (the review's row), an inherited one whose getter answers a fresh
+      // function per read, and a Proxy whose `set` and `defineProperty` traps both refuse. Each compiles, takes the
+      // island, keeps its descriptor and records a callback's own throw once; the plain sibling slot is restored.
+      {
+        const getterOnly = (def: any): (() => unknown) => {
+          const orig = def.fn;
+          const get = (): unknown => orig;
+          Object.defineProperty(def, "fn", { get, configurable: true, enumerable: true });
+          return get;
+        };
+        const inheritedFresh = (def: any): void => {
+          const orig = def.fn;
+          delete def.fn;
+          const proto = {};
+          Object.defineProperty(proto, "fn", { get: () => orig.bind(null), configurable: true });
+          Object.setPrototypeOf(def, proto);
+        };
+        const refuseBoth = (cz: any): void => {
+          cz.def = new Proxy(cz.def, {
+            set: () => {
+              throw new Error("no write");
+            },
+            defineProperty: () => {
+              throw new Error("no define");
+            },
+          });
+        };
+        const refuseBothSilently = (cz: any): void => {
+          cz.def = new Proxy(cz.def, {
+            set: () => false,
+            defineProperty: () => {
+              throw new Error("no define");
+            },
+          });
+        };
+        const rows: [string, (s: z.ZodType) => void, boolean][] = [
+          ["an own getter-only accessor", (s) => void getterOnly(zodOf(s, 1).def), true],
+          [
+            "an inherited getter-only accessor answering a fresh function per read",
+            (s) => inheritedFresh(zodOf(s, 1).def),
+            false,
+          ],
+          [
+            "a set trap that throws beside a defineProperty trap that throws",
+            (s) => refuseBoth(zodOf(s, 1)),
+            false,
+          ],
+          [
+            "a set trap that answers false beside a defineProperty trap that throws",
+            (s) => refuseBothSilently(zodOf(s, 1)),
+            false,
+          ],
+        ];
+        for (const [name, shape, ownAccessor] of rows) {
+          const make = (cb: () => boolean): z.ZodType => {
+            const s = z.string().refine(keep).refine(cb);
+            shape(s);
+            return s;
+          };
+          const plain = make(() => true);
+          const f0 = zodOf(plain, 0).def.fn;
+          const before = Object.getOwnPropertyDescriptor(zodOf(plain, 1).def, "fn");
+          assert.equal(plain.parse("x"), "x", `${name}: stock parses the schema`);
+          const C = compile(plain);
+          assert.ok(!C.async && !C.stock, `${name}: compiles`);
+          assert.equal(C.parse("x"), "x");
+          assert.throws(
+            () => C.parse(""),
+            `${name}: the refined leaf still validates through the island`,
+          );
+          assert.ok(
+            zodOf(plain, 0).def.fn === f0,
+            `${name}: the plain slot reads back as the caller's function`,
+          );
+          assert.deepEqual(
+            Object.getOwnPropertyDescriptor(zodOf(plain, 1).def, "fn"),
+            before,
+            `${name}: the refusing slot keeps its descriptor`,
+          );
+          if (ownAccessor)
+            assert.ok(
+              before?.get !== undefined && before.set === undefined,
+              `${name}: the fixture is a getter-only accessor`,
+            );
+          const log: string[] = [];
+          const CA = compile(make(always(log)));
+          await assert.rejects(
+            CA.safeParseAsync("x"),
+            $ZodAsyncError,
+            `${name}: the same rejection`,
+          );
+          assert.equal(log.length, 1, `${name}: one call through the island`);
+          const onceLog: string[] = [];
+          const CO = compile(make(once(onceLog, () => nested.parse("x"))));
+          await assert.rejects(CO.safeParseAsync("x"), $ZodAsyncError);
+          assert.equal(onceLog.length, 1, `${name}: a first-call-only throw rejects`);
+        }
+        // A getter-only accessor on a `z.custom` node's own `def.fn` is the same case at the schema level.
+        {
+          const cust = z.custom<string>((v) => typeof v === "string");
+          const get = getterOnly((cust as any)._zod.def);
+          const C = compile(cust);
+          assert.ok(!C.stock);
+          assert.equal(C.parse("x"), "x");
+          assert.throws(() => C.parse(1));
+          const d = Object.getOwnPropertyDescriptor((cust as any)._zod.def, "fn");
+          assert.ok(
+            d?.get === get && d.set === undefined,
+            "z.custom: a getter-only slot keeps its descriptor",
+          );
+        }
+        // A set trap that stores the wrapper and then throws, beside a defineProperty trap that throws: the slot
+        // holds the wrapper, so the write-back failure still surfaces (the refusal below is the same rule).
+        {
+          const s = z
+            .string()
+            .refine(keep)
+            .refine(() => true);
+          const z1 = zodOf(s, 1);
+          const refused = new Error("no define");
+          z1.def = new Proxy(z1.def, {
+            set: (t, k, v) => {
+              t[k] = v;
+              throw new Error("stored, then refused");
+            },
+            defineProperty: () => {
+              throw refused;
+            },
+          });
+          const f0 = zodOf(s, 0).def.fn;
+          assert.throws(
+            () => compile(s),
+            (e: unknown) => e instanceof TypeError && (e as { cause?: unknown }).cause === refused,
+            "a set trap that stored the wrapper before throwing still surfaces the write-back failure",
+          );
+          assert.ok(zodOf(s, 0).def.fn === f0, "the plain slot was restored first");
+        }
+      }
       // A trap that accepted the wrapper but refuses the write back: the other slots are restored first, then a
       // `TypeError` with the trap's error as `cause` surfaces from `compile()` (the slot it guards still holds the
       // transparent wrapper, and a second install would read it as the caller's function).

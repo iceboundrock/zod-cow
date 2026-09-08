@@ -1145,7 +1145,7 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 
 ## Appendix A. Structural differences between zod3 and zod4 (probed)
 
-This table was written for the removed self-written zod4 front-end (v0.2) and moved here from the README in issue #7. It describes stock zod3 vs zod4, so it still constrains the current line; every row was anchored by `src/probe-z4.ts`.
+This table was written for the removed self-written zod4 front-end (v0.2) and moved here from the README in issue #7. It describes stock zod3 vs zod4, so it still constrains the current line; every row was anchored by the probe, `packages/zod-cow-v4/src/probe-z4.ts` today (`src/probe-z4.ts` until the package split, #9).
 
 | Dimension | zod3 | zod4 |
 |---|---|---|

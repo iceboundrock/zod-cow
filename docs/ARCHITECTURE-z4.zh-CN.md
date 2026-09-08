@@ -1,23 +1,25 @@
-> **Note.** This file is the Chinese counterpart of [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md), which is the source of truth; a change to the English document is applied here in the same PR. The text below still reflects v0.5 (issue #7) and is being brought up to date under #52. Section numbers match the English document except for its appendix.
+> **Note.** This file is the Chinese counterpart of [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md), which is the source of truth; a change to the English document is applied here in the same PR. Section numbers match the English document.
 >
-> **说明。** 本文是 [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md) 的中文对应版本，英文版是权威版本；英文文档的每次改动都在同一个 PR 里同步到这里。下文目前仍是 v0.5 时的内容（issue #7），正在 #52 中更新。除英文版的附录外，章节编号与英文版一一对应。
+> **说明。** 本文是 [docs/ARCHITECTURE-z4.md](ARCHITECTURE-z4.md) 的中文对应版本，英文版是权威版本；英文文档的每次改动都在同一个 PR 里同步到这里。章节编号与英文版一一对应。
 
 # zc-z4 架构对比：自研 codegen vs 复用 zod4 官方 codegen
 
 > 版本锚点：zod 4.5.4 · 本文所有生成代码均为真实产物 dump（`compileFn(schema, {debug:true})` 与 `compileCowDebug(schema)`）。
-> 配套代码：`src/cow4/`（当前 zod4 线，复用官方；模块布局见 §11）。
+> 配套代码：`packages/zod-cow-v4/src/cow4/`（当前 zod4 线，复用官方编译器；模块布局见 §11）。
 >
 > v1 已不在仓库里：自研 zod4 前端（当时的 `src/compile-z4.ts` + `src/index-z4.ts`）在
-> zc-z4 落地后被删除（issue #4）；`src/index-z4.ts` 这个路径今天指的是 zc-z4 的入口。
+> zc-z4 落地后被删除（issue #4）。zc-z4 的入口今天是 `packages/zod-cow-v4/src/index.ts`（在包拆分 #9 之前是 `src/index-z4.ts`）。
 > 本文对 v1 的全部描述、代码引用与基准数字都是历史对照，记录"为什么从自研 codegen
 > 走到复用官方 codegen"这条决策路径；对应源码需回溯到删除前的提交。当前仓库里的 zod4
 > 编译线只有 zc-z4。
 
 ## TL;DR
 
+下面 S1 到 S7 各行是 v0.5 时两个前端并存期间的本地测量（50 万账户，node v24），所以两列可比；当前的 CI 数字见 §7。
+
 | | v1（自研 codegen） | zc-z4（官方 codegen + CoW 修饰） |
 |---|---|---|
-| 自研代码量 | ~1100 行语义 codegen + 官方正则逐字拷贝 | ~760 行（纯度分析 + 6 个容器骨架 + async 通道） |
+| 自研代码量（提交 c0453dd 即 v0.5 导入时的物理行数） | `src/compile-z4.ts` 1271 行，复刻 zod 的 checks、issues 与 formats，外加逐字拷贝的官方正则 | `src/cow4-v2.ts` 1521 行：纯度分析、6 个容器骨架、async 通道、官方产物包装与从 zod 拷贝的谓词。#20 拆分之后，`packages/zod-cow-v4/src/cow4/`（当时是 `src/cow4/`）为 13 个模块共 1667 行 |
 | 语义正确性来源 | 自己复刻 zod 语义（issue/format/check 全套） | 官方编译器 + 官方 runtime fallback |
 | S1 纯校验（50 万账户） | 521ms | **283ms**（~1.0x vs 官方 parser） |
 | S2 脏负载（10% default） | 504ms | **247ms**（1.47x vs 官方 parser） |
@@ -26,7 +28,7 @@
 | S7 async schema | 不支持 | **105ms**（2.50x vs stock safeParseAsync） |
 | gc 后驻留 | 0MB | **0MB**（官方 parser 为 108~217MB） |
 | 跟随上游升级 | 每次手动同步语义 | 自动受益（官方 compiler 优化） |
-| 风险 | 语义漂移（正则/issue 格式） | 依赖内部 API（`zod4/v4/core` 导出面） |
+| 风险 | 语义漂移（正则/issue 格式） | 依赖不受支持的 API（`zod/v4/core` 的编译器导出） |
 
 结论：zod4 的 JIT 编译器（`src/v4/core/compile.ts`）就是现成的语义后端。
 与其再写一个编译器，不如让官方产物做叶子和子树，CoW 骨架只接管容器，
@@ -46,7 +48,7 @@ Numeric 文章的 fork 思路是"砍特性换性能"（删掉 default/transform/
 
 ## 2. 官方 codegen 的可复用面（源码取证）
 
-`zod4/v4/core` 命名空间 re-export 了 `compile.js` 的全部导出：
+`zod/v4/core` 命名空间（一个公开的 permalink 子路径）re-export 了 `compile.js` 的全部导出：
 
 ```ts
 import {
@@ -56,7 +58,7 @@ import {
   ZodCompileAsyncError,         // async refine/transform（同步快路径无法表达）
   regexes,                      // 官方正则全家桶（number/uuid/email 源…）
   util,                         // 官方 util（isPlainObject/shallowClone…）
-} from "zod4/v4/core";
+} from "zod/v4/core";
 ```
 
 三个关键产物契约：
@@ -153,7 +155,7 @@ if (v2 !== undefined || "role" in input) v9["role"] = v2;   // mayOutputUndefine
 
 这些正是 v1 在差分测试里反复踩坑的语义（default 短路、缺席不物化、exactOptional、
 catch 常量值、record 数值键重试、for...in 继承键……）。zc-z4 让官方消化全部这些细节，
-自研层只做纯度分派，这是代码量 1100→600 行且正确性反超的原因。
+自研层只做纯度分派。这就是正确性反超的原因，而自研层缩小的是职责范围而非行数：按提交 c0453dd 的物理行数计，两个前端相当（v1 1271 行，zc-z4 1521 行，见 §1），但 v1 的行数在复刻 zod 语义，zc-z4 的行数是纯度分派、骨架与从 zod 拷贝的谓词。
 
 ## 3. zc-z4 的生成代码：官方产物如何被 CoW 修饰
 
@@ -174,35 +176,39 @@ schema：`z.object({ id: number.int(), firstName: string.max(64), email: z.email
 ```js
 // ═══ zc-z4 CoW 骨架（真实 dump）═══
 if (typeof input !== "object" || input === null || Array.isArray(input)) return INVALID;
-let x0 = false, x1 = false;                                // dirty / extra
-const x2 = input["id"];
-if (c0(x2) === INVALID) return INVALID;                    // 纯叶子键：官方 assertOnly 产物
+let x0 = false;                                            // dirty
+const x1 = input["id"];
+if (c0(x1) === INVALID) return INVALID;                    // 纯叶子键：官方 assertOnly 产物
+const x2 = input["firstName"];
+if (c1(x2) === INVALID) return INVALID;
 const x3 = input["email"];
-if (c1(x3) === INVALID) return INVALID;                    // （email 校验在产物内部）
+if (c2(x3) === INVALID) return INVALID;                    // （email 校验在产物内部）
 const x4 = input["tags"];
-const x5 = c2(x4);                                         // 容器键：CoW 子骨架产物
+const x5 = c3(x4);                                         // 容器键：CoW 子骨架产物
 if (x5 === INVALID) return INVALID;
 if (x5 !== x4) x0 = true;                                  // ← 引用比较即脏信号
 const x6 = input["address"];
-const x7 = c3(x6);                                         // 同上（嵌套 CoW）
+const x7 = c4(x6);                                         // 同上（嵌套 CoW）
 if (x7 === INVALID) return INVALID;
 if (x7 !== x6) x0 = true;
-let x9 = 0;
-for (const k in input) {
-  if (x9 < 5 && k === c6[x9]) x9++;                        // 该位置上的声明键：一次指针比较（#102）
-  else if (!c4.has(k)) { x1 = true; break; }               // 不在声明位置上的键：成员测试，官方 for...in 同款
+if (!x0) {                                                 // strip 探测，只在输入仍可能被原样返回时运行
+  let x8 = false;
+  let x9 = 0;
+  for (const k in input) {
+    if (x9 < 5 && k === c5[x9]) x9++;                      // 该位置上的声明键：一次指针比较（#102）
+    else {
+      if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+    }                                                       // 不在声明位置上的键：成员测试，生成的逐键比较
+  }
+  if (!x8) {
+    const x10 = Object.getOwnPropertySymbols(input);       // 干净路径唯一的分配：每个对象一个空数组
+    if (x10.length !== 0) x8 = true;                       // 没有声明 symbol：任何自有 symbol 都是多余的
+  }
+  if (!x8) {
+    return input;                                          // ═══ 官方模板没有的一行 ═══
+  }
 }
-for (const s of Object.getOwnPropertySymbols(input)) {
-  if (!c4.has(s)) { x1 = true; break; }                    // strip 会丢 symbol 多余键 → 探测
-}
-if (!x0 && !x1) {
-  return input;                                            // ═══ 官方模板没有的一行 ═══
-}
-const out = { ...input };                                  // 被迫才拷贝：键存在性/键序天然保真
-if (x1) {
-  for (const k in input) if (!c5.has(k)) delete out[k];    // strip 剥离（官方语义）
-  for (const s of Object.getOwnPropertySymbols(input)) if (!c5.has(s)) delete out[s];
-}
+const out = { "id": x1, "firstName": x2, "email": x3, "tags": x5, "address": x7 };   // 官方组装，从捕获的局部变量
 return out;
 ```
 
@@ -210,21 +216,33 @@ return out;
 
 | 官方 parser | zc-z4 骨架 | 说明 |
 |---|---|---|
-| `const v8 = {...}` 无条件 | `if (!dirty && !extra) return input;` | CoW 核心：干净输入零分配 |
+| `const v8 = {...}` 无条件 | `if (!dirty) { 探测; return input; }` | CoW 核心：干净输入不拷贝；strip 探测每个对象一个空的自有 symbol 数组，是干净路径唯一的分配 |
 | `const v5 = new Array(len)` | （元素循环内）`out = new Array(len)` 加干净前缀 | 数组同理，首脏才重建前缀，之后每个元素只写一次（#70） |
 | `if (!c1.test(v2)) return INVALID` | 同左（assertOnly 产物内部） | 叶子校验 100% 官方 |
-| （输出组装隐式处理键存在性） | `{ ...input }` | 扩展天然保真 presence/键序 |
-| `for (const k in …)` unknown 探测 | 同一个 `for...in`，每个键先与遍历位置上的声明字符串键比较（`emitDeclaredKeyWalk`，#102），未命中时再对不超过 `MAX_INLINE_KEY_COMPARISONS`（自 #34 起为 32，此前为 16）个键的 shape 生成逐键字符串比较，超过则回退到 `Set`；只有在没有找到未声明字符串键时才接着运行自有 symbol 探测（strict 与 loose 对象只运行自有 symbol 探测，#42） | 继承可枚举键的语义与官方相同，小对象的成员判断更快且单态；两个探测都只在没有键为脏时运行，因为脏对象本来就要从声明键重建。`Set` 只在有东西引用它时才被提升（大 shape、声明的 symbol 键、loose 的追加循环），上限取在比较链不再占优的地方：经真实骨架实测（`bench-v4` 的 S11 行，#34），17 到 32 键时比较链比 `Set` 快 20% 到 30%，48 键持平，64 键起更慢，因为比较链的开销随键数平方增长而 `Set` 是线性的（数字见常量的注释）。只声明 symbol 键的 strip shape 把每个字符串键都视为未声明（#35） 位置命中与成员命中是同一个证明，所以每种键序下的判定都与 stock 一致；按 shape 顺序到来的输入（用同一 shape 写出的载荷经 `JSON.parse`）每个键只付一次指针比较，而不是走完比较链或做一次哈希探测，顺序不同的输入付成员测试外加这一次比较（数字见 #102 与 README 的 S11 各行）。 |
+| `const v8 = { "id": v0, … }` 按 shape 顺序，条件键用 `mayOutputUndefined` / `dropsWhenAbsent` 规则，passthrough 模式再以 `for...in` 追加 | 同一个字面量，在拷贝路径上从捕获的局部变量组装 | 拷贝就是 stock 的输出：shape 顺序、相同的键存在性规则、getter 只读一次。未声明键按构造就被丢弃，所以拷贝路径不需要探测也不需要 `delete`（早先的 `{ ...input }` 加 `delete` 拷贝保留输入的键序、把每个 getter 再读一遍（#36），并把拷贝变成字典模式对象，使 strip 一致性（S8）比 stock 还慢） |
+| `for (const k in …)` unknown 探测 | 同一个 `for...in`，每个键先与遍历位置上的声明字符串键比较（`emitDeclaredKeyWalk`，#102），未命中时再对不超过 `MAX_INLINE_KEY_COMPARISONS`（自 #34 起为 32，此前为 16）个键的 shape 生成逐键字符串比较，超过则回退到 `Set`；只有在没有找到未声明字符串键时才接着运行自有 symbol 探测（strict 与 loose 对象只运行自有 symbol 探测，#42） | 继承可枚举键的语义与官方相同：位置命中与成员命中是同一个证明，所以每种键序下的判定都与 stock 一致；按 shape 顺序到来的输入（用同一 shape 写出的载荷经 `JSON.parse`）每个键只付一次指针比较，而不是走完比较链或做一次哈希探测，顺序不同的输入付成员测试外加这一次比较（数字见代码块之下）。两个探测都只在没有键为脏时运行，因为脏对象本来就要从声明键重建。`Set` 只在有东西引用它时才被提升（大 shape、声明的 symbol 键、loose 的追加循环），上限取在比较链不再占优的地方：经真实骨架实测（`bench-v4` 的 S11 行，#34），17 到 32 键时比较链比 `Set` 快 20% 到 30%，48 键持平，64 键起更慢，因为比较链的开销随键数平方增长而 `Set` 是线性的（数字见常量的注释）。只声明 symbol 键的 strip shape 把每个字符串键都视为未声明（#35） |
 
-干净路径的自有 symbol 探测：stock 在所有模式下都会丢弃自有 symbol 键（strict 的未知键循环只看字符串键，所以也不会拒绝 symbol），
-因此按原引用放行之前必须证明没有这样的键，而 `Object.getOwnPropertySymbols` 是唯一不必列出全部键的问法（`Reflect.ownKeys` 会分配全部键）。
-它在对象的所有模式下运行（strip 自 #33 起，strict 与 loose 自 #42 起；对 strict 与 loose 而言它是干净路径上唯一的探测），
-自 #51 起也在 enum 键 record 的干净路径上运行（§5.1；辅助函数是 `codectx.ts` 里的 `emitOwnSymbolProbe`，两种骨架共用），默认保持开启。
-`compile(schema, { ownSymbolKeys: "ignore" })`（#43）去掉它：选项在 `compile` 里解析一次，由树中每个 `CodeCtx` 携带
-（`subFn` 用父上下文的选项创建子上下文），此时带有未声明自有 symbol 键的干净输入按原引用返回并保留该 symbol，而 stock 的重建会丢弃它；
-strict 与 loose 对象在 #42 之前、record 在 #51 之前无条件如此，现在在所有模式与所有 record 路径上都是可选项。
-其余不变：已声明的 symbol 键照常校验并写入，拷贝路径按构造丢弃未声明的 symbol，`validate()` 仍是官方 validator。
-差分模糊测试用不生成额外自有 symbol 的生成器对该选项再跑一遍（§8）。
+`for...in` 遍历的位置测试（#102）：遍历的开销在每个键的成员测试而不在循环本身（S11 的 strict 行在 stock 自己的 `for...in` 上读到同样的数字），并且它随键数增长，而 stock 用样板一步分配的输出字面量不随键数增长，所以 64 键时干净的 strip 解析花了 `z.compile()` 七倍的成本。遍历现在持有声明的字符串键，把每个枚举出的键与它所在位置上的那个比较（带边界检查：用一个尾随的非字符串哨兵代替边界检查曾经测过并被否决，因为只要有任何输入带着越过最后一个声明键的键，就会把某个键与哨兵比较一次，这一次比较把该调用位的类型反馈从"内化字符串"变成"any"，此后 V8 对每次解析都发射通用的相等调用而不是指针比较；`bench-v4` 的门控在计时之前就跑这样的 fixture，64 键 strip 干净行在哨兵下读到 499 ns 而非 353 ns），命中则前进；只有未命中其位置的键才做成员测试，此时位置停在原处，所以一旦偏离（缺席的可选键、生产者自己的键序），后面的键各付一次成员测试外加那一次失败的比较，直到输入的顺序再次与声明的顺序相遇才重新同步。在 Node 24 上单独测量（对一个 `JSON.parse` 对象的 1 000 000 次热循环，含校验读取，脚本与完整表格在 #102）：按 shape 顺序的输入在 64 键时从 476 ns 降到 152 ns，32 键时从 130 降到 78，16 键时从 48 降到 44，4 到 8 键时多约 2 ns；反序或乱序的输入在 64 键时多 5% 到 10%，16 到 32 键时多 15% 到 25%。间隙之后重新同步的各种形式（向前看一个键、向前扫描、返回键下标的成员测试）只在有缺席键的输入上赢，在其他每种偏离顺序上输 10% 到 80%，所以被否决。`MAX_INLINE_KEY_COMPARISONS` 保持原值，现在决定的是回退形式：在偏离顺序的输入上比较链在 32 键时仍胜过 `Set`、64 键时落败，即 #34 测到的交叉点。整次解析的数字是 README 的 S11 各行；每个做成员测试的循环都用这个遍历（object 的 strip 探测、strict 循环与 loose 追加，enum 键 record 的 strict 循环与 loose 追加，§5.1），smoke 第 26 组在每种模式下把每种键序钉在 stock 旁边，差分 fuzzer 把五分之一的 object 输入按反向键序写出（§8）。
+
+干净路径的成本，在 6 键原始值 record 上按每个对象测量（`bench-v4` 的 calibration 场景，单记录热循环）：自有 symbol 探测约占 69 ns 骨架调用中的 31 ns（run 34069671088，默认行对照跳过探测的可选项行），`for...in` 探测约 9 ns（本地 Node 24 测得）；同一 schema 的官方 parser 在该次运行中为 29 ns，其 validator 本地为 15 ns。叶子 validator 调用不是成本（V8 会内联它们：所有纯键合成一次官方 validator 调用与六次叶子调用测得相同）。symbol 探测是 stock 的 object 语义的成本：stock 在所有模式下都会丢弃自有 symbol 键（strict 的未知键循环只看字符串键，所以也不会拒绝 symbol），因此透传之前必须证明没有这样的键，而 `Object.getOwnPropertySymbols` 是唯一的问法（`Reflect.ownKeys` 会分配全部键）。它在所有模式下运行（strip 自 #33 起，strict 与 loose 自 #42 起；对 strict 与 loose 而言它是干净路径上唯一的探测，因为 strict 在校验期间已拒绝未声明的字符串键，loose 则保留它们），自 #51 起也在 enum 键 record 的干净路径上运行（§5.1；辅助函数是 `codectx.ts` 里的 `emitOwnSymbolProbe`，两种骨架共用），默认保持开启。`compile(schema, { ownSymbolKeys: "ignore" })`（#43）去掉它：选项在 `compile` 里解析一次，由树中每个 `CodeCtx` 携带（`subFn` 用父上下文的选项与父上下文的 `sources` 列表创建子上下文，所以每个嵌套 object 看到同一设置并进入调试 dump，#46），strip 骨架此时只发射 `for...in` 字符串探测（strict 或 loose 骨架在没有键为脏时立即返回输入）：
+
+```js
+if (!x0) {
+  let x8 = false;
+  let x9 = 0;
+  for (const k in input) {
+    if (x9 < 5 && k === c5[x9]) x9++;
+    else {
+      if (k !== "id" && k !== "firstName" && k !== "email" && k !== "tags" && k !== "address") { x8 = true; break; }
+    }
+  }
+  if (!x8) {
+    return input;                                          // 没有自有 symbol 探测：自有 symbol 键会在这里存活
+  }
+}
+```
+
+在该选项下，带有未声明自有 symbol 键的干净输入按原引用返回并保留该 symbol，而 stock 的重建会丢弃它；strict 与 loose 对象在 #42 之前、record 在 #51 之前无条件如此，现在在所有模式与所有 record 路径上都是可选项。其余不变：已声明的 symbol 键照常校验并写入，拷贝路径按构造丢弃未声明的 symbol，`validate()` 仍是官方 validator。差分模糊测试用不生成额外自有 symbol 的生成器对该选项再跑一遍（§8）。在 [Benchmarks workflow run 34069671088](https://github.com/iceboundrock/zod-cow/actions/runs/34069671088)（calibration parse，每轮 1 000 000 次操作，§7）中：带探测每次解析 69 ns，不带 38 ns，同两行里 `z.compile()` 为 29 到 34 ns；`bench-v4` 把该选项作为 calibration 小节里单独标注的一行报告，每个场景的 zod-cow-v4 列保持默认值。
 
 两个探测证明不了的事（#48）：`for...in` 探测列出可枚举的字符串键（自有与继承的，因此它会遍历原型链，在 Proxy 上会触发 `ownKeys`、`getOwnPropertyDescriptor` 与 `getPrototypeOf`），自有 symbol 探测列出自有 symbol（在 Proxy 上触发 `ownKeys`）；干净路径上没有任何显式的描述符或原型探测，
 所以干净输入会连同 stock 重建时会规范化掉的东西一起原样返回。共四类：不可枚举的未声明字符串键（对象的每种模式；record 也一样，其键循环像 stock 一样跳过不可枚举的字符串键，
@@ -242,12 +260,14 @@ zc-z4 把 checks 编译成独立校验子程序，在两条路径上都调用它
 
 ```js
 const cChecks = /* containerChecksFn 产物 */;
-if (!x0 && !x1) {
-  if (cChecks(input) === INVALID) return INVALID;   // 干净：输出===输入
-  return input;
+if (!x0) {
+  /* strip 探测 */
+  if (!x8) {
+    if (cChecks(input) === INVALID) return INVALID;   // 干净：输出===输入
+    return input;
+  }
 }
-const out = { ...input };
-/* …写回/剥离… */
+const out = { "id": x1, /* … 按 shape 顺序的捕获局部变量 */ };
 if (cChecks(out) === INVALID) return INVALID;       // 脏：对齐 stock 的"对输出跑 checks"
 return out;
 ```
@@ -330,7 +350,7 @@ check 不会被子程序调用，调用方回退到 stock 的 `safeParse` / `saf
 | object/array（自身 checks 安全 + 子树全纯） | true | 骨架接管（strip 由骨架处理） |
 | record/map/set | true（骨架接管后） | 键名/键值引用比较见 §5 |
 | union | union 自身 checks 通过 `leafChecksArePure`（有容器分支时：`unionSkeletonOk`，即 union 骨架用的闸门）且全分支纯 | 纯叶子 union 是一个官方产物，分支透传；带容器分支（直接、经 optional / nullable、或在嵌套 union 内）的 union 拿到 union 骨架（#58），其分支就是骨架位置，见陷阱四 |
-| readonly | false | `Object.freeze` 副作用（冻输入的风险） |
+| readonly | false | `Object.freeze` 副作用。官方 parser 随后冻结的正是 stock 冻结的东西：容器是新容器，`any` / `unknown` 这类透传叶子则是输入本身（#28） |
 | default/prefault/catch/coerce/transform/pipe/intersection/lazy/custom/nonoptional/success | false | 值产生器/黑盒/新容器 |
 
 ### 陷阱一：`overwrite` 是值改写（差分 seed=51 实证）
@@ -508,12 +528,16 @@ promise 落定后写入，所以输出按落定顺序排列，更早的异步键
   正是对象骨架的 #42 情形。没有键为脏时骨架运行与对象骨架相同的 `Object.getOwnPropertySymbols` 探测（`emitOwnSymbolProbe`，#51），
   发现未声明的 symbol 即判脏；拷贝路径按构造就不会带上它。`ownSymbolKeys: "ignore"` 在这里同样跳过探测。
   本地 Node 24 实测（单记录热循环，每轮 2 000 000 次）6 键 enum record 干净输入：带探测 74 ns，不带 31.5 ns，官方 parser 99 ns；
-- 拷贝分支 `{...input}` 后逐声明键写回（validator 产物键写 `inVar`，缺失时
-  `inVar === undefined` 恰好就是 stock 语义；parser 产物键写产物输出值）。
+- 拷贝分支是官方组装，从不是 `{...input}`：从一个空字面量开始，按声明顺序用校验期间捕获的局部变量写入每个声明键
+  （validator 产物键写 `inVar`，缺失时 `inVar === undefined` 恰好就是 stock 语义；parser 产物键写产物输出值），
+  然后在 loose 模式下由 `for...in` 追加未声明的字符串键（stock 只跳过 `"__proto__"`）。getter 只读一次，
+  拷贝带着 stock 的键序（声明键在前，未声明键随后按输入顺序）。
 
 实测语义锚点：`{a:1}` 对 `z.record(z.enum(["a","b"]), z.number().optional())`
 → stock 物化 `b: undefined` → ours 判脏返回 `{a:1, b:undefined}` ✓；未知键
-`{a:1,b:2,extra:3}` → 双方都拒绝 ✓。`{a:1, b:2, [Symbol()]: 3}` 对 `z.record(z.enum(["a","b"]), z.number())`
+`{a:1,b:2,extra:3}` → 双方都拒绝 ✓；`{"1":"x","2":"y"}` 对 `z.record(z.enum({ A: 1, B: 2 }), z.string())`
+→ 原引用 ✓；`{a:"x",b:"y",extra:"z"}` 对 `z.looseRecord(z.enum(["a","b"]), z.string())` → 原引用 ✓。
+`{a:1, b:2, [Symbol()]: 3}` 对 `z.record(z.enum(["a","b"]), z.number())`
 → stock 丢弃该 symbol → ours 也拷贝并丢弃，同一输入去掉 symbol 后仍是原引用 ✓（#51；此前干净路径会连同 symbol 返回输入，
 而拷贝路径会丢弃它）。被定义为不可枚举属性的*已声明*键（symbol enum 值或已声明的字符串键）属于 #48 那一族，只记录不探测：
 探测只问是否存在未声明的 symbol，所以干净路径按定义原样返回输入，而 stock 的重建会写入一个可枚举的数据属性；拷贝路径像 stock 一样写入该键。
@@ -603,8 +627,13 @@ return out;
    截断三态：已拷贝→实截；原引用且目标≠输入长→拷后截；目标===输入长→输出===输入，零操作
    （trailing optional 截断到输入长度的场景可以保住原引用）。
 
+4. `optinStart` 之下的槽位由长度守卫保证在场，所以不发射它们的缺席分支，第一个尾槽也没有 `fillLen` 门控
+   （官方模板里静态死掉的分支，编译期折叠；对 S6 没有可测量的影响）。把小的叶子 tuple 内联进父 object 骨架
+   在 #40 里试过并回退：50 万行下 S6 内联为 49ms、不内联为 50ms，因为行骨架的每行成本是它的 strip 探测（§3.1），
+   不是子骨架调用。
+
 收益最大的场景：全数字/全干净 tuple。stock 每次都 `new Array` + 逐槽写，CoW 零拷贝
-（S6：4.57x vs stock / 3.06x vs 官方 parser，全部场景中比值最高）。
+（run 33948313612 的 S6：8.04x vs stock / 2.62x vs 公开的编译 API；ArkType 在这里领先，0.40x，见 §7）。
 
 ### 5.5 async 通道（v0.5 新增）
 
@@ -712,7 +741,7 @@ compile.js `throwAsync` 同款注释：返回 INVALID 会被 union 读成分支�
 本身抛出来的则属于回调，会被记录（§5.5 第 6 条）。
 
 混搭效果：一棵树里只有 async 子树位付 microtask 成本，其余全部保持引用比较骨架
-（S7：5 万条 async transform 场景 2.50x vs stock safeParseAsync，分配 -63%）。
+（run 33948313612 的 S7：5 000 行的 async transform 场景，1.55x vs stock safeParseAsync，分配 -30%；run 33940596453 为 1.83x，run 33837195401 为 2.67x，在这个行数下都在 runner 噪声之内）。
 
 ## 6. 降级链状态机
 
@@ -773,58 +802,60 @@ stock 的编译器把每个非回调 check 发射为对值自身属性的内联�
 （冒烟 #9：`stock: false` 且语义正常）。
 真正整树降级的是顶层递归 schema（def 树循环引用，官方 compileFn 拒绝）。
 
-## 7. 基准（50 万账户，node v24，--expose-gc，3 轮中位）
+## 7. 基准（Benchmarks workflow 运行，50 000 账户，node v24，--expose-gc，候选顺序完整轮换的中位数）
 
-`zc-v1` 列是该前端删除前的最后一次测量，保留为历史对照；今天的 `bench:z4` 不再跑这一列。
+数字来自 GitHub 托管的 `ubuntu-latest` runner 上的 [Benchmarks workflow run 33948313612](https://github.com/iceboundrock/zod-cow/actions/runs/33948313612)，`BENCH_N=50 000`，测量的是构建后的 `zod-cow-v4` 包。单记录热循环各行来自同一 workflow 的 [run 34069671088](https://github.com/iceboundrock/zod-cow/actions/runs/34069671088)，每个计时轮 `BENCH_ITERS=1 000 000` 次操作（构造详细错误的 S10 各行为 100 000 次；#45）：在 run 33948313612 的 50 000 次操作下一个热循环轮只有 1 到 5 ms，JIT 状态与调度噪声占主导，同一个 `z.compile()` 循环在一个 calibration 行读到 29 ns、下一行读到 53 ns；`BENCH_N` 与批量各行不受影响。每个候选至少 2 轮预热与 3 轮计时，两个轮数都向上取整到候选数的倍数，使各轮构成候选顺序的完整轮换（五个候选时是 5 加 5：每个候选在每个位置出现同样多次）；各轮之间调用 `gc()`，每次计时调用都验证自己的结果，等价性门控在计时之前把有效与无效 fixture 以及生成的数据集送过每个实现，每个场景都如此，包括 S3 的每个比例（`packages/bench-v4/harness.ts`、`gates.ts`）。各列为 stock zod4（`safeParse`）、Zod 4.5 公开的编译 API（`z.compile(schema).safeParse`、`z.validate(compiled, data)`）、zod-cow-v4，以及在存在同等约束的 schema 时经其正常公开 API 测量的 ArkType 2.2.3，否则为 `N/A` 并注明原因（跨库表格在 README 里）。本层复用的内部 `compileFn` / `assertOnly` 产物在同一次运行的诊断表里与公开列对照测量：持平（S1 1.00x，S2 1.01x，S3 各比例 1.02x 到 1.06x，S8 1.04x；公开包装就是内部 parser 加一个结果对象），所以公开 API 是基线。这个记录数下 runner 的噪声超过 S1 / S3 的差距：[run 33945725973](https://github.com/iceboundrock/zod-cow/actions/runs/33945725973)，同一分支早一个提交的同一套件（带着后来因无收益而回退的 tuple 内联实验），每一列都低 5% 到 20%，S3 对 `z.compile()` 读到 1.13x 到 1.18x，而本次运行读到 0.88x 到 0.97x。run 33940596453 与 33837195401 的被取代表格以及更早的本地 50 万记录测量保留在 CHANGELOG 里。
 
-| 场景 | stock | 官方 compileFn parser | zc-z4 | zc-v1 | arktype |
-|---|---|---|---|---|---|
-| S1 纯校验 | 654ms | 263ms | **283ms** | 521ms | 144ms |
-| S1 分配压力 | +160.5MB | +111.0MB | **+30.5MB** | +12.1MB | +26.7MB |
-| S1 gc 后驻留 | +123.4MB | +108.1MB | **0.0MB** | 0.0MB | 0.0MB |
-| S2 脏负载（10% default） | 619ms | 363ms | **247ms** | 504ms | — |
-| S3 扫描 0% / 25% / 50% / 100% 脏 | 622/647/679/660ms | 391/415/452/449ms | **245/268/311/404ms** | 490/518/540/643ms | — |
-| S3 zc-z4 驻留 | +123.3MB 恒定 | — | **0 / 20 / 36 / 68.7MB** | — | — |
-| S4 validate | — | 219ms(逐账户) | **50ms** | — | 144ms |
-| S5 record/map/set | 922ms | 681ms | **353ms** | 不支持 | — |
-| S5 分配压力 | +256.1MB | +245.3MB | **+38.1MB** | — | — |
-| S5 gc 后驻留 | +217.4MB | +217.4MB | **0.0MB** | — | — |
-| S6 tuple | 508ms | 340ms | **111ms** | 不支持 | — |
-| S6 分配压力 / 驻留 | +214.0MB / +206MB | +202.2MB / +202MB | **+15.3MB / 0MB** | — | — |
-| S7 async transform（5 万条） | 262ms(safeParseAsync) | 编译拒绝 | **105ms(safeParseAsync)** | 不支持 | — |
-| S7 分配压力 | +95.6MB | — | **+34.9MB** | — | — |
+| 场景 | stock | z.compile() | zod-cow-v4 | ArkType |
+|---|---|---|---|---|
+| S1 干净输入解析（无未声明键） | 68ms | 23ms | **24ms** | 23ms |
+| S1 分配压力 / 驻留 | +18.0MB / +11.6MB | +11.0MB / +10.8MB | **+3.1MB / 0.0MB** | +5.4MB / 0.0MB |
+| S2 10% default | 69ms | 23ms | **25ms** | 805ms |
+| S2 分配压力 / 驻留 | +19.8MB / +11.6MB | +18.2MB / +11.6MB | **+4.1MB / +1.0MB** | +91.2MB / +11.6MB |
+| S3 扫描 0% / 25% / 50% / 100% 脏 | 68/69/70/70ms | 23/23/23/24ms | **23/25/26/25ms** | 806/806/799/781ms |
+| S3 驻留 | +11.6 到 +12.3MB | +11.6MB 恒定 | **0.0 / 2.0 / 3.6 / 6.9MB** | +11.6MB 恒定 |
+| S4 仅校验 | N/A（没有仅校验的 API） | 17ms（`z.validate`） | **18ms**（`validate()`） | 23ms（`.allows()`） |
+| S5 record/map/set | 81ms | 41ms | **30ms** | N/A（`Map`/`Set` 只做 instanceof；非等价参照 10ms） |
+| S5 分配压力 / 驻留 | +54.0MB / +21.7MB | +49.6MB / +21.7MB | **+29.4MB / 0.0MB** | N/A |
+| S6 tuple | 43ms | 14ms | **5ms** | 2ms |
+| S6 分配压力 / 驻留 | +55.0MB / +20.6MB | +20.2MB / +20.2MB | **+1.5MB / 0.0MB** | +0.0MB / 0.0MB |
+| S7 async transform（5 000 行） | 12ms（safeParseAsync） | N/A（async schema 原样交回、不编译） | **7ms（safeParseAsync）** | N/A（没有原生 async morph） |
+| S7 分配压力 | +12.8MB | N/A | **+9.0MB** | N/A |
+| S8 strip 未知键解析一致性 | 79ms | 29ms | **24ms** | 1092ms（`onDeepUndeclaredKey("delete")`） |
+| S8 分配压力 / 驻留 | +28.2MB / +11.6MB | +11.2MB / +10.8MB | **+8.0MB / +8.0MB** | +157.5MB / +66.6MB |
+| S10 解析失败，逐行 safeParse，1% / 10% / 50% / 100% 无效 | 69/88/151/224ms | 18/40/128/227ms | **25/47/132/231ms** | 30/91/287/426ms |
+| calibration parse，单条 6 字段记录（ns/op） | 232ns | 29ns | **69ns** | 40ns |
+| calibration parse，`ownSymbolKeys: "ignore"`（可选项，#43；ns/op） | N/A（不变） | 34ns | **38ns** | N/A（不变） |
+| calibration validate，同一记录（ns/op） | N/A | 22ns | **19ns** | 20ns |
+| S9 仅校验失败，first / last / nested / email / tuple（ns/op） | N/A | 1550/1689/1807/2490/869ns | **17/166/165/92/31ns** | 172/16/21/145/31ns |
+| S10 带错误的解析失败，first / last / nested / refine（ns/op） | 3621/3576/3693/3475ns | 3578/3762/3807/3754ns | **3563/3819/3727/3929ns** | 6859/11886/7161/5843ns |
 
-三个层次的解读：
+对 zod-cow-v4 的比值（大于 1 表示另一实现更耗时）：stock 2.80x（S1）、2.72x（S2）、2.88x / 2.78x / 2.64x / 2.80x（S3）、2.75x（S5）、8.04x（S6）、1.55x（S7）、3.35x（S8）；z.compile() 0.95x（S1）、0.90x（S2）、0.97x / 0.94x / 0.88x / 0.97x（S3）、0.93x（S4）、1.39x（S5）、2.62x（S6）、1.22x（S8）、0.42x（calibration parse）、0.89x（带可选项的 calibration parse）、1.16x（calibration validate）；ArkType 0.97x（S1）、31.90x（S2）、30.27x 到 34.42x（S3）、1.25x（S4）、0.40x（S6）、46.28x（S8）、0.59x（calibration parse）、1.09x（calibration validate）。
 
-1. 对 stock：2.31x（S1）~ 2.50x（S2）~ 2.61x（S5）~ 4.57x（S6 tuple，全场景最高），
-   且驻留从 123~217MB 归零；async 场景（S7）2.50x。
-2. 对官方 JIT parser：干净场景基本持平（S1 0.93~1.00x，批间噪声内，骨架省掉的输出
-   构造恰好抵掉子骨架函数调用开销）；脏场景反超（S2 1.47x、S5 1.93x、S6 3.06x），
-   因为官方 stock 语义的 default shallowClone 与整树重建是固定成本，CoW 只为真正变脏的路径
-   付费。S6 的 3.06x 说明：tuple 是重建占比最高的容器（每次 parse 都 new Array + 逐槽写，
-   而槽位几乎不变），CoW 修饰收益最大。
-3. async 通道（S7）：容器的 async 子节点一起启动、由一次 `Promise.all` 结算（#71），async 子树位只付一个来回，其余保持引用
-   比较骨架；async transform 全脏场景仍有 2.50x，分配 -63%（95.6→34.9MB）。
-4. validate 快路径：官方 assertOnly 整树单体产物 50ms / 50 万 = 100ns/账户，
-   比官方逐账户调用（219ms，含 payload 包装）快 4.4x，分配 0。
+怎么读：
 
-S1 的 +30.5MB 短命分配来自官方叶子产物内部（datetime/email 格式校验的临时值），
-gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍；速度与微量短命
-分配之间的取舍，在生产语境（minor GC 便宜）下选了 zc-z4，这也是 v1 最终被移除的原因之一。
+1. 对 stock：同步批量场景 2.6x 到 8.0x，干净输入上驻留内存从 12~22MB 归零；async 场景（S7）在 5 000 行下为 1.55x，这个行数下 runner 噪声占很大比重。
+2. 对公开的编译 API：object 输入在每种脏比例下都在 runner 噪声内持平（S1 0.95x、S2 0.90x、S3 本次 0.88x 到 0.97x，run 33945725973 为 1.13x 到 1.18x），strip 输入（S8 1.22x）与容器场景（S5 1.39x、S6 2.62x）领先。脏与 strip 的结果就是 §3.1 的拷贝路径：拷贝与编译 parser 构造的是同一个按 shape 顺序的字面量，所以一个脏行花的是编译行的成本，周围的干净行什么都不花，未触及的嵌套数组共享。这个改动之前（run 33940596453）拷贝是扩展加 `delete`，S3 读 24 / 28 / 31 / 36ms（100% 脏时 0.70x），本地 50 万行的 S8 比 stock 还慢（1038ms 对 686ms，驻留 637MB：被 `delete` 过的拷贝是字典模式对象；之后为 205ms 与 80MB）。小对象的逐行解析落后（calibration parse 0.42x，S10 1% 无效 0.73x），这是 strip 探测的每对象成本（§3.1：6 字段记录上 65 ns 骨架调用中约 45 ns，其中 36 ns 是自有 symbol 探测）。
+3. 对 ArkType：干净解析持平（S1 0.97x），仅校验领先（S4 1.25x，calibration validate 1.09x），tuple 落后（S6 0.40x，2ms 对 5ms：ArkType 预编译的检查返回输入且不分配，而骨架每行都付 strip 探测；把 tuple 子骨架内联进行骨架测得无收益并已回退，§5.4），单记录解析也落后（0.59x，同样的探测）。S2/S3/S8 的差距是架构性的：带任何 morph 的类型（键 default 或未声明键删除都算）失去 ArkType 的 `allows` root-apply 策略，改走上下文式的那条：对 `Traversal` 上下文做解释执行的 `traverseApply`，其 `finalize` 在应用排队的 morph 之前深克隆整个输入（`@ark/schema` 的 `node.js` / `traversal.js`），所以每一行在每种比例下都被重建（S3 分配 +90MB，S8 +158MB，50 000 行下 781 到 1092ms，与脏比例无关）。zod-cow 把 default 编译成普通的官方叶子，只拷贝变化的行。S1 只比较干净 fixture（zod 把未声明键剥进拷贝，ArkType 按引用保留它们）；S8 是两个实现做同样工作的地方。
+4. 失败路径（S9、S10）：`validate()` 只由编译出的 validator 作答（17 到 166ns），公开的 `z.validate` 失败时回退到 runtime parser（0.9 到 2.5µs），ArkType 的 `.allows()` 按自己的成本顺序检查键（廉价的 boolean 失败时 16ns，`id` 失败时 172ns；zod 按声明顺序检查）。带详细错误时每条 zod 路径每个无效记录花 3.5 到 3.9µs：两个编译变体的快路径只是构造 `ZodError` 的 runtime 解析的一小部分，所以"先快路径、失败再 runtime"的双重工作看不出来；失败的 refine 谓词在 `z.compile()`、zod-cow 与 ArkType 下都跑两次，成功的解析各处都跑一次。混合数据集上 zod-cow 跟随无效比例，对 stock 从 2.79x（1%）到 0.97x（100%）。
+5. async 通道（S7）：容器的 async 子节点一起启动、由一次 `Promise.all` 结算（#71），async 子树位只付一个来回，其余保持引用比较骨架；async transform 全脏场景在这里为 1.55x，分配 -30%（12.8→9.0MB）。
+6. validate 快路径：`validate()` 是同一 array schema 的官方 assertOnly 整树产物，所以 S4 按构造就与 `z.validate` 持平（18ms 对 17ms，0.93x）。它的价值在于仅校验的成本：18ms / 50 000 = 每账户 360ns，gc 后驻留 0（那 +2.0MB 是官方 array 产物在有 `.max(8)` 这类 size check 时即使在 assertOnly 模式下也会物化的 `tags` 数组）。
+
+S1 的 +3.1MB 短命分配是 strip 探测的自有 symbol 数组：每个对象恰好一个空数组（32 字节），50 000 账户带嵌套 address 共 100 000 个对象，读它是为了证明对象可以按引用返回。官方叶子产物没有可测量的分配（含 datetime/email 格式检查；在 Node 24 上用采样堆分析器与 `heapUsed` 增量逐叶子测得），gc 后驻留 0：CoW 本身不拷贝任何容器。在 v0.5 的本地测量里 v1 分配更少（12.1MB 对 zc-z4 的 30.5MB），但速度慢一倍；速度与微量短命分配之间的取舍，在生产语境（minor GC 便宜）下选了 zc-z4，这也是 v1 最终被移除的原因之一。
 
 ## 8. 正确性证据
 
-- `tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 superRefine 走官方 parser（async refine 自 #13 起保留骨架并共享），经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；已声明键（symbol 或字符串）被定义为不可枚举时按原样返回，#48 那一族；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `tests/smoke-z4-containers.test.ts`
-  （record 三路径 / map / set / size checks / 容器组合）+ `tests/smoke-z4-tuple-async.test.ts`
-  （tuple 截断/填充/rest/refine + async 五容器通道/lazy(async)/union async 分支；最后一组钉住 #95 的两项决定：任何数组形骨架都不带自有性探测、显式 `undefined` 元素拷贝为 stock 的输出、数组骨架在每种少报的 Proxy 长度下的行为）全部通过。
-- `tests/differential-z4.test.ts` 的历史 v0.5 运行：50000 case（seeds=500×100，随机嵌套
+- `packages/zod-cow-v4/tests/smoke-z4.test.ts`（22 组行为断言，第 22 组为 #73 的评审：容器、再一层包装或带容器分支的 union 之上的 `z.exactOptional` 在顶层和键下都像 stock 一样拒绝 `undefined`，strip 与叶子分支留在官方 parser 上，叶子之上的仍走 validator；第 21 组为 #58：strip object 的 union 经第一个和后面的分支都共享干净输入，触发的 default 按 stock 拷贝，strip / strict / loose 分支表现如 stock，嵌套 union 干净时与父级共享、只拷贝脏路径，叶子与容器分支混合，discriminatedUnion 分派并共享，`optional(union)`、`array(union)` 与嵌套 union 都到达骨架，带 defaulted 分支的 union 之上的 optional 按 stock 触发 default（refine 之下与再套一层 nullable 时亦然），union 自身的 refine、overwrite、superRefine 表现如 stock，`z.xor` 与 async 分支走官方产物，纯叶子 union 保留 validator，dump 里每个容器分支一个嵌套骨架；第 20 组为 #71：作为 set 成员的 tuple、object、enum record 与 array 各带两个 async 子节点时按 stock 的顺序结算，子节点的副作用像 stock 一样交错（第二个键的 transform 在第一个结算前启动），一个抛错的子节点旁边有失败的同步兄弟时解析仍被拒绝且没有任何东西到达 `unhandledRejection`，tuple（固定槽或 rest）、object、array 与 enum record 的 async 布局只 await 一次 `Promise.all`，同步 tuple 不 await；第 18 组为 #56：容器之上 optional / nullable 包装层的 refine 在顶层和嵌套位置都像 stock 一样拒绝（object 与 array，record、map、set 与 tuple 之上亦然）、能看到短路值、沿两层包装链按 stock 的顺序运行、看到剥离后的拷贝并在通过时保持共享，包装层上的 superRefine 走官方 parser（async refine 自 #13 起保留骨架并共享），经 `.check()` 附加到包装层的长度 / 大小检查在六种容器之上、顶层和键位都走官方 parser 并像 stock 一样剥离；第 19 组为 #57：叶子之上包装层的 overwrite 或 superRefine 在顶层、object 键位和 union 分支都像 stock 一样改写；第 12 与 13 组为 `ownSymbolKeys` 选项：默认与 `"probe"` 遇到未声明的 symbol 仍拷贝，`"ignore"` 按原引用返回输入并保留该 symbol、对字符串键与拷贝路径保持 strip 语义、校验已声明的 symbol 键、到达每种容器（object、array、tuple、record、map、set）之下的嵌套骨架、把不可枚举的未声明 symbol 与可枚举的同等对待，对未知值、显式 `null` 或非普通对象的 options 以 `TypeError` 拒绝（被拒对象带着抛错的 `constructor` / `name` 访问器或抛错的 Proxy `getPrototypeOf` 陷阱时，被拒值带着抛错的 `toJSON` 或 Proxy `get` 陷阱、是 bigint、symbol、函数或循环引用时，以及 options 对象是 `getOwnPropertyDescriptor` / `get` 陷阱抛错的 Proxy 时亦然，此时以陷阱的错误为 `cause`），把显式 `undefined` 当作默认值，忽略从 `Object.prototype` 继承的 `ownSymbolKeys`；随后是 strict 与 loose 模式下的同一探测，#42：默认遇到未声明的 symbol（无论是否可枚举）拷贝、对去掉它的同一输入共享，`"ignore"` 共享且不发射探测，两种设置下拷贝路径都丢弃该 symbol，strict 仍拒绝未声明的字符串键，loose 在拷贝里保留它而丢弃 symbol，已声明的 symbol 键算已知，嵌套的 loose object 也被到达；第 14 组为 #47：带 strip object 分支的 union 在顶层和嵌套位置都像 stock 一样丢掉未声明键、兄弟仍共享，strict 分支丢掉未声明的自有 symbol，`optional(object)`、`array(object)` 与 discriminatedUnion 分支像 stock 一样剥离，纯叶子 union 保留 validator、父层仍共享；第 15 组为 #46：带 object、array、tuple、record、map 与 set 子节点的 schema 的 `code` 先是顶层源码，然后每个嵌套骨架一个 `nested skeleton` 标题，默认每个 object 骨架带一个探测、`"ignore"` 下一个都没有，没有嵌套容器的 schema 没有标题；第 16 组为 #51：strict 与 loose 的 enum 键 record 在默认与 `"probe"` 下都会拷贝并丢弃未声明的自有 symbol（无论是否可枚举），去掉 symbol 的同一输入按原引用共享，`"ignore"` 共享且不生成探测，两种设置下拷贝路径都丢弃 symbol；字符串键、带 check 的字符串键与数字键 record 仍拒绝可枚举的 symbol 键、对不可枚举的 symbol 键拷贝并丢弃且不增加探测调用；接受 symbol 的键 schema 与 loose record 像 stock 一样保留 symbol；strip 对象下嵌套的 enum 键 record 也被覆盖；第 17 组为 #48：不可枚举的未声明字符串键在对象每种模式与 record 每条路径（含数字键 record）的干净路径上都保留、拷贝路径像 stock 一样丢弃，类实例原样返回而拷贝是普通对象、record 两边都拒绝它，可枚举的继承键 strip 像 stock 一样拷贝、strict 两边都拒绝、loose 仍留在原型上而 stock 写成自有键，抛错的 `ownKeys`、`getOwnPropertyDescriptor` 或 `getPrototypeOf` 陷阱在 strip 的 `for...in` 探测下两种设置都抛错而 stock 的 strip 能解析、strict 与 loose 的 `ownKeys` 默认两边都抛错、loose 对 `getOwnPropertyDescriptor` 与 `getPrototypeOf` 不触发、`"ignore"` 下三个都不触发，对象骨架的 `code` 不含显式的描述符或原型探测）+ `packages/zod-cow-v4/tests/smoke-z4-containers.test.ts`
+  （record 三路径 / map / set / size checks / 容器组合）+ `packages/zod-cow-v4/tests/smoke-z4-tuple-async.test.ts`
+  （tuple 截断/填充/rest/refine + 经 array / record / map / set / tuple 子节点与 object 键的 async 通道 / lazy(async) / union async 分支；其 #78 分组的覆盖用例与 #88 时间线矩阵的每个用例都在同步 rest 布局和一个第一槽带 async refine 的 async 孪生上运行，#94，矩阵里的数组迭代器替换除外，那是 stock 自己的 `Promise.all` 消费的；最后一组钉住 #95 的两项决定：任何数组形骨架都不带自有性探测、显式 `undefined` 元素拷贝为 stock 的输出、数组骨架在每种少报的 Proxy 长度下的行为）全部通过。
+- `packages/zod-cow-v4/tests/differential-z4.test.ts` 的历史 v0.5 运行：50000 case（seeds=500×100，随机嵌套
   object/array/tuple/record/map/set/union + optional/nullable/default/refine/transform
   + async refine/async transform 包装），与 stock zod4 全量一致：
   - 成败奇偶一致（成功 20813 / 失败 29187）
   - 输出 `deepStrictEqual` 一致（每次解析都按迭代顺序比较 Map 与 Set 的内容，#67、#70）
   - 输入零失真（structuredClone 快照比对）
   - 顶层引用共享率 89.1%（成功 case），stock 降级 0 次
-  - 自 #43 起每个 case 都会用 `ownSymbolKeys: "ignore"` 再编译一次，对同一 RNG 流去掉额外自有 symbol 后的输入运行，检查同样的三项，另加：任何深度的生成骨架都不含 `getOwnPropertySymbols`，且该 pass 共享的顶层引用不少于默认 pass。自 #51 起两个 record 生成器也会生成额外的自有 symbol（十分之一，其中一半通过 `Object.defineProperty` 设为不可枚举），输入快照保留可枚举性，运行器在 `deepEqual` 之外还固定检查顶层输出上该 symbol 是否存在，因为 harness 的比较器只拷贝可枚举键，看不到按原引用存活的不可枚举 symbol；未修复的引擎在默认 pass 下该生成器失败 26 / 20 000 case（全部是这项检查），修复后为 0；默认规模下的共享率为 85.1%（默认）与 86.0%（`"ignore"`），新生成器在两个引擎上相同，旧生成器下为 85.6% / 86.2%
+  - 自 #43 起每个 case 都会用 `ownSymbolKeys: "ignore"` 再编译一次，对同一 RNG 流去掉额外自有 symbol 后的输入运行（这是该选项唯一与 stock 处理不同的输入；自 #42 起生成器在每种 object 模式下都生成它，所以默认 pass 会把带未声明 symbol 的 strict 与 loose 对象与 stock 比较，此前的生成器排除了它们），检查同样的三项，另加：任何深度的生成骨架都不含 `getOwnPropertySymbols`（`compiled.code` 在 #46 之前只覆盖顶层骨架，#46 把嵌套骨架追加进 dump），且该 pass 共享的顶层引用不少于默认 pass（#42 之后在 20 000 case 的默认规模下：成功 case 中默认 88.8%、带选项 89.4%，两者降级 0 次）。自 #51 起两个 record 生成器也会生成额外的自有 symbol（十分之一，其中一半通过 `Object.defineProperty` 设为不可枚举），输入快照保留可枚举性，运行器在 `deepEqual` 之外还固定检查顶层输出上该 symbol 是否存在，因为 harness 的比较器只拷贝可枚举键，看不到按原引用存活的不可枚举 symbol；未修复的引擎在默认 pass 下该生成器失败 26 / 20 000 case（全部是这项检查），修复后为 0；默认规模下的共享率为 85.1%（默认）与 86.0%（`"ignore"`），新生成器在两个引擎上相同，旧生成器下为 85.6% / 86.2%
 - 自 #47 起生成器生成 union（2 到 3 个随机分支，四分之一为两个 object 分支的 discriminatedUnion），上面的列表此前虚有其名；在未修复的引擎上新生成器在默认 pass 失败 15 / 20 000 case、`"ignore"` pass 失败 11 个，全部是陷阱四形态的输出不一致，修复后为 0。默认规模下成功 case 的顶层引用共享率为 85.6%（默认）与 86.2%（`"ignore"`），同一生成器在未修复引擎上为 85.9% 与 86.6%（该规则放弃的容器分支 union 的 CoW 路径），旧生成器下为 88.8% / 89.4%。
 - 自 #56 起三个被包装的子节点里有一个在包装层之上再叠一个 check（同步或 async refine，或把字符串转大写的 overwrite，#57），refine 谓词除字符串 "forbidden" 外也拒绝恰好三个条目的容器；在未修复的引擎上每一遍各找出 20 000 case 中的 5 个（容器之上的包装层 refine 从未运行，或叶子之上的包装层 overwrite 被判为纯），修复后为 0。默认规模下成功 case 的共享率为 85.4%（默认）/ 86.1%（`"ignore"`），旧生成器在两个引擎上均为 85.1% / 86.0%。
 - 自 #61 起，五分之一的 enum 键 record 在字符串或数字键之外声明共享的 symbol 键，作为 enum entries 形式的 symbol 值（`z.enum({ K0: "k0", S: sym })`），四十分之一只通过 `z.literal(sym)` 声明这一个 symbol，与 #51 的额外未声明 symbol 并存，因此 record 自有 symbol 探测的提升 `Set` 形态（`emitOwnSymbolProbe` 中把每个自有 symbol 与已知键 `Set` 比较、而非检查长度的分支）及其在 `"ignore"` 下的缺席都进入差分检查，与 object 自 #33 起的情况一致（那里十分之一的 shape 声明 symbol 键）。输入把已声明的 symbol 写成可枚举数据属性，从不写成不可枚举的：输入定义为不可枚举的已声明键在干净路径上按原样返回（#48，smoke 第 16 组固定），且 `REPRO` dump 现在会打印输入的 symbol 键条目，此前 `JSON.stringify` 会丢掉它们。默认规模下成功 case 的共享率为 81.7%（默认）/ 82.4%（`"ignore"`），旧生成器下为 81.4% / 81.9%。随机流的偏移还在每一遍中暴露出一个 #71 的 case（seed 108、case 55：成员各带两个 async 子节点的 tuple 的 set，stock 按结算顺序加入成员，而 tuple 骨架的就地 await 让带两个 async 子节点的成员比只带一个的晚一轮结算），与 symbol 无关，在同一个 PR 中修复。
@@ -837,7 +868,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
   稀疏数组且丢 null（确定性复现：`z.tuple([z.string()], z.boolean().nullable().refine(async …))
   .safeParseAsync(["a", null, null])` → ownKeys "0,2,length"，slot 1 变 hole）；
   骨架输出稠密数组（更正确），差分生成器规避该组合；详见 upstream-issue-draft.md §Bonus。
-- 失败诊断钩子：`REPRO=seed:case node --import tsx tests/differential-z4.test.ts`
+- 失败诊断钩子：`REPRO=seed:case pnpm --filter zod-cow-v4 exec tsx tests/differential-z4.test.ts`
   打印 schema desc、input、CoW 骨架源码：先是顶层骨架，随后按构建顺序列出树中构建的每个嵌套容器骨架
   （各自是一次独立的 `Function` 构建，以提升常量的形式进入父骨架），每个带 `// ── nested skeleton #n ──` 标题。
   它们由 `CodeCtx.sources` 收集：`subFn` 把父上下文的列表交给子上下文，`buildFn` 追加每个构建出的函数体，
@@ -845,7 +876,7 @@ gc 后驻留 0，CoW 本身零拷贝。v1 的 12.1MB 更低，但速度慢一倍
 
 ## 9. 版本锚点与风险
 
-依赖的官方内部面（均经 `zod4/v4/core` 公开 exports，但官方注释定位为 internal）：
+我们依赖的不受支持的面（均可经公开的 `zod/v4/core` permalink 子路径到达，但官方注释定位为 internal；只有两个 `ZodCompile*` 错误是公开 API）：
 
 | API | 用途 | 漂移风险 |
 |---|---|---|
@@ -871,28 +902,49 @@ async 通道把 `ZodCompileAsyncError` 用作官方自维护的 async 探测器�
   而不是仍在维护的两个选项。
 - zc-z4（官方 codegen + CoW 修饰）是 zod4 时代的正解：语义正确性外包给官方
   编译器与 runtime，自研面缩到"纯度分析 + 6 个容器骨架 + async 通道"，跟随上游
-  优化自动受益；速度与官方 JIT 持平，脏场景反超 1.5~1.9x、tuple 3.1x、async 2.5x
-  （对 stock 2.3~4.6x），GC 驻留归零。
+  优化自动受益；速度在 object 上与公开的编译 API 在每种脏比例下持平，strip 输入（S8 1.22x）与容器（record/map/set 1.39x、tuple 2.62x）领先，async 对 stock 1.55x
+  （同步批量场景对 stock 2.6~8.0x；run 33948313612，见 §7），GC 驻留归零。
 - 两条路线共享同一个 CoW 心智模型：引用比较即脏信号，path-copying 即拷贝策略。
   差别只在"校验与变换这一层由谁实现"。
 
-## 11. Source layout (issue #5)
+## 11. 源码布局（issue #5）
 
-The engine lives in `src/cow4/` as a set of modules cut along the seams described above; every function kept its body and comments when it moved, so the sections of this document still map one-to-one onto the code.
+引擎位于 `packages/zod-cow-v4/src/cow4/`，是一组沿上文描述的接缝切分的模块；每个函数在移动时都保留了函数体与注释，所以本文的各节仍与代码一一对应。
 
-| Module | Section of this doc | Holds |
+| 模块 | 本文对应节 | 内容 |
 |---|---|---|
-| `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator` |
-| `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
-| `codectx.ts` | §3 | `CodeCtx`（携带 debug dump 共享的 `sources` 列表）, `escKey`, `buildFn` |
-| `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
-| `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild`, `presenceReadable` |
-| `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `subtreeFollowsRuntime`, `subtreeHasPlainTransform` |
-| `emit.ts` | §3, §5.3 | `emitNode`, `emitBoxedContainer`, `childProduct`, `containerChildFn`, `containerChecksFn`, `subFn` |
-| `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`, `emitCoWArray` |
+| `index.ts` | §6 | 薄入口：`compileCowFn`、`compileCowDebug`；re-export `INVALID`、`Fn`、`ZC_ASYNC`、`isAsyncProduct`、`officialValidator`、`CompileOptions`、`resolveOptions` |
+| `product.ts` | §5.5 | `Fn` 产物契约、`ZC_ASYNC` 标记、`isAsyncFn`、`throwAsync` |
+| `options.ts` | §3.1 | `CompileOptions`（公开）、解析后的 `CowOptions`、`DEFAULT_OPTIONS`、`resolveOptions`（#43） |
+| `codectx.ts` | §3 | `CodeCtx`（携带解析后的选项与 debug dump 共享的 `sources` 列表）、`escKey`、`buildFn` |
+| `predicates.ts` | §9 | 从 zod 逐字拷贝：`acceptsAbsence`、`requiresPresence`、`mayOutputUndefined`、`getTupleOptStart`、`dropsWhenAbsent` |
+| `purity.ts` | §4 | `isPure`、`leafChecksArePure`、`checksAreCowSafe`、`WHEN_DEFAULTED_CHECKS`、`cowSafeContainerForChild`、`presenceReadable` |
+| `official.ts` | §6 | `officialFn`、`officialValidator`、`makeIsland`、`makeAsyncIsland`、`inspectSubtree`、`subtreeFollowsRuntime`、`subtreeHasPlainTransform` |
+| `emit.ts` | §3, §5.3 | `emitNode`、`emitBoxedContainer`、`childProduct`、`containerChildFn`、`containerChecksFn`、`subFn` |
+| `emit-object.ts`, `emit-array.ts` | §3.1, §3.2 | `emitCoWObject`、`emitCoWArray` |
 | `emit-tuple.ts` | §5.4 | `emitCoWTuple`：固定槽各段与 async 布局的启动和结算 |
 | `emit-tuple-rest.ts` | §5.4 | `emitSyncRest`、`emitAsyncRestStart`、`emitAsyncRestDecision`：两种布局的 rest 段与其后的存在性判定（#87，#88，#94），共用切片来源与对保存结果运行的 stock `handleTupleResults`；`nativeSliceFrom`、`restFromMethod`、`restFromIterator`；只被 `emit-tuple.ts` 导入，不在下面的循环之内 |
-| `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`, `emitCoWMap`, `emitCoWSet` |
+| `emit-record.ts`, `emit-map.ts`, `emit-set.ts` | §5.1, §5.2 | `emitCoWRecord`、`emitCoWMap`、`emitCoWSet` |
 | `emit-union.ts` | §4 陷阱四 | `emitCoWUnion`（#58） |
 
-`emit.ts` and the six `emit-*.ts` modules import each other: `emitBoxedContainer` dispatches to the skeletons, and the skeletons recurse into child containers through `containerChildFn` / `childProduct`. The cycle is safe because every binding involved is a hoisted function declaration and none of these modules executes anything at load time. Do not add top-level code that calls across the cycle.
+`emit.ts` 与七个 `emit-*.ts` 模块互相导入：`emitBoxedContainer` 分派到各骨架，骨架经 `containerChildFn` / `childProduct` 递归进子容器。这个循环是安全的，因为涉及的每个绑定都是提升的函数声明，且这些模块在加载时都不执行任何东西。不要添加跨越这个循环调用的顶层代码。
+
+## 附录 A. zod3 与 zod4 的结构差异（探测所得）
+
+这张表是为已移除的自研 zod4 前端（v0.2）写的，在 issue #7 中从 README 移到这里。它描述的是 stock zod3 与 zod4 的差异，所以仍然约束当前的线；每一行都由 `src/probe-z4.ts` 锚定。
+
+| 维度 | zod3 | zod4 |
+|---|---|---|
+| checks 位置 | 包装类型（`ZodString` 上的 checks 数组） | 扁平的 `def.checks`，且 `z.email()/z.iso.*()/z.int()` 把格式 check 直接挂在 def 自身上（`def.check`） |
+| check 实例 | `c.kind` + `c.value` | `check` 种类命名不同（`min_length/max_length/greater_than/string_format/number_format/overwrite/custom`…），可能是实例也可能是裸 def，需要规范化 |
+| `.int()` | `ZodNumber` 的 check kind `"int"` | `number_format "safeint"`（isInteger + 2^53 范围，越界报 too_big） |
+| object 模式 | `def.unknownKeys` 标志 | strict = `catchall: never`，loose = `catchall: unknown` |
+| object 输出重建 | `alwaysSet` 规则 | 由 `optin`/`optout` 驱动：缺席的可选键不物化，在场的 undefined 保留，缺席的必需键报 `nonoptional` |
+| `.default()` | 默认值必须通过内层校验 | 短路（默认值不校验）；且 `handleDefaultResult` 在内层产出 undefined 时补上默认值 |
+| `.optional()` | undefined 直接透传 | 内层 `optin === "defaulted"` 时把 undefined 交给内层（于是 default 触发） |
+| `.catch()` | 吞异常 | 不吞异常（只有校验失败才回退到 catch 值） |
+| `.transform()` | `ZodEffects` | `pipe(in, transform)`；`fn(value, payload{issues, addIssue})` |
+| refine | `ZodEffects.refinement` | `def.checks` 里的 `custom` check；每个 check 实例都有惰性编译的 `_zod.check(payload)`，作为我们没有手写的种类的通用通道 |
+| string 格式 | 正则逐字拷贝进 `regexes.ts` | `string_format` check 自带 pattern 正则（email/uuid/datetime/ipv4… 直接内联） |
+| record 键 | 仅 string | 支持 number 键（回退到数字字符串重试）；enum/literal 键声明驱动（全部声明键必需 + 多余键报 unrecognized_keys） |
+| NaN | `invalid_type received nan` | 与 zod3 相同（z.number() 拒绝 NaN） |

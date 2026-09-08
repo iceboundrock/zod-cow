@@ -273,7 +273,7 @@ packages/zod-cow-v3/        private zod-cow-v3; exports the TypeScript source, n
   src/regexes.ts            verbatim copy of zod 3.24.1's internal format regexes
   src/probe.ts              stock zod3 behavior probes
   tests/harness.ts          the other copy of the harness (+ harness.test.ts, its self-test)
-  tests/unit.test.ts        zod3 unit tests (61, --no-codegen for the closure fallback)
+  tests/unit.test.ts        zod3 unit tests (62, --no-codegen for the closure fallback)
   tests/differential.test.ts   zod3 differential fuzzer (20 000 cases, issue lists compared, --no-codegen for the closure fallback)
 packages/bench-v4/          bench.ts (S1 pure / S2 dirty / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 async, with ArkType as a column), harness.ts (measurement), gates.ts (equivalence gates) and demo.ts, against the built zod-cow-v4
 packages/bench-v3/          bench.ts (S1 clean / S2 default / S3 dirty sweep / S4 validate / S5 containers / S6 tuple / S7 transforms / S8 strip, ArkType as a column), calibration.ts (single-record hot loops, scaling sweeps), failures.ts (S9, issue parity first), schemas.ts, harness.ts, gates.ts and the zod3 demo.ts

@@ -383,7 +383,11 @@ export function genArray(spec: ArraySpec): Validator {
       `if (data.length > ${spec.max.value}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${spec.max.value}, type: "array", inclusive: true, exact: false, message: ${m} });`,
     );
   }
-  // The first forced change: a fresh array of the input's length takes the clean prefix
+  // The first forced change: a fresh array of the input's length takes the clean prefix. The hole
+  // probe (`i in data`) decides only whether the input can be returned by reference, which a failed
+  // parse never is, so it runs while no element has failed: stock validates its spread and never
+  // performs a `has` on the input, and a Proxy trap there would run user code stock never runs
+  // (third review of #115).
   const copy =
     "dirty = true; out = new Array(data.length); for (let j = 0; j < i; j++) out[j] = data[j];";
   const slot = slotBlock(
@@ -392,7 +396,7 @@ export function genArray(spec: ArraySpec): Validator {
     spec,
     "i",
     (holeTest) =>
-      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
+      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined && !anyFailed && !(i in data)) { ${copy} out[i] = inVal; }` : ""}`,
     `if (outVal === FAILED) anyFailed = true;
       else if (dirty) out[i] = outVal;
       else if (!anyFailed && (outVal !== inVal || (inVal === undefined && !(i in data)))) { ${copy} out[i] = outVal; }`,
@@ -459,7 +463,9 @@ export function genTuple(spec: TupleSpec): Validator {
   const fill = spec.items.map((_, i) => `v${i} = cap[${i}];`).join(" ");
   const slots = spec.items.map((item, i) => {
     const V = `v${i}`;
-    const hole = `if (!dirty && inVal === undefined && !(${i} in data)) dirty = true;`;
+    // The probe runs while no slot has failed, as in the array skeleton: stock never performs a
+    // `has` on the input, and a failed parse never returns it by reference
+    const hole = `if (!dirty && inVal === undefined && !anyFailed && !(${i} in data)) dirty = true;`;
     return `if (k === ${i}) break slots; { const inVal = ${V}; ${slotBlock(
       g,
       item,

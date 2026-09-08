@@ -1262,6 +1262,78 @@ test("array / tuple: a hole is materialized as an own undefined slot like stock"
   assert.equal(compile(T).parse(tdense), tdense);
 });
 
+test("array / tuple: no hole probe after an aborted child: a Proxy `has` trap never runs once a slot has failed, as stock validates its captured spread (review of #115)", () => {
+  // Stock spreads the input (`[...ctx.data]`: the length and the index reads only) and validates
+  // the copy, so it never performs a `has` on the input. The skeletons ask `i in data` only to
+  // decide whether the input can be returned by reference, which a failed parse never does, so
+  // the probe stays out of every path after an aborted child: a trap there would run user code
+  // stock never runs (rewriting a later element turns one stock issue into two, a throw escapes).
+  const trapped = (target: unknown[], onHas: (t: any, k: string | symbol) => void) => {
+    let hasCalls = 0;
+    const input = new Proxy(target, {
+      has(t, k) {
+        hasCalls++;
+        onHas(t, k);
+        return Reflect.has(t, k);
+      },
+    });
+    return { input, calls: () => hasCalls };
+  };
+  const codes = (r: any) => r.error.issues.map((i: any) => `${i.code}@${JSON.stringify(i.path)}`);
+  const sameFailure = (S: z.ZodTypeAny, mk: () => { input: unknown; calls: () => number }) => {
+    const s = mk();
+    const c = mk();
+    const sr = S.safeParse(s.input);
+    const cr = compile(S).safeParse(c.input);
+    assert.equal(sr.success, false);
+    assert.equal(cr.success, false);
+    assert.deepEqual(codes(cr), codes(sr));
+    assert.equal(s.calls(), 0, "stock never probes the input");
+    assert.equal(c.calls(), 0, "the skeleton must not probe after an aborted child");
+  };
+  // A sparse array: the entries given, a hole at every other index
+  const sparse = (length: number, entries: Record<number, unknown>) => {
+    const a: unknown[] = new Array(length);
+    for (const i in entries) a[Number(i)] = entries[i];
+    return a;
+  };
+  const rewrite = (t: any, k: string | symbol) => {
+    if (k === "1") t[2] = 2; // the reviewer's row: the trap rewrites the element after the hole
+  };
+  const throwing = (_t: any, k: string | symbol) => {
+    if (k === "1") throw new Error("has trap ran");
+  };
+  // Array: a hole after the failed slot, under the inline-predicate leaf of the generated
+  // skeleton and under a leaf that goes through its closure
+  for (const leaf of [
+    z.string().optional(),
+    z
+      .string()
+      .refine(() => true)
+      .optional(),
+  ]) {
+    const A = z.array(leaf);
+    sameFailure(A, () => trapped(sparse(3, { 0: 1, 2: "ok" }), rewrite));
+    sameFailure(A, () => trapped(sparse(3, { 0: 1, 2: "ok" }), throwing));
+    // The failure after the hole's slot is not affected: the probe before it is the clean-path one
+    assert.deepEqual(
+      codes(compile(A).safeParse(sparse(2, { 1: 1 }))),
+      codes(A.safeParse(sparse(2, { 1: 1 }))),
+    );
+  }
+  // Tuple: both slot kinds, a hole in the slot after the failed one, in both skeletons
+  for (const tail of [
+    z.string().optional(),
+    z
+      .string()
+      .refine(() => true)
+      .optional(),
+  ]) {
+    const T = z.tuple([z.string(), tail]);
+    sameFailure(T, () => trapped(sparse(2, { 0: 1 }), throwing));
+    sameFailure(T, () => trapped(sparse(2, { 0: 1 }), rewrite));
+  }
+});
 test("array / tuple copy path: the copy is assembled from the element results, a getter at or after the first change is read once like stock", () => {
   // An array whose every index is an accessor counting its reads; the value at `dirtyAt` is
   // undefined so the default fires there

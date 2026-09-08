@@ -1083,8 +1083,10 @@ function makeTuple(def: any): Validator {
       }
       vals[i] = outVal;
       if (outVal !== inVal) dirty = true;
-      // A hole is materialized as an own slot, as stock's spread of the input does
-      else if (!dirty && inVal === undefined && !(i in data)) dirty = true;
+      // A hole is materialized as an own slot, as stock's spread of the input does; the probe runs
+      // while no slot has failed, since stock never performs a `has` on the input and a failed parse
+      // never returns it by reference (third review of #115)
+      else if (!dirty && inVal === undefined && !anyFailed && !(i in data)) dirty = true;
     }
     if (anyFailed) return FAILED;
     // The clean path returns the input when every captured slot came back unchanged and the length

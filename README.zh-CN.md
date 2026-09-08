@@ -34,7 +34,7 @@ Zod 兼容的 CoW（Copy-on-Write）编译层原型，源自对 [Numeric fork](h
 pnpm install
 pnpm run build       # 构建 zod-cow-v4（ESM + 类型声明，输出到 packages/zod-cow-v4/dist）
 pnpm run test:v4     # zod4 线：版本金丝 + 冒烟测试 + 20000 case 差分模糊（对比 stock zod4）
-pnpm run test:v3     # zod3 线：61 个单元测试 + 20000 case 差分模糊（对比 stock zod3，含有序 issue 列表），生成骨架与闭包骨架各跑一遍
+pnpm run test:v3     # zod3 线：62 个单元测试 + 20000 case 差分模糊（对比 stock zod3，含有序 issue 列表），生成骨架与闭包骨架各跑一遍
 pnpm run smoke:pack  # 打包 zod-cow-v4，并在临时消费者项目中验证 tarball
 pnpm run bench:v4    # zod4 基准，对构建产物测量，50 万条记录（需 node --expose-gc，脚本已配置）
 pnpm run bench:v3    # zod3 基准：S1～S9、单记录校准与规模扫描，ArkType 为一列
@@ -219,7 +219,7 @@ ArkType 列只在 arktype 2.2.3 能用常规公开 API 表达同一工作负载�
 - 冒烟测试（`packages/zod-cow-v4/tests/smoke-z4*.test.ts`）：原引用、strip、strict、default、transform、嵌套共享、数组元素、optional、union、降级链、`ownSymbolKeys` 选项（两种取值在 strip、strict、loose 模式与 record 三路径下、嵌套传播、已记录的分歧、`TypeError`）、record 三路径、map / set 与 size checks、tuple 截断 / 填充 / rest / refine、object 上的 `z.property` / `z.properties` check 在各位置保留骨架且 getter 读取次数、原型读取、各模式下未声明键的视图、调度与中止规则均与 stock 一致（#85）、async 贯穿全部容器
 （async 容器级 refine 在每种容器、被包装的容器与 union 上共享干净输入，并按 stock 的调度启动谓词，#13）、`lazy(async)`、union 的 async 分支。
 - 版本金丝（`packages/zod-cow-v4/tests/canary-z4.test.ts`）：断言编译器所假设的 stock zod4 行为（default 短路、catch 不吞异常、optional 把 undefined 交给带 default 的内层……）。
-- zod3 线有 61 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`）：随机的 object / array / tuple / record / map / set / union / discriminatedUnion schema、接受容器的透传叶子 `unknown`、union 分支可以是叶子、容器或带包装的 schema（于是会出现 `readonly` 之下的 union，以及 union 分支上的 `readonly` / `catch` / `transform`），配 optional / nullable / default / catch / readonly / refine / transform 包装、创建参数 error map 以及 string 的 `length` / `includes` / `startsWith` 检查、稀疏数组与 tuple、与后面条目冲突的 record / map 键 transform 和 set 成员 transform、record 输入上自有的 `__proto__` 数据属性，对比 stock zod3 的成败一致性、`deepStrictEqual` 输出（Map 与 Set 的内容按迭代顺序比较）、零输入改动（structuredClone 快照）、输入与输出的冻结状态，并在每个失败 case 上比较有序的 issue 列表（每条 issue 按 stock 的顺序，带上它携带的每个属性：code、path、message、`fatal`、检查参数、union 的嵌套错误）。它跑两遍：生成骨架与闭包回退（`--no-codegen`）。成功 case 的顶层引用共享率在这个生成器下约 85%（加入稀疏、冲突和 `__proto__` 用例之前为 87%，这些用例按构造必然触发拷贝；在更早、较小的生成器下为 92.1%，与本轮工作之前相同）。
+- zod3 线有 62 个单元测试和自己的 20 000 case 差分模糊（`packages/zod-cow-v3/tests/differential.test.ts`）：随机的 object / array / tuple / record / map / set / union / discriminatedUnion schema、接受容器的透传叶子 `unknown`、union 分支可以是叶子、容器或带包装的 schema（于是会出现 `readonly` 之下的 union，以及 union 分支上的 `readonly` / `catch` / `transform`），配 optional / nullable / default / catch / readonly / refine / transform 包装、创建参数 error map 以及 string 的 `length` / `includes` / `startsWith` 检查、稀疏数组与 tuple、与后面条目冲突的 record / map 键 transform 和 set 成员 transform、record 输入上自有的 `__proto__` 数据属性，对比 stock zod3 的成败一致性、`deepStrictEqual` 输出（Map 与 Set 的内容按迭代顺序比较）、零输入改动（structuredClone 快照）、输入与输出的冻结状态，并在每个失败 case 上比较有序的 issue 列表（每条 issue 按 stock 的顺序，带上它携带的每个属性：code、path、message、`fatal`、检查参数、union 的嵌套错误）。它跑两遍：生成骨架与闭包回退（`--no-codegen`）。成功 case 的顶层引用共享率在这个生成器下约 85%（加入稀疏、冲突和 `__proto__` 用例之前为 87%，这些用例按构造必然触发拷贝；在更早、较小的生成器下为 92.1%，与本轮工作之前相同）。
 - 架构文档里的每一个纯度陷阱都是模糊测试抓出来的，不是读代码发现的。纯度分析的完备性只能靠 fuzz 证明，所以任何纯度规则或容器骨架的改动都必须跑差分套件并报告引用共享率。
 
 ## 已知限制（原型范围）

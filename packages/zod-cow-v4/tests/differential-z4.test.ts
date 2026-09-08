@@ -1708,9 +1708,11 @@ if (ignore.refShared < base.refShared) {
   };
 
   // A value for a pass-through slot: some are objects/arrays/Map/Set/Date that carry frozenness, some
-  // are primitives that do not, so the oracle sees both a frozen leaf and a plain one.
+  // are primitives that do not, so the oracle sees both a frozen leaf and a plain one. `undefined` and
+  // `null` take the `optional` / `nullable` shortcut and fire the `default` (whose value is then what
+  // `readonly` freezes), so those pass-through branches are drawn too (review of #111).
   const roValue = (r: RNG): unknown => {
-    switch (r.int(7)) {
+    switch (r.int(9)) {
       case 0:
         return { x: 1, y: { z: 2 } };
       case 1:
@@ -1723,6 +1725,10 @@ if (ignore.refShared < base.refShared) {
         return new Date(0);
       case 5:
         return "leaf";
+      case 6:
+        return undefined;
+      case 7:
+        return null;
       default:
         return 7;
     }

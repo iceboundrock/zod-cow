@@ -22,6 +22,10 @@ name: zod drift check
 #            time, the step outcomes and the differential reference-sharing rates to its job
 #            summary. A release inside the range fails the run; the informational target cannot
 #            (continue-on-error), it only shows the drift the next widening release would meet.
+#            That target sits above the shipped peer range by construction, so its packed-tarball
+#            smoke installs the consumer with --legacy-peer-deps (PACK_SMOKE_OUTSIDE_PEER_RANGE=1)
+#            instead of failing on npm's strict peer check before any smoke step runs; the in-range
+#            rows keep the strict check the push/PR lanes run.
 #
 # Release age: a minimumReleaseAge policy in pnpm-workspace.yaml (the five-day gate proposed in
 # #14) would refuse a zod patch for its first five days, and pnpm's pre-script check ignores a
@@ -161,9 +165,14 @@ jobs:
         shell: bash
         run: pnpm --filter zod-cow-v4 run test 2>&1 | tee test.txt
 
+      # The informational target is outside the shipped peer range, so its consumer install would
+      # fail npm's strict peer check before the smoke proved anything; the opt-in installs it with
+      # --legacy-peer-deps and the smoke's own line says so. In-range rows run the strict check.
       - name: Packed tarball smoke (zod-cow-v4)
         id: pack
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          PACK_SMOKE_OUTSIDE_PEER_RANGE: ${{ matrix.role == 'next' && '1' || '' }}
         run: pnpm --filter zod-cow-v4 run smoke:pack
 
       - name: Write job summary
@@ -181,8 +190,10 @@ jobs:
         run: |
           if [ "${ROLE}" = "next" ]; then
             what="informational target just above the peer range's upper bound (cannot fail the run)"
+            pack="packed-tarball smoke (consumer installed with --legacy-peer-deps: the shipped range excludes this release)"
           else
             what="inside the peer range (fails the run when red)"
+            pack="packed-tarball smoke (strict peer check)"
           fi
           {
             echo "### zod ${VERSION}, ${what}"
@@ -195,7 +206,7 @@ jobs:
             echo "| typecheck | ${OUTCOME_TYPECHECK} |"
             echo "| probe | ${OUTCOME_PROBE} |"
             echo "| tests (canary, drift-versions, smoke, differential) | ${OUTCOME_TEST} |"
-            echo "| packed-tarball smoke | ${OUTCOME_PACK} |"
+            echo "| ${pack} | ${OUTCOME_PACK} |"
             echo
             if [ -s test.txt ] && grep -q "top-level reference sharing" test.txt; then
               echo "Differential run and reference-sharing rate per pass:"

@@ -7,9 +7,13 @@
  *      scripts/ or the probes does.
  *   2. The shipped package.json declares engines.node ">=22.13.0" (the exact floor the CI lane pins)
  *      and an exports map with exactly "." and "./package.json".
- *   3. A temporary consumer project installs the tarball together with the zod the package was
- *      verified against (packed from this workspace's own node_modules, so no registry is needed),
- *      with npm's strict peer check on.
+ *   3. A temporary consumer project installs the tarball together with the zod this workspace has
+ *      installed (packed from its own node_modules, so no registry is needed), with npm's strict
+ *      peer check on. That zod is inside the shipped peer range on every push/PR lane; the drift
+ *      check's informational target (#30) sits above the range by construction, so with
+ *      PACK_SMOKE_OUTSIDE_PEER_RANGE=1 a zod outside the range is installed with
+ *      --legacy-peer-deps instead and the line says so, and without the opt-in it is refused here
+ *      with a clear message rather than by npm's ERESOLVE.
  *   4. `import("zod-cow-v4")` parses a schema with CoW semantics and resolves "zod-cow-v4/package.json";
  *      a deep import is refused by the exports map.
  *   5. `require("zod-cow-v4")` does the same (require(esm) on the Node floor).
@@ -32,11 +36,14 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { satisfies } from "semver";
 
 const require = createRequire(import.meta.url);
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const manifest = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
 const EXPECTED_ENGINE = ">=22.13.0";
+// The drift check sets this for its informational target, a zod above the shipped peer range.
+const OUTSIDE_PEER_RANGE_OK = process.env.PACK_SMOKE_OUTSIDE_PEER_RANGE === "1";
 
 function ok(msg: string): void {
   console.log(`  ok  ${msg}`);
@@ -119,6 +126,18 @@ try {
     join(consumer, "package.json"),
     JSON.stringify({ name: "zod-cow-v4-smoke", private: true, type: "commonjs" }, null, 2),
   );
+  // Strict peers against a zod the shipped range admits. A zod outside the range can only be the
+  // drift check's informational target, whose row exists to show what the tarball does with that
+  // release: with the opt-in the consumer installs it with --legacy-peer-deps and the line names
+  // the reason, so the strict-peer refusal is never mistaken for drift.
+  const peerRange = shipped.peerDependencies.zod as string;
+  const insideRange = satisfies(zodVersion, peerRange);
+  if (!insideRange && !OUTSIDE_PEER_RANGE_OK) {
+    fail(
+      `installed zod ${zodVersion} is outside the shipped peer range ${peerRange}; the consumer install is strict on peers ` +
+        "(set PACK_SMOKE_OUTSIDE_PEER_RANGE=1 to install it with --legacy-peer-deps, as the drift check does for its informational target)",
+    );
+  }
   npm(
     [
       "install",
@@ -126,7 +145,7 @@ try {
       "--no-fund",
       "--ignore-scripts",
       "--no-package-lock",
-      "--strict-peer-deps",
+      insideRange ? "--strict-peer-deps" : "--legacy-peer-deps",
       zodTgz,
       cowTgz,
     ],
@@ -135,8 +154,15 @@ try {
   const installed = JSON.parse(
     readFileSync(join(consumer, "node_modules", "zod-cow-v4", "package.json"), "utf8"),
   );
+  const installedZod = JSON.parse(
+    readFileSync(join(consumer, "node_modules", "zod", "package.json"), "utf8"),
+  ).version as string;
+  if (installedZod !== zodVersion)
+    fail(`consumer resolved zod ${installedZod}, expected ${zodVersion}`);
   ok(
-    `consumer install: zod-cow-v4@${installed.version} + zod@${zodVersion} from tarballs, strict peer check passed`,
+    insideRange
+      ? `consumer install: zod-cow-v4@${installed.version} + zod@${zodVersion} from tarballs, strict peer check passed`
+      : `consumer install: zod-cow-v4@${installed.version} + zod@${zodVersion} from tarballs with --legacy-peer-deps (zod ${zodVersion} is outside the shipped peer range ${peerRange}; PACK_SMOKE_OUTSIDE_PEER_RANGE=1)`,
   );
 
   /* 4 + 5. runtime through both entry styles */

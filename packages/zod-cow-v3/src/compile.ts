@@ -37,6 +37,7 @@ import {
   pushInvalidType,
   pushIssue,
   safeSet,
+  stockSpread,
   isObjectType,
 } from "./internal.js";
 import { CODEGEN_AVAILABLE, genArray, genObject, genTuple } from "./codegen.js";
@@ -907,18 +908,22 @@ function makeArray(def: any): Validator {
       pushInvalidType(ctx, data, em, "array");
       return FAILED;
     }
-    // Length checks are dirty, not aborting: the elements are still parsed (same order as stock: exact, min, max)
-    if (exact !== null && data.length !== exact.value) {
+    // Length checks are dirty, not aborting: the elements are still parsed (same order as stock:
+    // exact, min, max; the exact check reads the length twice, `>` then `<`, as stock does)
+    if (exact !== null) {
       const tooBig = data.length > exact.value;
-      pushIssue(ctx, data, em, {
-        code: tooBig ? "too_big" : "too_small",
-        minimum: tooBig ? undefined : exact.value,
-        maximum: tooBig ? exact.value : undefined,
-        type: "array",
-        inclusive: true,
-        exact: true,
-        message: exact.message,
-      });
+      const tooSmall = data.length < exact.value;
+      if (tooBig || tooSmall) {
+        pushIssue(ctx, data, em, {
+          code: tooBig ? "too_big" : "too_small",
+          minimum: tooSmall ? exact.value : undefined,
+          maximum: tooBig ? exact.value : undefined,
+          type: "array",
+          inclusive: true,
+          exact: true,
+          message: exact.message,
+        });
+      }
     }
     if (min !== null && data.length < min.value) {
       pushIssue(ctx, data, em, {
@@ -941,8 +946,18 @@ function makeArray(def: any): Validator {
       });
     }
 
-    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
-    let out: any[] = dirty ? data.slice() : data;
+    // Same algorithm as the generated skeleton (`genArray` in codegen.ts): the clean path returns
+    // the input by reference, the first forced change rebuilds the clean prefix into a fresh array
+    // (the one second read of the input, documented, #65) and every later element is written from
+    // the loop's single read. An element that reads as `undefined` and comes back unchanged is a
+    // forced change too, whether the input holds an own `undefined` or a hole: stock's spread turns
+    // a hole into an own `undefined` slot, and the own-ness test that would tell them apart is a
+    // `has` stock never performs on the input (#117, the decision of #95 on the zod4 line). Stock's
+    // rebuild mode (`ctx.force`) starts from a fresh array of the input's length and writes every
+    // element. No copy runs once an element has failed: the parse returns FAILED and the prefix read
+    // would be a read stock does not make.
+    let dirty = ctx.force;
+    let out: any[] = dirty ? new Array(data.length) : data;
     let anyFailed = false;
     for (let i = 0; i < data.length; i++) {
       const inVal = data[i];
@@ -960,19 +975,13 @@ function makeArray(def: any): Validator {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
         continue;
       }
-      if (outVal !== inVal && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = data.slice(); // slice only at the first "forced" change — the other elements stay shared
-        }
+      if (dirty) {
         out[i] = outVal;
-      } else if (inVal === undefined && !anyFailed && !(i in out)) {
-        // A hole: stock spreads the input, so its output owns every index (`slice()` keeps holes)
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = undefined;
+      } else if (!anyFailed && (outVal !== inVal || inVal === undefined)) {
+        dirty = true;
+        out = new Array(data.length);
+        for (let j = 0; j < i; j++) out[j] = data[j];
+        out[i] = outVal;
       }
     }
     if (anyFailed) return FAILED;
@@ -983,12 +992,12 @@ function makeArray(def: any): Validator {
 function makeTuple(def: any): Validator {
   if (def.rest) throw new ZcNotSupportedError("ZodTuple with rest schema");
   const em: ZodErrorMap | undefined = def.errorMap;
-  const items: Validator[] = def.items.map(go);
-  const n = items.length;
+  const slots: Validator[] = def.items.map(go);
+  const n = slots.length;
   const eager = (def.items as z.ZodTypeAny[]).some((it) => subtreeHasEffect(it));
   if (CODEGEN_AVAILABLE) {
     return genTuple({
-      items: (def.items as z.ZodTypeAny[]).map((it, i) => ({ schema: it, validator: items[i]! })),
+      items: (def.items as z.ZodTypeAny[]).map((it, i) => ({ schema: it, validator: slots[i]! })),
       eager,
       errorMap: em,
       regexOf: checkRegex,
@@ -1010,10 +1019,8 @@ function makeTuple(def: any): Validator {
       });
       return FAILED;
     }
-    let out: any[] = data;
-    let dirty = ctx.force; // stock's rebuild mode: a copy from the start
+    // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
     if (data.length > n) {
-      // Dirty, not aborting: the declared slots are still parsed and the output is truncated to them
       pushIssue(ctx, data, em, {
         code: "too_big",
         maximum: n,
@@ -1021,45 +1028,33 @@ function makeTuple(def: any): Validator {
         exact: false,
         type: "array",
       });
-      out = data.slice(0, n);
-      dirty = true;
-    } else if (dirty) {
-      out = data.slice();
     }
+    // Same algorithm as the generated skeleton (`genTuple` in codegen.ts): the capture is stock's
+    // own `[...ctx.data]`, made where stock makes it, and the fresh array it returns is the output;
+    // each captured slot is validated from it and its result written back, the slots past the
+    // captured count never run, and a too-long input is truncated to the declared slots after its
+    // excess elements were read. The skeleton never returns the input by reference (#65).
+    const items = stockSpread(data);
+    let k = items.length;
+    if (k > n) items.length = k = n;
     let anyFailed = false;
-    for (let i = 0; i < n; i++) {
-      const inVal = data[i];
+    for (let i = 0; i < k; i++) {
+      const inVal = items[i];
       let outVal: any;
       if (eager) {
         ctx.path.push(i);
-        outVal = items[i]!(inVal, ctx);
+        outVal = slots[i]!(inVal, ctx);
         ctx.path.pop();
       } else {
         const before = ctx.issues.length;
-        outVal = items[i]!(inVal, ctx);
+        outVal = slots[i]!(inVal, ctx);
         if (ctx.issues.length !== before) prefixIssues(ctx, before, i);
       }
-      if (outVal === FAILED) {
-        anyFailed = true;
-        continue;
-      }
-      if (outVal !== inVal && !anyFailed) {
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = outVal;
-      } else if (inVal === undefined && !anyFailed && !(i in out)) {
-        // A hole is materialized as an own slot, as stock's spread of the input does
-        if (!dirty) {
-          dirty = true;
-          out = data.slice();
-        }
-        out[i] = undefined;
-      }
+      if (outVal === FAILED) anyFailed = true;
+      else items[i] = outVal;
     }
     if (anyFailed) return FAILED;
-    return out;
+    return items;
   };
 }
 
@@ -1081,7 +1076,7 @@ function makeRecord(def: any): Validator {
     // path returns the input by reference; the first forced change rebuilds the clean prefix in
     // order and every later pair is written after it, so a transformed key that collides with a
     // later entry is overwritten by that entry as in stock. Stock's rebuild mode starts out dirty
-    // and writes every pair.
+    // and writes every pair. No own-symbol probe runs (see `genObject` in codegen.ts, #65).
     let dirty = ctx.force;
     let out: any = dirty ? {} : data;
     let anyFailed = false;
@@ -1752,7 +1747,8 @@ export function isStaticPure(schema: z.ZodTypeAny, seen = new Set<z.ZodTypeAny>(
     case "ZodArray":
       return isStaticPure(def.type, seen);
     case "ZodTuple":
-      return def.items.every((it: z.ZodTypeAny) => isStaticPure(it, seen));
+      // The tuple skeleton's output is the fresh array of stock's own spread, never the input (#65)
+      return false;
     case "ZodRecord":
       return isStaticPure(def.keyType, seen) && isStaticPure(def.valueType, seen);
     case "ZodMap":

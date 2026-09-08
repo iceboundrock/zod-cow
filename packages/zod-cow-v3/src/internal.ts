@@ -223,3 +223,19 @@ export function safeSet(obj: Record<string, unknown>, key: string, value: unknow
     obj[key] = value;
   }
 }
+
+/**
+ * Stock's capture of an array input: `[...ctx.data]` in `ZodArray._parse` and `ZodTuple._parse`.
+ * The tuple skeleton evaluates the same expression at the same point (after the length checks and
+ * the `too_big` issue, before any slot runs), so every read the capture makes on the input
+ * (`Symbol.iterator`, `next` off the iterator, the live length and the element before each step,
+ * the excess elements of a too-long input), every piece of user code it runs, every intrinsic it
+ * consults and every engine error it throws are stock's by identity, on any engine. The operand
+ * is spelled `ctx.data` as stock spells it, so the engine's "is not iterable" message names the
+ * same expression. The fresh array is the skeleton's output: each slot's result is written into
+ * it, as stock's `mergeArray` collects the results into a fresh array (#65).
+ */
+export function stockSpread(data: unknown[]): unknown[] {
+  const ctx = { data };
+  return [...ctx.data];
+}

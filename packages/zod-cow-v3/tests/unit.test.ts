@@ -2501,9 +2501,7 @@ test("tuple and array: randomized accessor and Proxy mutations during the captur
     // An array returned by reference is not read again: its accessors would run their effects a
     // second time, and the log is compared before anything reads the output
     if (r.data === input) return "ok byref";
-    const vals: unknown[] = [];
-    for (let i = 0; i < r.data.length; i++) vals.push(r.data[i]);
-    return `ok ${JSON.stringify(vals)} len=${r.data.length}`;
+    return snapshotByIndex(r.data);
   };
   for (const kind of ["tuple", "array"] as const) {
     for (let caseNo = 0; caseNo < 400; caseNo++) {

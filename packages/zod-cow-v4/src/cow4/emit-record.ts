@@ -1,6 +1,12 @@
 /** Record skeleton: key-name/value double reference comparison + ordered rebuild of the clean prefix at the first change; the async value loop follows stock's settlement order. */
 import { regexes, util, ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, emitDeclaredKeyWalk, emitOwnSymbolProbe, escKey } from "./codectx.js";
+import {
+  type CodeCtx,
+  emitDeclaredKeyWalk,
+  emitOwnSymbolProbe,
+  emitSettleAll,
+  escKey,
+} from "./codectx.js";
 import { type ChildProduct, childProduct, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
 import { isAsyncProduct, type Node } from "./product.js";
@@ -120,9 +126,11 @@ export function emitCoWRecord(
         ctx.write(`const ${resVar} = ${p.fnVar}(${p.inVar});`);
         return { p, resVar, settledVar: p.product.kind === "async" ? ctx.var() : null };
       });
-      const asyncOnes = started.filter((s) => s.settledVar !== null);
-      ctx.write(
-        `const [${asyncOnes.map((s) => s.settledVar).join(", ")}] = await Promise.all([${asyncOnes.map((s) => s.resVar).join(", ")}]);`,
+      emitSettleAll(
+        ctx,
+        started
+          .filter((s) => s.settledVar !== null)
+          .map((s) => ({ settled: s.settledVar!, started: s.resVar })),
       );
       for (const s of started) emitKeyResult(s.p, s.settledVar ?? s.resVar);
     }
@@ -282,15 +290,14 @@ export function emitCoWRecord(
     const keyFast = ctx.addConst(keyFastFn);
     const keyAsync = isAsyncProduct(keyFastFn);
     if (keyAsync) ctx.async = true;
-    const kAwait = keyAsync ? "await " : "";
     const numeric = ctx.addConst(regexes.number);
     ctx.write(`for (const k of Reflect.ownKeys(${accessor})) {`);
     ctx.indented(() => {
       skipProto();
       skipNonEnumerable();
-      ctx.write(`let outKey = ${kAwait}${keyFast}(k);`);
+      ctx.write(`let outKey = ${ctx.call(`${keyFast}(k)`, keyAsync)};`);
       ctx.write(
-        `if (outKey === INVALID && typeof k === "string" && ${numeric}.test(k)) outKey = ${kAwait}${keyFast}(Number(k));`,
+        `if (outKey === INVALID && typeof k === "string" && ${numeric}.test(k)) outKey = ${ctx.call(`${keyFast}(Number(k))`, keyAsync)};`,
       );
       // A retried key comes back as a number that stock writes under `String(outKey)`, the very key
       // it read: the same property, so it is clean (a number the schema changed stays dirty)
@@ -346,7 +353,8 @@ function emitAsyncRecordTail(
   log: string,
   proms: string,
 ): void {
-  ctx.write(`if (${proms}.length) await Promise.all(${proms});`);
+  // No value suspended: the skeleton completes synchronously, like stock's loop (#105)
+  ctx.write(`if (${proms}.length) yield Promise.all(${proms});`);
   ctx.write(`for (let j = 0, n = 0; j < ${log}.length; j += 4, n++) {`);
   ctx.indented(() => {
     ctx.write(`if (${log}[j + 3] === INVALID) return INVALID;`);

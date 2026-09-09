@@ -2107,7 +2107,7 @@ head("the sync tuple layout slices the rest before running any rest element, lik
       /x\d+ = true;\s*try \{\s*for \(let j = 0; j < (x\d+)\.length; j\+\+\) \{\s*(x\d+)\.push\(c\d+\(\1\[j\]\)\);\s*\}\s*\} catch \(err\) \{\s*c\d+\(x\d+\);\s*throw err;/.test(
         asyncCode,
       ) &&
-      /if \(!(x\d+)\) \{\s*(x\d+) = \[\];\s*const rest = x\d+;\s*for \(const e of rest\) \{\s*\2\.push\(e\);\s*x\d+\.push\(c\d+\(e\)\);\s*\}\s*\}\s*const \[x\d+\] = await Promise\.all\(\[x\d+\]\);\s*const x\d+ = x\d+;\s*const (x\d+) = input\.length;/.test(
+      /if \(!(x\d+)\) \{\s*(x\d+) = \[\];\s*const rest = x\d+;\s*for \(const e of rest\) \{\s*\2\.push\(e\);\s*x\d+\.push\(c\d+\(e\)\);\s*\}\s*\}\s*let (x\d+) = (x\d+);\s*if \(\4 instanceof Promise\) \[\3\] = yield Promise\.all\(\[\4\]\);\s*const x\d+ = x\d+;\s*const (x\d+) = input\.length;/.test(
         asyncCode,
       ) &&
       (asyncCode.match(/for \(const e of rest\) \{/g) ?? []).length === 1 &&

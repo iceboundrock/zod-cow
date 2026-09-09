@@ -94,7 +94,7 @@ function emitOfficialUnion(ctx: CodeCtx, schema: Node, accessor: string): string
   const isAsync = isAsyncProduct(fnC);
   if (isAsync) ctx.async = true;
   const out = ctx.var();
-  ctx.write(`const ${out} = ${isAsync ? "await " : ""}${fn}(${accessor});`);
+  ctx.write(`const ${out} = ${ctx.call(`${fn}(${accessor})`, isAsync)};`);
   ctx.write(`if (${out} === INVALID) return INVALID;`);
   return out;
 }

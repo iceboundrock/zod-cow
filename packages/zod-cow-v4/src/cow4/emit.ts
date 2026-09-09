@@ -25,6 +25,7 @@ import { DEFAULT_OPTIONS } from "./options.js";
 import { aborted } from "./predicates.js";
 import {
   type Fn,
+  hasPromise,
   isAsyncFn,
   isAsyncProduct,
   type Node,
@@ -102,9 +103,17 @@ export function childProduct(child: Node, seen: Set<Node>, parent: CodeCtx): Chi
  * Settles the results of the predicates an async checks subroutine started, the way stock's
  * `runChecks` chain does: a Promise is awaited, any other result is read as is, every started result
  * is settled even after a `false` (stock awaits the whole chain, and a promise left unattached could
- * reject unhandled), and a rejection throws at its position in check order.
+ * reject unhandled), and a rejection throws at its position in check order. With no Promise among the
+ * results the verdict is answered synchronously, as `runChecks` chains nothing then (#105), so the
+ * subroutine's await site goes on without suspending.
  */
-async function settleChecks(results: unknown[]): Promise<boolean> {
+function settleChecks(results: unknown[]): boolean | Promise<boolean> {
+  if (hasPromise(results)) return settleChecksAsync(results);
+  for (const r of results) if (!r) return false;
+  return true;
+}
+
+async function settleChecksAsync(results: unknown[]): Promise<boolean> {
   let ok = true;
   for (const r of results) {
     let v = r;
@@ -192,7 +201,7 @@ export function containerChecksFn(schema: Node): ChecksProduct | null {
   const fail = (): string =>
     started.length === 0
       ? "return INVALID;"
-      : `{ await ${settleC}([${started.join(", ")}]); return INVALID; }`;
+      : `{ ${ctx.awaitExpr(`${settleC}([${started.join(", ")}])`)}; return INVALID; }`;
   for (const check of checks) {
     const d = defOf(check);
     if (d.check === "custom" && d.fn) {
@@ -271,7 +280,7 @@ export function containerChecksFn(schema: Node): ChecksProduct | null {
     return null; // inexpressible check -- the caller is responsible for having blocked it with checksAreCowSafe
   }
   if (started.length > 0) {
-    ctx.write(`if (!(await ${settleC}([${started.join(", ")}]))) return INVALID;`);
+    ctx.write(`if (!${ctx.awaitExpr(`${settleC}([${started.join(", ")}])`)}) return INVALID;`);
   }
   ctx.write("return true;");
   return { fn: buildFn(ctx), held };
@@ -301,13 +310,12 @@ export function containerChecksCall(ctx: CodeCtx, schema: Node): ChecksCall | nu
   const isAsync = isAsyncProduct(product.fn);
   if (isAsync) ctx.async = true;
   const name = ctx.addConst(product.fn);
-  const awaitKw = isAsync ? "await " : "";
   const { held } = product;
   return {
     keys: held,
     expr: (target, heldOf) => {
       const args = held.map((key) => heldOf?.(key) ?? `${target}[${escKey(key)}]`);
-      return `${awaitKw}${name}(${[target, ...args].join(", ")})`;
+      return ctx.call(`${name}(${[target, ...args].join(", ")})`, isAsync);
     },
   };
 }
@@ -431,7 +439,6 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
   const f = ctx.addConst(fn);
   const isAsync = isAsyncProduct(fn);
   if (isAsync) ctx.async = true;
-  const awaitKw = isAsync ? "await " : "";
   if (defaultedInner) {
     // Stock's defaulted branch of generateOptionalCheck: the inner runs on `undefined`, a rejection
     // answers `undefined` (the layer's skip value) and the checks of this layer and above run on it
@@ -439,7 +446,7 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
     ctx.indented(() => {
       const branch = ctx.var();
       const value = ctx.var();
-      ctx.write(`const ${branch} = ${awaitKw}${f}(${accessor});`);
+      ctx.write(`const ${branch} = ${ctx.call(`${f}(${accessor})`, isAsync)};`);
       ctx.write(`const ${value} = ${branch} === INVALID ? undefined : ${branch};`);
       emitChecksUpTo(layers.length - 1, value);
       ctx.write(`return ${value};`);
@@ -447,7 +454,7 @@ function emitBoxedContainer(ctx: CodeCtx, schema: Node, accessor: string, seen: 
     ctx.write(`}`);
   }
   const out = ctx.var();
-  ctx.write(`const ${out} = ${awaitKw}${f}(${accessor});`);
+  ctx.write(`const ${out} = ${ctx.call(`${f}(${accessor})`, isAsync)};`);
   ctx.write(`if (${out} === INVALID) return INVALID;`);
   emitChecksUpTo(layers.length - 1, out);
   return out;
@@ -499,8 +506,7 @@ export function emitNode(
     } catch (e) {
       if (e instanceof ZodCompileAsyncError) {
         const f = ctx.addConst(makeAsyncIsland(schema));
-        ctx.async = true;
-        ctx.write(`if ((await ${f}(${accessor})) === INVALID) return INVALID;`);
+        ctx.write(`if (${ctx.awaitExpr(`${f}(${accessor})`)} === INVALID) return INVALID;`);
         // a pure subtree that validates ⇒ output = input reference, so accessor is the output
         return needsValue ? accessor : null;
       }
@@ -517,14 +523,13 @@ export function emitNode(
   }
   const fnC = officialFn(schema, false);
   const fn = ctx.addConst(fnC);
-  if (isAsyncProduct(fnC)) ctx.async = true;
-  const awaitKw = isAsyncProduct(fnC) ? "await " : "";
+  const call = ctx.call(`${fn}(${accessor})`, isAsyncProduct(fnC));
   if (!needsValue) {
-    ctx.write(`if ((${awaitKw}${fn}(${accessor})) === INVALID) return INVALID;`);
+    ctx.write(`if (${call} === INVALID) return INVALID;`);
     return null;
   }
   const out = ctx.var();
-  ctx.write(`const ${out} = ${awaitKw}${fn}(${accessor});`);
+  ctx.write(`const ${out} = ${call};`);
   ctx.write(`if (${out} === INVALID) return INVALID;`);
   return out;
 }

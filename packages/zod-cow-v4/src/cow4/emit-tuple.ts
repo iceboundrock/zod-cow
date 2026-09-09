@@ -3,7 +3,7 @@
  * + CoW decoration. Segment 3 of both rest layouts and the presence decision after it live in `emit-tuple-rest.ts`.
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
-import type { CodeCtx } from "./codectx.js";
+import { type CodeCtx, emitSettleAll } from "./codectx.js";
 import { childProduct, emitContainerChecks } from "./emit.js";
 import { emitAsyncRestDecision, emitAsyncRestStart, emitSyncRest } from "./emit-tuple-rest.js";
 import { dropsWhenAbsent, getTupleOptStart } from "./predicates.js";
@@ -167,19 +167,15 @@ export function emitCoWTuple(
       // stock. The source is the sync layout's (#94): one rest product started per copy element or per yield
       asyncSource = emitAsyncRestStart({ ctx, accessor, N, restReads, restStarted, restFn });
     }
-    const settledVars: string[] = [];
-    const startedVars: string[] = [];
+    const entries: { settled: string; started: string }[] = [];
     for (let i = 0; i < N; i++) {
       if (itemProducts[i]!.kind !== "async") continue;
-      settledVars.push(slotResult[i]!);
-      startedVars.push(started[i]!);
+      entries.push({ settled: slotResult[i]!, started: started[i]! });
     }
-    if (rest && restProduct!.kind === "async") {
-      settledVars.push(`...${restResults}`);
-      startedVars.push(`...${restStarted}`);
-    }
-    ctx.write(
-      `const [${settledVars.join(", ")}] = await Promise.all([${startedVars.join(", ")}]);`,
+    emitSettleAll(
+      ctx,
+      entries,
+      rest && restProduct!.kind === "async" ? { settled: restResults, started: restStarted } : null,
     );
     if (rest && restProduct!.kind !== "async") {
       ctx.write(`const ${restResults} = ${restStarted};`);

@@ -1,16 +1,19 @@
 /** Codegen context and the Function-constructor build step shared by all skeletons. */
 import { INVALID } from "zod/v4/core";
 import type { CowOptions } from "./options.js";
-import { type Fn, markAsync } from "./product.js";
+import { type Fn, drive, hasPromise, markAsync } from "./product.js";
 
 /* ═══════════════════ Codegen context (minimal equivalent of the official CodeCtx/Doc) ═══════════════════ */
+
+/** The temp every await site of an async skeleton tests before yielding, declared by `buildFn` (#105) */
+const PENDING = "pr";
 
 export class CodeCtx {
   lines: string[] = [];
   indent = 0;
   constNames: string[] = [];
   constValues: unknown[] = [];
-  /** The tree contains an async subtree → the product is an async function (await emit points already in place) */
+  /** The tree contains an async subtree → the product is a generator run by `drive` (the await sites yield, #105) */
   async = false;
   /**
    * Parameters the built function takes after `input`, in order: the checks subroutine of an object with
@@ -45,6 +48,23 @@ export class CodeCtx {
   var(): string {
     // The x prefix distinguishes them from the official v, so the official dump is easy to compare by eye
     return `x${this.varN++}`;
+  }
+
+  /**
+   * An await site (#105): the expression's result, suspended on only when it is a Promise. Stock's runtime
+   * tests every child's result the same way (`r instanceof Promise`) and goes on synchronously otherwise, so
+   * a product that completed synchronously keeps the skeleton synchronous. The site marks the skeleton async
+   * (a generator, `buildFn`), and the temp it uses is shared by every site of the skeleton, since an expression
+   * holds at most one site and a site's value is consumed before the next one is evaluated.
+   */
+  awaitExpr(expr: string): string {
+    this.async = true;
+    return `((${PENDING} = ${expr}) instanceof Promise ? (yield ${PENDING}) : ${PENDING})`;
+  }
+
+  /** A product call: an await site for a product marked async, the plain call otherwise */
+  call(expr: string, isAsync: boolean): string {
+    return isAsync ? this.awaitExpr(expr) : expr;
   }
 
   write(line: string): void {
@@ -200,14 +220,52 @@ export function emitOwnSymbolProbe(
   }
 }
 
+/**
+ * The async layouts of the object, enum-keyed record, array and tuple skeletons settle their started results
+ * together (#71) only when one of them is a Promise (#105): each `settled` local starts as its `started` result,
+ * and one `Promise.all` over the started ones replaces them when the test finds a Promise among them, so a
+ * container none of whose children suspended completes synchronously. `spread` is the tuple's rest, an array of
+ * started results settled into an array of results by the same `Promise.all` (`hasPromise` tests it).
+ */
+export function emitSettleAll(
+  ctx: CodeCtx,
+  entries: { settled: string; started: string }[],
+  spread: { settled: string; started: string } | null = null,
+): void {
+  const inits = entries.map((e) => `${e.settled} = ${e.started}`);
+  const tests = entries.map((e) => `${e.started} instanceof Promise`);
+  const targets = entries.map((e) => e.settled);
+  const sources = entries.map((e) => e.started);
+  if (spread) {
+    inits.push(`${spread.settled} = ${spread.started}`);
+    tests.push(`${ctx.addConst(hasPromise)}(${spread.started})`);
+    targets.push(`...${spread.settled}`);
+    sources.push(`...${spread.started}`);
+  }
+  ctx.write(`let ${inits.join(", ")};`);
+  ctx.write(
+    `if (${tests.join(" || ")}) [${targets.join(", ")}] = yield Promise.all([${sources.join(", ")}]);`,
+  );
+}
+
 export function buildFn(ctx: CodeCtx): Fn {
   const F = Function;
   const params = ["input", ...ctx.params].join(", ");
-  const head = ctx.async ? `return async (${params}) => {` : `return (${params}) => {`;
-
   const body = ctx.lines.join("\n");
-  const factory = new F("INVALID", ...ctx.constNames, `${head}\n${body}\n}`);
   ctx.sources.push(body);
-  const fn = factory(INVALID, ...ctx.constValues) as Fn;
-  return ctx.async ? markAsync(fn) : fn;
+  if (!ctx.async) {
+    const factory = new F("INVALID", ...ctx.constNames, `return (${params}) => {\n${body}\n}`);
+    return factory(INVALID, ...ctx.constValues) as Fn;
+  }
+  // An async skeleton is a generator run by `drive` (#105): it yields only the Promises its await sites met
+  // (`awaitExpr`, `emitSettleAll`, the `yield Promise.all` of the settlement-order loops), so a parse in which
+  // nothing suspended completes synchronously like stock's runtime, and one that did suspend settles with the
+  // hops an async function's awaits and return cost. `PENDING` is the temp every await site tests.
+  const driveC = ctx.addConst(drive);
+  const factory = new F(
+    "INVALID",
+    ...ctx.constNames,
+    `const g = function* (${params}) {\nlet ${PENDING};\n${body}\n};\nreturn (${params}) => ${driveC}(g(${params}));`,
+  );
+  return markAsync(factory(INVALID, ...ctx.constValues) as Fn);
 }

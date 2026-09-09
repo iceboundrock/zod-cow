@@ -322,17 +322,18 @@ variants, is wrapped in a `try / catch` that hands a throw to `rethrowCallerErro
 predicate threw is recorded as the caller's before it propagates, so the async entries rethrow it instead of
 reading it as the fast path's Promise signal (§5.5 item 6; a rejection an awaited predicate settles with is
 recorded the same way in `settleChecks`). The call sites (the six container skeletons, the union skeleton and
-the wrapper layers of `emitBoxedContainer`) emit `await` and the skeleton becomes async (the wrapper is
-left out of the example):
+the wrapper layers of `emitBoxedContainer`) emit an await site and the skeleton becomes async (the wrapper is
+left out of the example). `settle` answers the verdict synchronously when no result is a `Promise`, as
+`runChecks` chains nothing then, and the site below it goes on without suspending (#105):
 
 ```js
 const x0 = f0(input);                                   // sync predicate
 const x1 = f1(input);                                   // sync predicate with abort: true
 if (!x1 && !(x0 instanceof Promise)) return INVALID;    // stock skips x2 here; x0 may still have returned a Promise
 const x2 = f2(input);                                   // async predicate, started
-if (input.length < 2) { await settle([x0, x1, x2]); return INVALID; }
+if (input.length < 2) { ((pr = settle([x0, x1, x2])) instanceof Promise ? (yield pr) : pr); return INVALID; }
 const x3 = f3(input);                                   // sync predicate, called before x2 settles
-if (!(await settle([x0, x1, x2, x3]))) return INVALID;
+if (!((pr = settle([x0, x1, x2, x3])) instanceof Promise ? (yield pr) : pr)) return INVALID;
 return true;
 ```
 
@@ -551,11 +552,12 @@ runtime schedule instead (#70): stock starts every value inside its loop, writes
 when its promise settles, so the output is in settlement order and an earlier async pair wins a collision with a later
 sync one. The skeleton starts every value inside the loop and logs each pair in that order (iteration position, clean
 flag, output key, output value; a loose record's rejected key is a sync entry, a dropped `__proto__` pair sets `dirty`),
-awaits `Promise.all` over the started promises, then scans the log: a failed value fails the record, a pair out of
+suspends on `Promise.all` over the started promises when there is one, then scans the log: a failed value fails the record, a pair out of
 iteration position or not its input marks it dirty, and the copy is assembled from the log (`emitAsyncRecordTail`), each
 pair read exactly once. The async island (`makeAsyncIsland`) answers a sync run synchronously for this, so a sync entry
 keeps its place, and an async run adds one `.then` before the skeleton's own, the same number of microtask hops for every
-entry. Zod's own compiler has no async mode (`ZodCompileAsyncError`), so the runtime is the only stock reference.
+entry; an async sub-skeleton answers the same way since #105, so a value whose async part the data never reached keeps
+its place too. Zod's own compiler has no async mode (`ZodCompileAsyncError`), so the runtime is the only stock reference.
 
 Path A (enum, declaration-driven): the official output unconditionally materializes every declared key in declaration order
 (a missing key with an optional value → write undefined) + strict rejection of unknown keys. The skeleton:
@@ -706,12 +708,16 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
 
 1. async island: `makeAsyncIsland(schema)` = an async black box returning `Promise<output | INVALID>`,
    and the product carries the `ZC_ASYNC` symbol marker.
-2. await emission: every product call site checks `isAsyncProduct(fn)` and sets `ctx.async = true`. The set, map and
-   iterating-record skeletons start every entry inside their loop and write in stock's settlement order (#70). The object,
+2. await emission: every product call site checks `isAsyncProduct(fn)` and sets `ctx.async = true`. An await site is
+   `ctx.awaitExpr` / `ctx.call` (#105): the expression's result, suspended on only when it is a `Promise`, which is the
+   test stock's runtime makes of every child's result (`r instanceof Promise`) before it goes on synchronously. The set, map and
+   iterating-record skeletons start every entry inside their loop and write in stock's settlement order (#70), and their
+   `Promise.all` runs only when a member started one. The object,
    enum-keyed record, array and tuple skeletons take an async layout when any child is async (#71): every product is called
    in stock's order before the first await (a sync child's result is captured, an async child's promise started; the tuple
    starts every fixed slot with `input[i]`, an absent slot included, then the rest elements, as stock's runtime does), one
-   `await Promise.all` settles the async ones, and the existing checks, reference comparisons and copy logic run on the
+   `Promise.all` settles the async ones when one of them is a `Promise` (`emitSettleAll`; each settled local starts as its
+   started result), and the existing checks, reference comparisons and copy logic run on the
    settled results. So N async children cost one round trip instead of N, their side effects interleave as in stock (the
    second child's transform starts before the first settles), and a container with two async children settles in the same
    round as one with a single child, which decides its place in a parent set, map or record writing in settlement order.
@@ -818,8 +824,23 @@ This layer turns "async detected → degrade the whole tree" into "convert in pl
    in both layouts, since the rest loop judges the `undefined` the copy holds dirty without asking whether it is own
    (#95); `slice` read the inherited value through `HasProperty` and made it own on the copy, which until #95 kept the
    async layout's clean path there.
-3. making the skeleton async: `buildFn` decides between `async (input) =>` and `(input) =>` based on `ctx.async`,
-   and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns `kind: "async"`).
+3. making the skeleton async: `buildFn` decides between a generator run by `drive` and a plain `(input) =>` based on
+   `ctx.async`, and the product carries `ZC_ASYNC` so a sub-skeleton's parent notices automatically (`childProduct` returns
+   `kind: "async"`). An async skeleton is a generator, not an async function (#105): its await sites `yield` the Promises
+   they met and nothing else, and `drive` (`product.ts`) runs it the way stock's runtime runs a parse. Nothing yielded means
+   the parse completed synchronously, and `drive` answers the value itself rather than a `Promise` of it; otherwise it
+   answers a `Promise` that resumes the generator one microtask hop after each yielded Promise settles, the hop an `await`
+   costs, so a child that did suspend settles in the round it settled in as an async function. An async function always
+   returns a `Promise`, which put a statically async subtree one round behind stock whenever the data never reached the
+   async part of it (an empty set, an absent optional key, a `null` under a nullable wrapper, a union option that did not
+   win): stock's runtime completes such a container synchronously, and the round it lost reordered the members of a parent
+   set, map or record writing in settlement order, and delayed the side effects of a sibling.
+   The nested-skeleton call sites need nothing of their own for this: an await site tests its result, so a child that
+   completed synchronously is used in place. Two consequences of matching the runtime this way, both stock's own behavior:
+   a child that throws synchronously (a sync island meeting a `Promise`, a `refine` predicate that throws) now throws out
+   of the parent's loop where an async function rejected instead, and a promise a sibling had already started can be left
+   unattached by that throw, exactly as in stock, whose loop propagates the throw the same way. `Compiled.code` shows the
+   generator body, so a code pin reads `yield Promise.all(` where it read `await Promise.all(`.
 4. public API: `Compiled` gains `async: boolean`, `parseAsync` / `safeParseAsync`;
    under an async skeleton the sync API throws `$ZodAsyncError` (the same semantics as the official code; measured, a sync parse on an async tree does throw).
 5. plugging the lazy(async) hole: the official product for lazy is a runtime island, so an inner async raises no compile-time error →
@@ -972,7 +993,7 @@ compile(schema)
   │     │     │     │           stock's compiler answers the shortcut value differently from its runtime
   │     │     │     ├─ container subtree → subFn recursion (a seen set prevents circular references)
   │     │     │     │     └─ the sub-skeleton is itself async → kind:"async", the parent position emits await ★v0.5
-  │     │     │     └─ async subtree → makeAsyncIsland + ctx.async (the skeleton becomes an async function) ★v0.5
+  │     │     │     └─ async subtree → makeAsyncIsland + ctx.async (the skeleton becomes a generator run by drive) ★v0.5
   │     │     └─ checks not safe (superRefine/overwrite/custom when) → degrade to officialFn(parser)
   │     └─ top level not compilable (top-level recursion / schema catchall / __proto__ key)
   │           └─ stock = true: parse/safeParse/validate all go straight to stock
@@ -1128,9 +1149,9 @@ The engine lives in `packages/zod-cow-v4/src/cow4/` as a set of modules cut alon
 | Module | Section of this doc | Holds |
 |---|---|---|
 | `index.ts` | §6 | Thin entry: `compileCowFn`, `compileCowDebug`; re-exports `INVALID`, `Fn`, `ZC_ASYNC`, `isAsyncProduct`, `officialValidator`, `CompileOptions`, `resolveOptions` |
-| `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync` |
+| `product.ts` | §5.5 | `Fn` product contract, `ZC_ASYNC` marker, `isAsyncFn`, `throwAsync`, `drive` / `hasPromise` (the generator driver of an async skeleton and the started-result test of its settlement sites, #105) |
 | `options.ts` | §3.1 | `CompileOptions` (public), the resolved `CowOptions`, `DEFAULT_OPTIONS`, `resolveOptions` (#43) |
-| `codectx.ts` | §3 | `CodeCtx` (carries the resolved options and the shared `sources` list of the debug dump), `escKey`, `buildFn` |
+| `codectx.ts` | §3 | `CodeCtx` (carries the resolved options and the shared `sources` list of the debug dump), `escKey`, `awaitExpr` / `call` / `emitSettleAll` (the await sites and the guarded settlement of the async layouts, #105), `buildFn` |
 | `predicates.ts` | §9 | Verbatim zod copies: `acceptsAbsence`, `requiresPresence`, `mayOutputUndefined`, `getTupleOptStart`, `dropsWhenAbsent` |
 | `purity.ts` | §4 | `isPure`, `leafChecksArePure`, `checksAreCowSafe`, `WHEN_DEFAULTED_CHECKS`, `cowSafeContainerForChild`, `presenceReadable` |
 | `official.ts` | §6 | `officialFn`, `officialValidator`, `makeIsland`, `makeAsyncIsland`, `inspectSubtree`, `subtreeFollowsRuntime`, `subtreeHasPlainTransform` |

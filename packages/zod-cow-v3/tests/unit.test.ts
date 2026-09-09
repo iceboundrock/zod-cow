@@ -1460,11 +1460,11 @@ test("array / tuple copy path: the copy is assembled from the element results, a
   assert.deepEqual(out0, ["d", "v1", "v2"]);
   assert.notEqual(out0, in0);
   assert.deepEqual(r0, [1, 1, 1]);
-  // Dirty at index 1: the clean prefix (index 0) is re-read once when the copy is made, the
-  // documented second read of the sync layouts; the elements at and after the change are read once
+  // Dirty at index 1: the copy is the capture itself, so the clean prefix is not read again (the
+  // prefix re-read of #65 went with the inline timeline, #116); every element is read once
   const r1: number[] = [];
   assert.deepEqual(compile(A).parse(counted(3, 1, r1)), ["v0", "d", "v2"]);
-  assert.deepEqual(r1, [2, 1, 1]);
+  assert.deepEqual(r1, [1, 1, 1]);
   // Rebuild mode (below a readonly): every element read once, as stock's spread reads it
   const RA = z.array(z.string()).readonly();
   const rr: number[] = [];
@@ -1600,6 +1600,124 @@ test("tuple: every element is read before any slot is parsed, in ascending order
   assert.equal(cow2.success && cow2.data[0], c2.input[0]);
 });
 
+/**
+ * Trace helpers shared by the tuple and array capture tests: the outcome of a parse as text (a
+ * thrown error's class and message, the issue list, or `ok`), the output by index, a logging
+ * accessor at an index, a Proxy logging every trap (`length` may answer from a script, `onGet`
+ * runs on every read), a replacement of `%ArrayIteratorPrototype%.next` with its restore, and a
+ * logging custom iterator over `values` with the protocol pieces a row wants.
+ */
+type Made = { input: any; log: string[]; restore?: () => void };
+const traceOutcome = (S: { safeParse: (d: unknown) => any }, input: unknown) => {
+  let r: any;
+  try {
+    r = S.safeParse(input);
+  } catch (e: any) {
+    return { text: `throw ${e.constructor.name}: ${e.message}`, data: undefined };
+  }
+  if (!r.success)
+    return {
+      text: `fail ${r.error.issues.map((i: any) => `${i.code}@${i.path.join(".")}`).join(",")}`,
+      data: undefined,
+    };
+  return { text: "ok", data: r.data };
+};
+// The output by index, taken after the event logs were compared: the compiled output may hold
+// an input element by reference, getter included, and reading it would log again
+const snapshotByIndex = (d: any) => {
+  const vals: unknown[] = [];
+  for (let i = 0; i < d.length; i++) vals.push(d[i]);
+  // The length coerced as the loop coerced it (a Proxy may answer an object with a `valueOf`)
+  return `ok ${JSON.stringify(vals)} len=${Number(d.length)}`;
+};
+const defineLoggingGetter = (
+  arr: any[],
+  i: number,
+  log: string[],
+  value: unknown,
+  effect?: () => void,
+) =>
+  Object.defineProperty(arr, i, {
+    enumerable: true,
+    configurable: true,
+    get() {
+      log.push(`get ${i}`);
+      effect?.();
+      return value;
+    },
+  });
+// A Proxy logging every trap; `length` may answer from a script, `onGet` runs on every read
+const loggingProxy = (
+  target: unknown[],
+  log: string[],
+  opts: { length?: () => unknown; onGet?: (t: any, k: string | symbol) => void } = {},
+) =>
+  new Proxy(target, {
+    get(t, k, r) {
+      log.push(`get ${String(k)}`);
+      if (k === "length" && opts.length) return opts.length();
+      opts.onGet?.(t, k);
+      return Reflect.get(t, k, r);
+    },
+    has(t, k) {
+      log.push(`has ${String(k)}`);
+      return Reflect.has(t, k);
+    },
+    ownKeys(t) {
+      log.push("ownKeys");
+      return Reflect.ownKeys(t);
+    },
+    getOwnPropertyDescriptor(t, k) {
+      log.push(`descriptor ${String(k)}`);
+      return Reflect.getOwnPropertyDescriptor(t, k);
+    },
+    getPrototypeOf(t) {
+      log.push("getPrototypeOf");
+      return Reflect.getPrototypeOf(t);
+    },
+    set(t, k, v, r) {
+      log.push(`set ${String(k)}`);
+      return Reflect.set(t, k, v, r);
+    },
+    deleteProperty(t, k) {
+      log.push(`delete ${String(k)}`);
+      return Reflect.deleteProperty(t, k);
+    },
+    defineProperty(t, k, d) {
+      log.push(`define ${String(k)}`);
+      return Reflect.defineProperty(t, k, d);
+    },
+  });
+const ARRAY_ITERATOR_PROTOTYPE = Object.getPrototypeOf([][Symbol.iterator]());
+const NATIVE_ARRAY_NEXT_DESC = Object.getOwnPropertyDescriptor(ARRAY_ITERATOR_PROTOTYPE, "next")!;
+const NATIVE_ARRAY_NEXT = NATIVE_ARRAY_NEXT_DESC.value;
+const withProtoNext = (desc: PropertyDescriptor) => {
+  Object.defineProperty(ARRAY_ITERATOR_PROTOTYPE, "next", desc);
+  return () => Object.defineProperty(ARRAY_ITERATOR_PROTOTYPE, "next", NATIVE_ARRAY_NEXT_DESC);
+};
+// A logging custom iterator over `values`, with the protocol pieces the row wants
+const loggingIterator = (
+  log: string[],
+  values: unknown[],
+  shape: {
+    next?: unknown;
+    result?: (done: boolean, value: unknown) => unknown;
+    onNext?: (i: number) => void;
+  } = {},
+) => {
+  let i = 0;
+  const result = shape.result ?? ((done: boolean, value: unknown) => ({ done, value }));
+  const next = () => {
+    log.push("next");
+    shape.onNext?.(i);
+    return i < values.length ? result(false, values[i++]) : result(true, undefined);
+  };
+  return function (this: unknown) {
+    log.push("iterator");
+    return "next" in shape ? { next: shape.next } : { next };
+  };
+};
+
 test("tuple: the capture is stock's own spread, so every operation on the input, every piece of user code it runs and every engine error are stock's: accessor, iterator, coercion, intrinsic and Proxy mutations compared on the ordered event log (reviews of #115)", () => {
   // The skeleton evaluates `[...ctx.data]` where `ZodTuple._parse` does and validates the copy, so
   // the reads the capture makes (`Symbol.iterator`, `next`, the live length and the element before
@@ -1609,28 +1727,13 @@ test("tuple: the capture is stock's own spread, so every operation on the input,
   // error's class and message, the issue list, or the output by index) is compared; the output is
   // never the input (the reads that could prove the input still holds what the capture yielded
   // are reads stock does not make), so the "as it then is" aliasing question does not arise.
-  type Made = { input: any; log: string[]; restore?: () => void };
-  const outcome = (S: { safeParse: (d: unknown) => any }, input: unknown) => {
-    let r: any;
-    try {
-      r = S.safeParse(input);
-    } catch (e: any) {
-      return { text: `throw ${e.constructor.name}: ${e.message}`, data: undefined };
-    }
-    if (!r.success)
-      return {
-        text: `fail ${r.error.issues.map((i: any) => `${i.code}@${i.path.join(".")}`).join(",")}`,
-        data: undefined,
-      };
-    return { text: "ok", data: r.data };
-  };
-  // The output by index, taken after the event logs were compared: the compiled output may hold
-  // an input element by reference, getter included, and reading it would log again
-  const snapshot = (d: any) => {
-    const vals: unknown[] = [];
-    for (let i = 0; i < d.length; i++) vals.push(d[i]);
-    return `ok ${JSON.stringify(vals)} len=${d.length}`;
-  };
+  const outcome = traceOutcome;
+  const snapshot = snapshotByIndex;
+  const getter = defineLoggingGetter;
+  const proxied = loggingProxy;
+  const AIP = ARRAY_ITERATOR_PROTOTYPE;
+  const nativeNext = NATIVE_ARRAY_NEXT;
+  const iterating = loggingIterator;
   // `valueOnly`: a replaced `%ArrayIteratorPrototype%.next` is a global change that stock's own
   // `for...of` over its parse results consults as well (three calls per spread step in stock's
   // log against one here), which the skeleton has no counterpart for; such a row compares the
@@ -1658,87 +1761,6 @@ test("tuple: the capture is stock's own spread, so every operation on the input,
       assert.equal(snapshot(cow.data), snapshot(stock.data), `${name}: output`);
       assert.notEqual(cow.data, c.input, `${name}: fresh output`);
     }
-  };
-  const getter = (arr: any[], i: number, log: string[], value: unknown, effect?: () => void) =>
-    Object.defineProperty(arr, i, {
-      enumerable: true,
-      configurable: true,
-      get() {
-        log.push(`get ${i}`);
-        effect?.();
-        return value;
-      },
-    });
-  // A Proxy logging every trap; `length` may answer from a script, `onGet` runs on every read
-  const proxied = (
-    target: unknown[],
-    log: string[],
-    opts: { length?: () => unknown; onGet?: (t: any, k: string | symbol) => void } = {},
-  ) =>
-    new Proxy(target, {
-      get(t, k, r) {
-        log.push(`get ${String(k)}`);
-        if (k === "length" && opts.length) return opts.length();
-        opts.onGet?.(t, k);
-        return Reflect.get(t, k, r);
-      },
-      has(t, k) {
-        log.push(`has ${String(k)}`);
-        return Reflect.has(t, k);
-      },
-      ownKeys(t) {
-        log.push("ownKeys");
-        return Reflect.ownKeys(t);
-      },
-      getOwnPropertyDescriptor(t, k) {
-        log.push(`descriptor ${String(k)}`);
-        return Reflect.getOwnPropertyDescriptor(t, k);
-      },
-      getPrototypeOf(t) {
-        log.push("getPrototypeOf");
-        return Reflect.getPrototypeOf(t);
-      },
-      set(t, k, v, r) {
-        log.push(`set ${String(k)}`);
-        return Reflect.set(t, k, v, r);
-      },
-      deleteProperty(t, k) {
-        log.push(`delete ${String(k)}`);
-        return Reflect.deleteProperty(t, k);
-      },
-      defineProperty(t, k, d) {
-        log.push(`define ${String(k)}`);
-        return Reflect.defineProperty(t, k, d);
-      },
-    });
-  const AIP = Object.getPrototypeOf([][Symbol.iterator]());
-  const nextDesc = Object.getOwnPropertyDescriptor(AIP, "next")!;
-  const nativeNext = nextDesc.value;
-  const withProtoNext = (desc: PropertyDescriptor) => {
-    Object.defineProperty(AIP, "next", desc);
-    return () => Object.defineProperty(AIP, "next", nextDesc);
-  };
-  // A logging custom iterator over `values`, with the protocol pieces the row wants
-  const iterating = (
-    log: string[],
-    values: unknown[],
-    shape: {
-      next?: unknown;
-      result?: (done: boolean, value: unknown) => unknown;
-      onNext?: (i: number) => void;
-    } = {},
-  ) => {
-    let i = 0;
-    const result = shape.result ?? ((done: boolean, value: unknown) => ({ done, value }));
-    const next = () => {
-      log.push("next");
-      shape.onNext?.(i);
-      return i < values.length ? result(false, values[i++]) : result(true, undefined);
-    };
-    return function (this: unknown) {
-      log.push("iterator");
-      return "next" in shape ? { next: shape.next } : { next };
-    };
   };
   const T = z.tuple([z.string(), z.string()]);
   const T1 = z.tuple([z.string()]);
@@ -2358,11 +2380,12 @@ test("tuple: the capture is stock's own spread, so every operation on the input,
   assert.equal(Object.isFrozen(frozen), true);
 });
 
-test("tuple: randomized accessor and Proxy mutations during the capture give stock's outcome and event log", () => {
-  // A deterministic generator of adversarial inputs for a random tuple: accessors that shrink or
-  // grow the input, rewrite or delete a later slot, install a getter or throw while they are read,
-  // or a Proxy whose length answers follow a random script; every case compares the ordered event
-  // log and the outcome (a throw's class and message, the issue list, or the output by index).
+test("tuple and array: randomized accessor and Proxy mutations during the capture give stock's outcome and event log", () => {
+  // A deterministic generator of adversarial inputs for a random tuple, and for an array of its
+  // first slot's schema: accessors that shrink or grow the input, rewrite or delete a later slot,
+  // install a getter or throw while they are read, or a Proxy whose length answers follow a random
+  // script; every case compares the ordered event log and the outcome (a throw's class and
+  // message, the issue list, or the output by index).
   let seed = 0x9e3779b9;
   const rnd = () => {
     seed = (Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x1b873593) | 0;
@@ -2475,93 +2498,900 @@ test("tuple: randomized accessor and Proxy mutations during the capture give sto
     }
     if (!r.success)
       return `fail ${r.error.issues.map((i: any) => `${i.code}@${i.path.join(".")}`).join(",")}`;
-    const vals: unknown[] = [];
-    for (let i = 0; i < r.data.length; i++) vals.push(r.data[i]);
-    return `ok ${JSON.stringify(vals)} len=${r.data.length}`;
+    // An array returned by reference is not read again: its accessors would run their effects a
+    // second time, and the log is compared before anything reads the output
+    if (r.data === input) return "ok byref";
+    return snapshotByIndex(r.data);
   };
-  for (let caseNo = 0; caseNo < 400; caseNo++) {
-    const spec = build();
-    const S = z.tuple(
-      spec.slots.map((s) => (s === "string" ? z.string() : z.string().optional())) as unknown as [
-        z.ZodTypeAny,
-        ...z.ZodTypeAny[],
-      ],
-    );
-    const s = make(spec);
-    const stock = outcome(S, s.input);
-    const c = make(spec);
-    const cow = outcome(compile(S), c.input);
-    const label = `case ${caseNo}: ${JSON.stringify(spec)}`;
-    assert.deepEqual(c.log, s.log, `${label}: event log`);
-    assert.equal(cow, stock, `${label}: outcome`);
+  for (const kind of ["tuple", "array"] as const) {
+    for (let caseNo = 0; caseNo < 400; caseNo++) {
+      const spec = build();
+      const leaves = spec.slots.map((s) => (s === "string" ? z.string() : z.string().optional()));
+      const S =
+        kind === "tuple"
+          ? z.tuple(leaves as unknown as [z.ZodTypeAny, ...z.ZodTypeAny[]])
+          : z.array(leaves[0]!);
+      const s = make(spec);
+      const stock = outcome(S, s.input);
+      const c = make(spec);
+      const cow = outcome(compile(S), c.input);
+      const label = `${kind} case ${caseNo}: ${JSON.stringify(spec)}`;
+      assert.deepEqual(c.log, s.log, `${label}: event log`);
+      if (cow === "ok byref") {
+        // The array's clean path: no element changed and none read as `undefined`, so stock's
+        // fresh output is what the capture read, without an `undefined` slot (rendered `null`)
+        assert.equal(kind, "array", `${label}: a tuple never returns the input`);
+        assert.match(stock, /^ok /, `${label}: stock succeeded too`);
+        assert.doesNotMatch(stock, /null/, `${label}: no undefined slot in stock's output`);
+      } else assert.equal(cow, stock, `${label}: outcome`);
+    }
   }
 });
 
-test("array: the length reads before the loop are stock's; the elements are read as the loop reaches them, without the iterator protocol (#116, documented)", () => {
-  // Stock's `ZodArray._parse` reads the length once per check (`length` reads it twice, `>` then
-  // `<`), then spreads the input. The skeleton makes the checks' reads in stock's order, then reads
-  // each element as its loop reaches it: the one difference a Proxy sees is that stock reads
-  // `Symbol.iterator` before its element reads (the read timeline of #116, tracked there).
-  const traced = (target: unknown[]) => {
-    const log: string[] = [];
-    const input = new Proxy(target, {
-      get(t, k, r) {
-        log.push(`get ${String(k)}`);
-        return Reflect.get(t, k, r);
-      },
-      has(t, k) {
-        log.push(`has ${String(k)}`);
-        return Reflect.has(t, k);
-      },
-    });
-    return { input, log };
-  };
-  // The skeleton's reads after the checks: the length and the element per index; at the first
-  // forced change (here an element that reads as `undefined`, #117) the copy reads the length and
-  // the clean prefix again (the documented second read of #65); then the length that ends the loop
-  const loopReads = (len: number, dirtyAt: number) => {
-    const reads: string[] = [];
-    for (let i = 0; i < len; i++) {
-      reads.push("get length", `get ${i}`);
-      if (i === dirtyAt) {
-        reads.push("get length");
-        for (let j = 0; j < i; j++) reads.push(`get ${j}`);
-      }
+test("array: the capture is stock's own spread, so every operation on the input, every piece of user code it runs and every engine error are stock's, and the clean path returns the input as it then is: accessor, iterator, coercion, intrinsic and Proxy mutations compared on the ordered event log (#116)", () => {
+  // The skeleton evaluates `[...ctx.data]` where `ZodArray._parse` does (after the length checks)
+  // and validates the copy, so the reads the capture makes, the user code they run and the errors
+  // they throw are the engine's own in both, and the validation result is stock's for every input.
+  // The copy is the output when an element's result differs from what the capture read, when an
+  // element read as `undefined` (#117) or in stock's rebuild mode; otherwise the input is returned
+  // by reference without any read to prove that it still holds what the capture yielded (that
+  // proof would be reads stock does not make, #115), so an input whose capture differs from its
+  // indexed contents comes back as itself where stock returns the capture: the documented alias
+  // rule of the clean path ("the input as it then is"), which a refine above the array sees too.
+  // Each row declares `ref` (the output is the input reference) and `alias` (the documented
+  // divergence: `true` when the output's content differs from stock's fresh array, or the outcome
+  // text the skeleton gives where stock's differs); every other row must agree with stock exactly.
+  type Expect = { ref?: boolean; alias?: true | string; valueOnly?: boolean };
+  const compare = (name: string, S: z.ZodTypeAny, make: () => Made, exp: Expect = {}) => {
+    const s = make();
+    let stock: ReturnType<typeof traceOutcome>;
+    let stockShot = "";
+    try {
+      stock = traceOutcome(S, s.input);
+      if (stock.text === "ok") stockShot = snapshotByIndex(stock.data);
+    } finally {
+      s.restore?.();
     }
-    reads.push("get length");
-    return reads;
+    const C = compile(S);
+    const c = make();
+    let cow: ReturnType<typeof traceOutcome>;
+    let cowShot = "";
+    let cowLog: string[];
+    try {
+      cow = traceOutcome(C, c.input);
+      // The log is taken before the output is read: a reference return holds the input's
+      // accessors, and the snapshot runs them again, under the row's environment (restored below)
+      cowLog = c.log.slice();
+      if (cow.text === "ok") cowShot = snapshotByIndex(cow.data);
+    } finally {
+      c.restore?.();
+    }
+    if (exp.valueOnly) assert.deepEqual(new Set(cowLog), new Set(s.log), `${name}: event kinds`);
+    else assert.deepEqual(cowLog, s.log, `${name}: event log`);
+    if (typeof exp.alias === "string") {
+      assert.equal(cow.text, exp.alias, `${name}: outcome under the alias rule`);
+      assert.notEqual(stock.text, cow.text, `${name}: the row is no longer a divergence`);
+      return;
+    }
+    assert.equal(cow.text, stock.text, `${name}: outcome`);
+    if (cow.text !== "ok") return;
+    if (exp.ref) {
+      assert.equal(cow.data, c.input, `${name}: the input reference`);
+      if (exp.alias) assert.notEqual(cowShot, stockShot, `${name}: the row is no longer an alias`);
+      else assert.equal(cowShot, stockShot, `${name}: output`);
+    } else {
+      assert.notEqual(cow.data, c.input, `${name}: fresh output`);
+      assert.equal(cowShot, stockShot, `${name}: output`);
+    }
   };
-  for (const A of [
-    z.array(z.string()),
-    z.array(z.string()).length(2),
-    z.array(z.string()).length(3),
-    z.array(z.string()).min(3),
-    z.array(z.string()).max(1),
-    z.array(z.string()).min(1).max(5).length(2),
-    z.array(z.string().optional()),
-  ]) {
-    for (const target of [["a", "b"], ["a", undefined], []]) {
-      const s = traced(target.slice());
-      const sr = A.safeParse(s.input);
-      const c = traced(target.slice());
-      const cr = compile(A).safeParse(c.input);
-      const stockReads = s.log.filter((e) => e !== "get Symbol(Symbol.iterator)");
-      const checksReads = stockReads.length - loopReads(target.length, -1).length;
-      const dirtyAt = sr.success ? target.indexOf(undefined) : -1;
-      assert.deepEqual(
-        c.log,
-        [...stockReads.slice(0, checksReads), ...loopReads(target.length, dirtyAt)],
-        `${JSON.stringify(target)}: reads`,
-      );
-      assert.equal(cr.success, sr.success);
-      if (sr.success && cr.success) assert.deepEqual(cr.data, sr.data);
-      else if (!sr.success && !cr.success)
-        assert.deepEqual(
-          cr.error.issues.map((i) => i.code),
-          sr.error.issues.map((i) => i.code),
-        );
+  const A = z.array(z.string());
+  const AOpt = z.array(z.string().optional());
+  let errorMapLog: string[] = [];
+  const rows: [string, z.ZodTypeAny, () => Made, Expect?][] = [
+    // ── the rows of #116 ──
+    [
+      "getter inside element 0's object rewrites element 1 (the issue's example): stock's validation, the rewrite visible by reference",
+      z.array(z.object({ a: z.string() })),
+      () => {
+        const log: string[] = [];
+        const input: any[] = [null, { a: "b" }];
+        input[0] = {
+          get a() {
+            log.push("get 0.a");
+            input[1] = 42;
+            return "a";
+          },
+        };
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "the same rewrite under an element whose default fires: the copy is stock's fresh array",
+      z.array(z.object({ a: z.string(), d: z.number().default(1) })),
+      () => {
+        const log: string[] = [];
+        const input: any[] = [null, { a: "b" }];
+        input[0] = {
+          get a() {
+            log.push("get 0.a");
+            input[1] = 42;
+            return "a";
+          },
+          d: 2,
+        };
+        return { input, log };
+      },
+      { ref: false },
+    ],
+    [
+      "getter at 0 shrinks the input to one element (first comment): stock's one-element output, the shrunk input by reference",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b", "c"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          input.length = 1;
+        });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "getter at 0 grows the input to four elements (first comment)",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          input.length = 4;
+          defineLoggingGetter(input, 2, log, "c");
+          defineLoggingGetter(input, 3, log, "d");
+        });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "own Symbol.iterator yielding one other value (first comment): stock validates and returns that value, the skeleton validates it and returns the input",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, { value: loggingIterator(log, ["x"]) });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    // ── accessor mutation ──
+    [
+      "getter at 1 empties the input after the last read: stock's capture, the emptied input by reference",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 1, log, "b", () => {
+          input.length = 0;
+        });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "getter at 0 rewrites element 1 with an invalid value before it is read: both read the rewrite",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          input[1] = 42;
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "getter at 0 rewrites element 1 with a valid value before it is read",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          input[1] = "B";
+        });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "getter at 1 rewrites element 0 after it was read: stock's output holds the captured value, the input holds the rewrite",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 1, log, "b", () => {
+          input[0] = "z";
+        });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "getter at 0 deletes element 1: an undefined read fails a string element on both sides",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          delete input[1];
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "getter at 0 deletes element 1 under an optional element: the hole is an own undefined slot of the fresh output",
+      AOpt,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          delete input[1];
+        });
+        return { input, log };
+      },
+      { ref: false },
+    ],
+    [
+      "getter at 0 replaces element 1 with a getter",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          defineLoggingGetter(input, 1, log, "B");
+        });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "getter at 0 throws",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 0, log, "a", () => {
+          throw new RangeError("getter threw");
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "getter at 1 throws after element 0 was read: no element is parsed on either side",
+      z.array(
+        z.string().refine(() => {
+          throw new Error("element parsed");
+        }),
+      ),
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 1, log, "b", () => {
+          throw new RangeError("getter threw");
+        });
+        return { input, log };
+      },
+    ],
+    // ── iterator mutation ──
+    [
+      "own Symbol.iterator data property yielding other values",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, { value: loggingIterator(log, ["x", "y"]) });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "own Symbol.iterator yielding the input's own values: the same validation, the reference kept",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, { value: loggingIterator(log, ["a", "b"]) });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "own Symbol.iterator getter, called with the input as receiver, yielding nothing",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          get() {
+            log.push("get Symbol.iterator");
+            return function (this: unknown) {
+              log.push(`iterator receiver=${this === input ? "input" : "other"}`);
+              return { next: () => ({ done: true, value: undefined }) };
+            };
+          },
+        });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "own Symbol.iterator getter poisons Reflect.apply, Math.floor and the Symbol global",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        const saved = { apply: Reflect.apply, floor: Math.floor, Symbol: globalThis.Symbol };
+        Object.defineProperty(input, Symbol.iterator, {
+          get() {
+            log.push("get Symbol.iterator");
+            Reflect.apply = () => {
+              throw new Error("poisoned Reflect.apply");
+            };
+            Math.floor = () => {
+              throw new Error("poisoned Math.floor");
+            };
+            (globalThis as any).Symbol = { iterator: saved.Symbol("fake") };
+            return loggingIterator(log, ["x"]);
+          },
+        });
+        return {
+          input,
+          log,
+          restore: () => {
+            Reflect.apply = saved.apply;
+            Math.floor = saved.floor;
+            (globalThis as any).Symbol = saved.Symbol;
+          },
+        };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "custom iterator whose next mutates the input",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, ["a", "b"], {
+            onNext: () => {
+              input[1] = "z";
+            },
+          }),
+        });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "custom iterator with next as an accessor",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: () => {
+            log.push("iterator");
+            let i = 0;
+            return {
+              get next() {
+                log.push("get next");
+                return () => {
+                  log.push("next");
+                  return i < 2 ? { done: false, value: `v${i++}` } : { done: true };
+                };
+              },
+            };
+          },
+        });
+        return { input, log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "custom iterator: next is not callable",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, [], { next: 1 }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "custom iterator: next is undefined",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, [], { next: undefined }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "custom iterator: next answers a non-object",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, ["a"], { result: () => 1 }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "custom iterator: done getter throws",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, ["a"], {
+            result: () => ({
+              get done() {
+                log.push("get done");
+                throw new RangeError("done threw");
+              },
+            }),
+          }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "custom iterator: value getter throws",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, {
+          value: loggingIterator(log, ["a"], {
+            result: (done) => ({
+              done,
+              get value() {
+                log.push("get value");
+                throw new RangeError("value threw");
+              },
+            }),
+          }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "Symbol.iterator is not callable",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, { value: 1 });
+        return { input, log };
+      },
+    ],
+    [
+      "Symbol.iterator answers a non-object",
+      A,
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        Object.defineProperty(input, Symbol.iterator, { value: () => 1 });
+        return { input, log };
+      },
+    ],
+    [
+      "%ArrayIteratorPrototype%.next replaced by a data property rewriting the first value",
+      A,
+      () => {
+        const log: string[] = [];
+        const restore = withProtoNext({
+          configurable: true,
+          writable: true,
+          value: function (this: Iterator<unknown>) {
+            log.push("proto next");
+            const r = NATIVE_ARRAY_NEXT.call(this);
+            return r.value === "a" ? { done: r.done, value: "A" } : r;
+          },
+        });
+        return { input: ["a", "b"], log, restore };
+      },
+      { ref: true, alias: true, valueOnly: true },
+    ],
+    [
+      "%ArrayIteratorPrototype%.next as an accessor answering by its receiver",
+      A,
+      () => {
+        const log: string[] = [];
+        const restore = withProtoNext({
+          configurable: true,
+          get() {
+            log.push(
+              `get proto next receiver=${this === ARRAY_ITERATOR_PROTOTYPE ? "prototype" : "iterator"}`,
+            );
+            return this === ARRAY_ITERATOR_PROTOTYPE
+              ? () => {
+                  throw new Error("read off the prototype");
+                }
+              : NATIVE_ARRAY_NEXT;
+          },
+        });
+        return { input: ["a", "b"], log, restore };
+      },
+      { ref: true, valueOnly: true },
+    ],
+    [
+      "%ArrayIteratorPrototype%.next replaced by a non-callable",
+      A,
+      () => {
+        const log: string[] = [];
+        const restore = withProtoNext({ configurable: true, writable: true, value: 7 });
+        return { input: ["a", "b"], log, restore };
+      },
+    ],
+    [
+      "%ArrayIteratorPrototype%.next replaced by a throwing function",
+      A,
+      () => {
+        const log: string[] = [];
+        const restore = withProtoNext({
+          configurable: true,
+          writable: true,
+          value: () => {
+            throw new RangeError("proto next threw");
+          },
+        });
+        return { input: ["a", "b"], log, restore };
+      },
+    ],
+    // ── coercion of a Proxy's length ──
+    [
+      "Proxy length: an object whose valueOf answers 1.5 and poisons Math.floor",
+      A,
+      () => {
+        const log: string[] = [];
+        const savedFloor = Math.floor;
+        let reads = 0;
+        const input = loggingProxy(["a", "b"], log, {
+          length: () =>
+            ++reads < 3
+              ? 2
+              : {
+                  valueOf() {
+                    log.push("valueOf");
+                    Math.floor = () => 0;
+                    return 1.5;
+                  },
+                },
+        });
+        return {
+          input,
+          log,
+          restore: () => {
+            Math.floor = savedFloor;
+          },
+        };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "Proxy length: Symbol.toPrimitive answering 3 on a two-element target fails the string element",
+      A,
+      () => {
+        const log: string[] = [];
+        const input = loggingProxy(["a", "b"], log, {
+          length: () => ({
+            [Symbol.toPrimitive](hint: string) {
+              log.push(`toPrimitive ${hint}`);
+              return 3;
+            },
+          }),
+        });
+        return { input, log };
+      },
+    ],
+    [
+      "Proxy length: Symbol.toPrimitive answering 3 under an optional element: the third slot is an own undefined of the fresh output",
+      AOpt,
+      () => {
+        const log: string[] = [];
+        const input = loggingProxy(["a", "b"], log, {
+          length: () => ({
+            [Symbol.toPrimitive](hint: string) {
+              log.push(`toPrimitive ${hint}`);
+              return 3;
+            },
+          }),
+        });
+        return { input, log };
+      },
+      { ref: false },
+    ],
+    [
+      "Proxy length: valueOf rewrites the element about to be read",
+      A,
+      () => {
+        const log: string[] = [];
+        const input = loggingProxy(["a", "b"], log, {
+          length: () => ({
+            valueOf() {
+              log.push("valueOf");
+              return 2;
+            },
+          }),
+          onGet: (t, k) => {
+            if (k === "0") t[1] = "z";
+          },
+        });
+        return { input, log };
+      },
+      { ref: true },
+    ],
+    [
+      "Proxy length: 1.5",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log, { length: () => 1.5 }), log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "Proxy length: NaN (no element runs, stock succeeds with an empty array)",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a"], log, { length: () => NaN }), log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "Proxy length: -3",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a"], log, { length: () => -3 }), log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      'Proxy length: the string "2"',
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log, { length: () => "2" }), log };
+      },
+      { ref: true },
+    ],
+    [
+      "Proxy length: undefined",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log, { length: () => undefined }), log };
+      },
+      { ref: true, alias: true },
+    ],
+    [
+      "Proxy length: 5 on a two-element target fails the string element",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log, { length: () => 5 }), log };
+      },
+    ],
+    [
+      "Proxy length: 5 on a two-element target under an optional element: three own undefined slots of the fresh output",
+      AOpt,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log, { length: () => 5 }), log };
+      },
+      { ref: false },
+    ],
+    [
+      "Proxy length: a getter that throws",
+      A,
+      () => {
+        const log: string[] = [];
+        return {
+          input: loggingProxy(["a", "b"], log, {
+            length: () => {
+              throw new RangeError("length threw");
+            },
+          }),
+          log,
+        };
+      },
+    ],
+    // ── Proxy traps ──
+    [
+      "Proxy over a plain input: every trap logged, the Proxy returned by reference",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+      { ref: true },
+    ],
+    [
+      "Proxy over an empty input",
+      A,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy([], log), log };
+      },
+      { ref: true },
+    ],
+    [
+      "Proxy over a sparse input fails the string element",
+      A,
+      () => {
+        const log: string[] = [];
+        const target: unknown[] = ["a"];
+        target.length = 2;
+        return { input: loggingProxy(target, log), log };
+      },
+    ],
+    [
+      "Proxy over a sparse input under an optional element: the hole is an own undefined slot of the fresh output",
+      AOpt,
+      () => {
+        const log: string[] = [];
+        const target: unknown[] = ["a"];
+        target.length = 2;
+        return { input: loggingProxy(target, log), log };
+      },
+      { ref: false },
+    ],
+    [
+      "Proxy get trap rewrites the next element",
+      A,
+      () => {
+        const log: string[] = [];
+        return {
+          input: loggingProxy(["a", "b"], log, {
+            onGet: (t, k) => {
+              if (k === "0") t[1] = "B";
+            },
+          }),
+          log,
+        };
+      },
+      { ref: true },
+    ],
+    [
+      "Proxy get trap throws on the second element",
+      A,
+      () => {
+        const log: string[] = [];
+        return {
+          input: loggingProxy(["a", "b"], log, {
+            onGet: (_t, k) => {
+              if (k === "1") throw new RangeError("get threw");
+            },
+          }),
+          log,
+        };
+      },
+    ],
+    // ── the length checks before the capture ──
+    [
+      "length checks: exact (two reads, `>` then `<`), min and max read the length before the capture",
+      z.array(z.string()).min(1).max(5).length(2),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+      { ref: true },
+    ],
+    [
+      "length checks: a failing max is dirty, the elements are still captured and parsed",
+      z.array(z.string().refine((s) => s !== "b")).max(1),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+    ],
+    [
+      "length checks with an error map: the too_big issue is built before the capture",
+      z
+        .array(z.string(), {
+          errorMap: (issue, ctx) => {
+            errorMapLog.push(`errorMap ${issue.code}`);
+            return { message: ctx.defaultError };
+          },
+        })
+        .max(1),
+      () => {
+        const log: string[] = [];
+        errorMapLog = log;
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+    ],
+    // ── validation state around the capture ──
+    [
+      "an aborted element and a dirty element",
+      z.array(z.string().min(3)),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy([1, "ab"], log), log };
+      },
+    ],
+    [
+      "a refine on the array sees the input as it then is where stock's sees the capture (the alias rule)",
+      z.array(z.string()).refine((a) => a[0] === "a"),
+      () => {
+        const log: string[] = [];
+        const input: any[] = ["a", "b"];
+        defineLoggingGetter(input, 1, log, "b", () => {
+          input[0] = "z";
+        });
+        return { input, log };
+      },
+      { alias: "fail custom@" },
+    ],
+    [
+      "readonly over the array: the frozen output is the fresh array",
+      z.array(z.string()).readonly(),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+      { ref: false },
+    ],
+    [
+      "a transform in an element writes into the captured array",
+      z.array(z.string().transform((s) => s.toUpperCase())),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", "b"], log), log };
+      },
+      { ref: false },
+    ],
+    [
+      "a default in an element fires on an explicit undefined read: the fresh array",
+      z.array(z.string().default("d")),
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", undefined], log), log };
+      },
+      { ref: false },
+    ],
+    [
+      "an explicit undefined member under an optional element loses the reference (#117)",
+      AOpt,
+      () => {
+        const log: string[] = [];
+        return { input: loggingProxy(["a", undefined], log), log };
+      },
+      { ref: false },
+    ],
+  ];
+  for (const [name, S, make, exp] of rows) {
+    try {
+      compare(name, S, make, exp);
+    } catch (e) {
+      if (e instanceof Error && !(e instanceof assert.AssertionError))
+        e.message = `${name}: ${e.message}`;
+      throw e;
     }
   }
+  // The readonly row's output is frozen in both
+  const frozen = compile(z.array(z.string()).readonly()).parse(["a"]);
+  assert.equal(Object.isFrozen(frozen), true);
 });
 
 test("no own-symbol probe (documented): a clean object or record keeps an undeclared own symbol key by reference, the copy path drops it like stock", () => {

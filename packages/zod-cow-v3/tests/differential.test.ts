@@ -14,12 +14,12 @@
  *      input (a throw, a rewrite of another index, a shrink or growth of the length), an own
  *      `Symbol.iterator` or the array iterator protocol replaced on its prototypes for the case,
  *      each `iterator` and `next` call logged on the container the iterator walks (so a tuple's
- *      spread matches stock's call for call and an array skeleton reaching the prototype's
- *      iterator in any way is flagged). Every read the input can observe is logged per container
- *      and compared with stock's before anything reads the outputs (tuples exactly; arrays and
- *      records through the documented prefix re-read of the copy path, the array log without
- *      stock's iterator reads, #65 and #116; objects on the `get` reads of their declared keys,
- *      and of their undeclared keys on the copy path). Where the compiled output is a copy, its
+ *      spread matches stock's call for call and a skeleton reaching the prototype's iterator a
+ *      second time is flagged). Every read the input can observe is logged per container and
+ *      compared with stock's before anything reads the outputs (tuples and arrays exactly, both
+ *      captures being stock's own spread, #115 and #116; records through the documented prefix
+ *      re-read of the copy path, #65; objects on the `get` reads of their declared keys, and of
+ *      their undeclared keys on the copy path). Where the compiled output is a copy, its
  *      key set and descriptors are compared with stock's exactly; where it is the input reference,
  *      the documented alias rule applies and only the assembly view is compared.
  *   6. The `.pure` contract: when `compiled.pure` is true, the parse succeeded and the input carries
@@ -46,7 +46,6 @@ import {
   matchesPrefixReread,
   readsOf,
   register,
-  registry,
   snapshotInput,
   specsBelow,
   stockView,
@@ -168,11 +167,11 @@ const DATES = [
  * reference is viewed as stock's assembly builds it (`stockView`), so the documented alias rules
  * of the clean path (a non-enumerable declared key, an inherited key a loose object keeps
  * inherited, a surviving symbol key, the input's prototype) do not trip the comparison while
- * anything else does; where such a container was shrunk by its own accessor during the parse
- * (`shrinks`), the compiled output holds it as it then is by reference, or its copy's re-read
- * prefix holds the deleted slots, where stock's fresh array holds what its spread read (the alias
- * rule and the documented second read), so the walk stops there: the two instances' states were
- * compared with each other already. Where the compiled output holds a copy of a decorated
+ * anything else does; where such a container was shrunk, or an earlier index of it rewritten, by
+ * its own accessor during the capture (`aliasing`) and the compiled output holds it by reference,
+ * it holds it as it then is where stock's fresh array holds what its spread read (the alias rule,
+ * #116), so the walk stops there: the two instances' states were compared with each other
+ * already; a copy of it is the capture and is compared. Where the compiled output holds a copy of a decorated
  * container, the copy's key set, descriptors and prototype must be stock's, and an object's
  * undeclared keys must have been read as stock read them. Children are walked by stock's
  * structure, with the input child alongside. Returns the path of the first difference, or null.
@@ -208,7 +207,7 @@ function compareOutputs(
   if (typeof ours !== "object" || ours === null || ours instanceof Date) return `${path} (kind)`;
   const { cowInst, stockInst } = sides;
   const iinfo = typeof inp === "object" && inp !== null ? cowInst.infos.get(inp) : undefined;
-  if (iinfo?.spec.shrinks) return null;
+  if (iinfo?.spec.aliasing && ours === inp) return null;
   const sinfo = stockInst.infos.get(stock);
   // Returned by reference where stock's assembly built a copy: allowed only under the documented
   // alias rules, which `assemblyCopies` excludes. Where stock's output is its own instance of the
@@ -352,31 +351,6 @@ function mayForceCopy(schema: z.ZodTypeAny, value: unknown): boolean {
   }
 }
 
-/** The base node kinds a schema may read an input through: wrappers unwrapped, unions flattened */
-function baseKinds(schema: z.ZodTypeAny, out = new Set<string>()): Set<string> {
-  const def: any = (schema as any)._def;
-  switch (def.typeName) {
-    case "ZodOptional":
-    case "ZodNullable":
-    case "ZodDefault":
-    case "ZodCatch":
-    case "ZodReadonly":
-      return baseKinds(def.innerType, out);
-    case "ZodEffects":
-      return baseKinds(def.schema, out);
-    case "ZodBranded":
-      return baseKinds(def.type, out);
-    case "ZodPipeline":
-      return baseKinds(def.in, out);
-    case "ZodUnion":
-      for (const o of def.options as z.ZodTypeAny[]) baseKinds(o, out);
-      return out;
-    default:
-      out.add(def.typeName);
-      return out;
-  }
-}
-
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((e, i) => e === b[i]);
 
@@ -482,21 +456,17 @@ function decorateArray(r: RNG, out: unknown[], kind: "array" | "tuple"): void {
     if (roll < 0.45) return { kind: "shrink", length: r.int(len + 1) };
     if (roll < 0.6)
       return { kind: "grow", length: len + 1 + r.int(2), value: r.pick(["x", 1] as const) };
-    // The prefix re-read of the array skeleton's copy path would copy a rewritten earlier index
-    // where stock's output holds the original (documented, #65): tuples only, whose capture is
-    // stock's spread
-    if (roll < 0.75 && kind === "tuple" && i > 0)
+    // A rewrite of an earlier index: both captures hold the original; an array returned by
+    // reference holds the rewrite (the alias rule, #116)
+    if (roll < 0.75 && i > 0)
       return { kind: "rewriteEarlier", at: r.int(i), value: r.pick(UNDECLARED_VALUES) };
     return { kind: "count" };
   };
   if (r.chance(ARRAY_DECORATION_RATE)) {
     const roll = r.next();
-    let throwAt = -1;
     if (roll < 0.55 && len > 0) {
       const index = r.int(len);
-      const effect = effectAt(index);
-      if (effect.kind === "throw") throwAt = index;
-      note(spec, { kind: "indexGetter", index, effect });
+      note(spec, { kind: "indexGetter", index, effect: effectAt(index) });
     } else if (roll < 0.65) note(spec, { kind: "ownIterator" });
     else if (roll < 0.75) note(spec, { kind: "replacedNext" });
     else if (len > 0) {
@@ -512,41 +482,14 @@ function decorateArray(r: RNG, out: unknown[], kind: "array" | "tuple"): void {
                 value: r.pick(UNDECLARED_VALUES),
               }
             : { kind: "count" };
-      if (effect.kind === "throw") throwAt = at;
       note(spec, { kind: "arrayProxy", effectAt: at, effect });
     }
-    // A throwing read stops stock's spread before any element is parsed, while the array
-    // skeleton parsed the elements before it (#116, documented): their nested logs and effects
-    // are one-sided
-    if (throwAt > 0 && kind === "array") {
-      for (let j = 0; j < throwAt; j++) {
-        for (const nested of specsBelow(out[j])) {
-          nested.skipLog = true;
-          nested.oneSided = true;
-        }
-      }
-    }
   }
-  const effects = spec.decorations.flatMap((d) =>
-    d.kind === "indexGetter" || d.kind === "arrayProxy" ? [d.effect.kind] : [],
+  spec.aliasing = spec.decorations.some(
+    (d) =>
+      (d.kind === "indexGetter" || d.kind === "arrayProxy") &&
+      (d.effect.kind === "shrink" || d.effect.kind === "rewriteEarlier"),
   );
-  spec.shrinks = effects.includes("shrink");
-  // A throw inside an element's subtree stops the skeleton's loop where stock's spread had read
-  // every later index (#116, documented): this array's log is a prefix of stock's, not compared,
-  // and an effect of its own past that element ran on stock's side only
-  if (
-    kind === "array" &&
-    specsBelow(out).some(
-      (s) =>
-        s !== spec &&
-        s.decorations.some(
-          (d) => (d.kind === "indexGetter" || d.kind === "arrayProxy") && d.effect.kind === "throw",
-        ),
-    )
-  ) {
-    spec.skipLog = true;
-    if (effects.some((e) => e !== "count" && e !== "throw")) spec.oneSided = true;
-  }
   register(out, spec);
 }
 
@@ -1073,26 +1016,12 @@ function bUnion(rng: RNG, depth: number): Built {
     branches.push(b);
     kinds.push(b.desc);
   }
-  // A union with an array option and a tuple option reads one input through two skeletons whose
-  // logs follow different models (the array's prefix re-read without stock's iterator reads, the
-  // tuple's exact spread), so such an input's own log is not compared
-  const readers = new Set<string>();
-  for (const b of branches) baseKinds(b.schema, readers);
-  const mixedReaders = readers.has("ZodArray") && readers.has("ZodTuple");
   return {
     schema: z.union(
       branches.map((b) => b.schema) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]],
     ),
     desc: `union(${kinds.join(", ")})`,
-    gen: (r) => {
-      const v = r.pick(branches).gen(r);
-      if (mixedReaders && typeof v === "object" && v !== null) {
-        const spec = registry.get(v);
-        if (spec !== undefined && (spec.kind === "array" || spec.kind === "tuple"))
-          spec.skipLog = true;
-      }
-      return v;
-    },
+    gen: (r) => r.pick(branches).gen(r),
   };
 }
 
@@ -1158,8 +1087,6 @@ function issueView(issues: readonly any[]): string {
 const thrownText = (e: unknown): string =>
   e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e);
 
-const ITERATOR_READS = new Set(["iterator", "next", "get Symbol(Symbol.iterator)"]);
-
 /**
  * Pin the oracle itself before any case runs: the prefix re-read model accepts exactly the
  * documented shapes, the stock-assembly view normalizes what the alias rules leave and nothing
@@ -1223,7 +1150,7 @@ function checkOracle(): void {
     ],
   };
   register(plain, spec);
-  const inst = instantiate(plain, false);
+  const inst = instantiate(plain);
   const info = inst.infos.get(inst.root as object)!;
   const view = stockView(inst.root as object, info, (x) => x) as Record<string, unknown>;
   assert(
@@ -1269,8 +1196,8 @@ function checkOracle(): void {
   const nativeValues = Array.prototype.values;
   const plainArray = [1, 2];
   register(plainArray, { id: 1, kind: "array", decorations: [{ kind: "replacedNext" }] });
-  const arrayInst = instantiate(plainArray, false);
-  const otherInst = instantiate(plainArray, true);
+  const arrayInst = instantiate(plainArray);
+  const otherInst = instantiate(plainArray);
   const array = arrayInst.root as number[];
   const arrayLog = arrayInst.logs.get(1)!;
   const walk = ["iterator", "next", "next", "next"];
@@ -1324,30 +1251,21 @@ checkOracle();
 
 /**
  * The event log of one decorated container against stock's (the documented models of the file
- * header): a tuple exactly; an array through the prefix re-read of its copy path and without
- * stock's iterator reads, which the skeleton never makes (#116); a record through the prefix
- * re-read; an object on the ordered `get` reads of its declared keys (its undeclared reads are
- * compared on the copy path by `compareOutputs`).
+ * header): a tuple and an array exactly, both captures being stock's own spread (#115, #116); a
+ * record through the prefix re-read of its copy path; an object on the ordered `get` reads of its
+ * declared keys (its undeclared reads are compared on the copy path by `compareOutputs`).
  */
 function compareLog(
   spec: ContainerSpec,
   cow: readonly string[],
   stock: readonly string[],
 ): string | null {
-  if (spec.skipLog) return null;
   const show = () => `\n      stock: ${stock.join(" ")}\n      ours:  ${cow.join(" ")}`;
   const complete = spec.decorations.some((d) => d.kind === "proxy" || d.kind === "arrayProxy");
   switch (spec.kind) {
     case "tuple":
-      return sameList(cow, stock) ? null : `EVENT LOG MISMATCH #${spec.id} tuple${show()}`;
-    case "array": {
-      if (cow.some((e) => ITERATOR_READS.has(e)))
-        return `ARRAY ITERATOR CONSULTED #${spec.id}${show()}`;
-      const expected = stock.filter((e) => !ITERATOR_READS.has(e));
-      return matchesPrefixReread(cow, expected, complete)
-        ? null
-        : `EVENT LOG MISMATCH #${spec.id} array${show()}`;
-    }
+    case "array":
+      return sameList(cow, stock) ? null : `EVENT LOG MISMATCH #${spec.id} ${spec.kind}${show()}`;
     case "record":
       return matchesPrefixReread(cow, stock, complete)
         ? null
@@ -1390,8 +1308,8 @@ for (let seed = 1; seed <= SEEDS; seed++) {
     // getter effect, a `readonly` over a pass-through leaf (which freezes the input in place on
     // both sides, stock behavior) and every read log are compared between the two afterwards
     const specs = specsBelow(plain);
-    const stockInst = instantiate(plain, true);
-    const cowInst = instantiate(plain, false);
+    const stockInst = instantiate(plain);
+    const cowInst = instantiate(plain);
     const input = cowInst.root;
     const pristine = cowInst.effectful ? null : snapshotInput(input, cowInst, false);
     // A case with a `replacedNext` decoration parses under the replaced array iterator protocol,
@@ -1430,7 +1348,7 @@ for (let seed = 1; seed <= SEEDS; seed++) {
       console.log(caseId);
       for (const spec of specs) {
         console.log(
-          `  #${spec.id} ${spec.kind}${spec.mode ? `/${spec.mode}` : ""}${spec.skipLog ? " (log not compared)" : ""}${spec.oneSided ? " (one-sided)" : ""}${spec.shrinks ? " (shrinks)" : ""}\n    stock: ${(stockLogs.get(spec.id) ?? []).join(" ")}\n    ours:  ${(cowLogs.get(spec.id) ?? []).join(" ")}`,
+          `  #${spec.id} ${spec.kind}${spec.mode ? `/${spec.mode}` : ""}${spec.aliasing ? " (aliasing)" : ""}\n    stock: ${(stockLogs.get(spec.id) ?? []).join(" ")}\n    ours:  ${(cowLogs.get(spec.id) ?? []).join(" ")}`,
         );
       }
       console.log(

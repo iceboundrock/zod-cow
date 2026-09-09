@@ -347,21 +347,29 @@ export interface ArraySpec {
 }
 
 /**
- * Generated array skeleton (the closure `makeArray` in compile.ts). Stock reads every element
- * once (`[...data]`) and builds a fresh array from the results; here the clean path returns the
- * input by reference, the first forced change (a changed element, or an element that reads as
- * `undefined`: a hole, which stock's spread turns into an own `undefined` slot, or an explicit
- * `undefined`, which the skeleton cannot tell from a hole without a read stock does not make)
- * rebuilds the clean prefix from the input into a fresh array (the one second read, of the
- * elements before the change) and every later element is written from the loop's single read, so
- * a getter at or after the change is read once, as stock reads it (#65). In stock's rebuild mode
- * (`ctx.force`) the fresh array is allocated up front and every element is written once. The
- * elements are read as the loop reaches them, after the previous element was parsed, where stock
- * reads them all in its spread before any element runs (#116, documented).
+ * Generated array skeleton (the closure `makeArray` in compile.ts).
+ *
+ * The capture is stock's own: after the length checks, `stockSpread` evaluates `[...ctx.data]` as
+ * `ZodArray._parse` does, so every read the capture makes on the input, every piece of user code
+ * it runs, every intrinsic it consults and every engine error it throws are stock's by identity,
+ * and every element is validated from the copy, so the validation result is stock's for every
+ * input (#116). The copy is the output when an element's result differs from what the capture
+ * read, when an element reads as `undefined` (a hole, which stock's spread turns into an own
+ * `undefined` slot, or an explicit `undefined`, which the skeleton cannot tell from a hole without
+ * a `has` stock never performs, #117) or in stock's rebuild mode (`ctx.force`); each result is
+ * written into it, as stock's `mergeArray` collects the results into a fresh array. Otherwise the
+ * input is returned by reference, without any read to prove that it still holds what the capture
+ * yielded (that proof would be reads stock does not make, the rule of #115), so an input whose
+ * capture differs from its indexed contents (an own `Symbol.iterator` or a replaced prototype
+ * iterator yielding other values, a Proxy answering another length, an accessor that shrinks the
+ * input or rewrites an earlier index while it is read) comes back as itself where stock returns
+ * the capture: the documented alias rule of the clean path. Every element is read once on every
+ * path, and the skeleton makes no read of the input of its own.
  */
 export function genArray(spec: ArraySpec): Validator {
   const g = new Gen();
   const em = g.hoist(spec.errorMap, "em");
+  const spread = g.hoist(stockSpread, "stockSpread");
   const checks: string[] = [];
   if (spec.exact !== null) {
     const v = spec.exact.value;
@@ -383,35 +391,28 @@ export function genArray(spec: ArraySpec): Validator {
       `if (data.length > ${spec.max.value}) pushIssue(ctx, data, ${em}, { code: "too_big", maximum: ${spec.max.value}, type: "array", inclusive: true, exact: false, message: ${m} });`,
     );
   }
-  // The first forced change: a fresh array of the input's length takes the clean prefix (the one
-  // second read of the input, documented, #65) and every later element is written from the loop's
-  // single read. An element that reads as `undefined` and comes back unchanged is a forced change
-  // too, whether the input holds an own `undefined` or a hole: stock's spread turns a hole into an
-  // own `undefined` slot, and the own-ness test that would tell them apart (`i in data`) is a
-  // `has` stock never performs on the input (a Proxy trap there ran user code stock never runs,
-  // third and fourth reviews of #115; #117), so an input holding an explicit `undefined` member is
-  // copied, the decision the zod4 line took in #95. No copy runs once a slot has failed: the parse
-  // returns FAILED and the prefix read would be a read stock does not make.
-  const copy =
-    "dirty = true; out = new Array(data.length); for (let j = 0; j < i; j++) out[j] = data[j];";
+  // A changed result is written into the copy and makes it the output; an element that reads as
+  // `undefined` and comes back unchanged makes it the output too, hole or explicit `undefined`
+  // alike (#117). The copy already holds every unchanged value, so a clean slot writes nothing.
   const slot = slotBlock(
     g,
     spec.element,
     spec,
     "i",
-    (holeTest) =>
-      `if (dirty) out[i] = inVal;${holeTest ? ` else if (inVal === undefined) { ${copy} out[i] = inVal; }` : ""}`,
+    (holeTest) => (holeTest ? "if (inVal === undefined) dirty = true;" : ""),
     `if (outVal === FAILED) anyFailed = true;
-      else if (dirty) out[i] = outVal;
-      else if (!anyFailed && (outVal !== inVal || inVal === undefined)) { ${copy} out[i] = outVal; }`,
+      else if (outVal !== inVal) { dirty = true; items[i] = outVal; }
+      else if (inVal === undefined) dirty = true;`,
   );
   const src = `return function generatedArray(data, ctx) {
     if (!Array.isArray(data)) { pushInvalidType(ctx, data, ${em}, "array"); return FAILED; }
     ${checks.join("\n    ")}
-    let dirty = ctx.force, out = dirty ? new Array(data.length) : data, anyFailed = false;
-    for (let i = 0; i < data.length; i++) { const inVal = data[i]; ${slot} }
+    const items = ${spread}(data);
+    const n = items.length;
+    let dirty = ctx.force, anyFailed = false;
+    for (let i = 0; i < n; i++) { const inVal = items[i]; ${slot} }
     if (anyFailed) return FAILED;
-    return out;
+    return dirty ? items : data;
   };`;
   return build(g, spec.prefixIssues, src);
 }

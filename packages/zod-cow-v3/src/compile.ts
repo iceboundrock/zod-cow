@@ -946,21 +946,19 @@ function makeArray(def: any): Validator {
       });
     }
 
-    // Same algorithm as the generated skeleton (`genArray` in codegen.ts): the clean path returns
-    // the input by reference, the first forced change rebuilds the clean prefix into a fresh array
-    // (the one second read of the input, documented, #65) and every later element is written from
-    // the loop's single read. An element that reads as `undefined` and comes back unchanged is a
-    // forced change too, whether the input holds an own `undefined` or a hole: stock's spread turns
-    // a hole into an own `undefined` slot, and the own-ness test that would tell them apart is a
-    // `has` stock never performs on the input (#117, the decision of #95 on the zod4 line). Stock's
-    // rebuild mode (`ctx.force`) starts from a fresh array of the input's length and writes every
-    // element. No copy runs once an element has failed: the parse returns FAILED and the prefix read
-    // would be a read stock does not make.
+    // Same algorithm as the generated skeleton (`genArray` in codegen.ts): the capture is stock's
+    // own `[...ctx.data]`, made where stock makes it, every element is validated from it and a
+    // changed result is written back. The copy is the output when a result changed, when an
+    // element read as `undefined` (a hole and an explicit member are told apart only by a `has`
+    // stock never performs, #117) or in stock's rebuild mode (`ctx.force`); otherwise the input is
+    // returned by reference without any read to prove that it still holds what the capture
+    // yielded, the documented alias rule of the clean path (#116).
+    const items = stockSpread(data);
+    const n = items.length;
     let dirty = ctx.force;
-    let out: any[] = dirty ? new Array(data.length) : data;
     let anyFailed = false;
-    for (let i = 0; i < data.length; i++) {
-      const inVal = data[i];
+    for (let i = 0; i < n; i++) {
+      const inVal = items[i];
       let outVal: any;
       if (eager) {
         ctx.path.push(i);
@@ -973,19 +971,15 @@ function makeArray(def: any): Validator {
       }
       if (outVal === FAILED) {
         anyFailed = true; // Keep collecting issues from the remaining elements (same as stock)
-        continue;
-      }
-      if (dirty) {
-        out[i] = outVal;
-      } else if (!anyFailed && (outVal !== inVal || inVal === undefined)) {
+      } else if (outVal !== inVal) {
         dirty = true;
-        out = new Array(data.length);
-        for (let j = 0; j < i; j++) out[j] = data[j];
-        out[i] = outVal;
+        items[i] = outVal;
+      } else if (inVal === undefined) {
+        dirty = true;
       }
     }
     if (anyFailed) return FAILED;
-    return out;
+    return dirty ? items : data;
   };
 }
 

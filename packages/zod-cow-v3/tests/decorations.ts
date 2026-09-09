@@ -58,28 +58,16 @@ export interface ContainerSpec {
   declared?: string[];
   decorations: Decoration[];
   /**
-   * Whether the container's log is comparable. An array read that throws stops stock's spread
-   * before any element is parsed, while the array skeleton parsed the elements before it (#116,
-   * documented): the containers nested at those indices log on one side only, and so do their
-   * effects (`oneSided`, which also takes them out of the state comparison). A throw inside an
-   * element's subtree stops the skeleton's loop where stock's spread had read every later index,
-   * so an array above such a throw logs a prefix of stock's reads and is skipped as well, and its
-   * own effects past that element are one-sided too. A container read by both an array option
-   * and a tuple option of one union follows two models in one log and is skipped
+   * Whether an accessor or trap of the container changes what its indices hold after the capture
+   * read them (a shrink, a rewrite of an earlier index), the effects whose outcome differs from
+   * stock's by documentation: where the compiled output holds the container by reference it holds
+   * it as it then is (the alias rule of the clean path, #116), while stock's fresh array holds
+   * what its spread read. The output comparison stops at such a container returned by reference
+   * (the two instances' states are compared with each other instead); a copy is the capture and
+   * is compared exactly. A rewrite of a later index and a growth are read alike by both (stock's
+   * spread reads the live length and the rewritten slot), so their outcomes are compared
    */
-  skipLog?: boolean;
-  oneSided?: boolean;
-  /**
-   * Whether an accessor or trap of the container shrinks the input when read, the one effect
-   * whose outcome differs from stock's by documentation: where the compiled output holds the
-   * container by reference it holds it as it then is (the alias rule of the clean path), where
-   * it copies, the prefix re-read at the first change finds the slots the shrink deleted (#65),
-   * while stock's fresh array holds what its spread read before the shrink. The output
-   * comparison stops at such a container; the two instances' states are compared with each
-   * other instead. A rewrite of a later index and a growth are read alike by both (stock's spread
-   * reads the live length and the rewritten slot), so their outcomes are compared
-   */
-  shrinks?: boolean;
+  aliasing?: boolean;
 }
 
 /** The symbol key every `symbolKey` decoration uses, so the two instances carry the same key */
@@ -168,14 +156,14 @@ const NATIVE_VALUES = NATIVE_VALUES_DESC.value as (this: unknown) => object;
  * decorated container (a Proxy included, since the receiver is what the call was made on), logs
  * `iterator` on that container and remembers which container the iterator belongs to;
  * `%ArrayIteratorPrototype%.next` logs `next` on the container whose iterator it advances and
- * delegates. Stock's spread of an array or tuple and the tuple skeleton's spread (stock's own)
- * run through both, so a tuple's log holds the same `iterator` and `next` entries on both sides,
- * while the array skeleton reads by index (#116): an array skeleton that reached the prototype's
- * iterator in any way (a spread, a `for...of`, `Array.from`, `Array.prototype.values.call`, which
- * an own `Symbol.iterator` does not see) logs on the compiled side, where the runner flags it.
- * Stock's `for...of` over its own result arrays and the engine's loops walk fresh arrays no
- * instance knows, so they log nothing. A `next` on an iterator over a container of the other
- * instance is not logged either: the two parses run under separate installs.
+ * delegates. Stock's spread of an array or tuple and both skeletons' capture (stock's own spread,
+ * #115, #116) run through both, so a container's log holds the same `iterator` and `next` entries
+ * on both sides, and a skeleton that reached the prototype's iterator by any other route (a
+ * second spread, a `for...of`, `Array.from`, `Array.prototype.values.call`) would log an extra
+ * walk on the compiled side, where the runner flags it. Stock's `for...of` over its own result
+ * arrays and the engine's loops walk fresh arrays no instance knows, so they log nothing. A `next`
+ * on an iterator over a container of the other instance is not logged either: the two parses run
+ * under separate installs.
  */
 export function withReplacedNext<T>(inst: Instance, fn: () => T): T {
   const owners = new WeakMap<object, string[]>();
@@ -209,12 +197,10 @@ export function withReplacedNext<T>(inst: Instance, fn: () => T): T {
 }
 
 /**
- * Build one instance of the plain case input with every registered decoration applied. The
- * `stockSide` instance leaves out the decorations the array skeleton is documented to ignore
- * (an own `Symbol.iterator`, #116): stock would follow them where the skeleton reads by index,
- * so the compiled instance carries them and the runner asserts they were never consulted.
+ * Build one instance of the plain case input with every registered decoration applied; the two
+ * instances of a case carry the same decorations, since both parsers' captures are stock's spread.
  */
-export function instantiate(plain: unknown, stockSide: boolean): Instance {
+export function instantiate(plain: unknown): Instance {
   const inst: Instance = {
     root: undefined,
     infos: new WeakMap(),
@@ -224,40 +210,40 @@ export function instantiate(plain: unknown, stockSide: boolean): Instance {
     replacedNext: false,
     armed: true,
   };
-  inst.root = clone(plain, inst, stockSide);
+  inst.root = clone(plain, inst);
   return inst;
 }
 
-function clone(v: unknown, inst: Instance, stockSide: boolean): unknown {
+function clone(v: unknown, inst: Instance): unknown {
   if (typeof v !== "object" || v === null) return v;
   if (v instanceof Date) return new Date(v.getTime());
   if (v instanceof Map) {
     const m = new Map<unknown, unknown>();
-    for (const [k, x] of v) m.set(clone(k, inst, stockSide), clone(x, inst, stockSide));
+    for (const [k, x] of v) m.set(clone(k, inst), clone(x, inst));
     return m;
   }
   if (v instanceof Set) {
     const s = new Set<unknown>();
-    for (const x of v) s.add(clone(x, inst, stockSide));
+    for (const x of v) s.add(clone(x, inst));
     return s;
   }
   const spec = registry.get(v);
   if (Array.isArray(v)) {
     const out: unknown[] = new Array(v.length); // holes stay holes
-    for (const k of Object.keys(v)) (out as any)[k] = clone((v as any)[k], inst, stockSide);
-    return spec === undefined ? out : decorateArray(out, spec, inst, stockSide);
+    for (const k of Object.keys(v)) (out as any)[k] = clone((v as any)[k], inst);
+    return spec === undefined ? out : decorateArray(out, spec, inst);
   }
   const inherited = spec?.decorations.find((d) => d.kind === "inherited");
   let proto: object | null = Object.prototype;
   if (inherited !== undefined && inherited.kind === "inherited") {
-    proto = { [inherited.key]: clone(inherited.value, inst, stockSide) };
+    proto = { [inherited.key]: clone(inherited.value, inst) };
     inst.prototypes.add(proto);
   }
   const out = Object.create(proto);
   for (const k of Object.keys(v)) {
     // defineProperty rather than assignment: an own "__proto__" key must stay a data property
     Object.defineProperty(out, k, {
-      value: clone((v as any)[k], inst, stockSide),
+      value: clone((v as any)[k], inst),
       enumerable: true,
       writable: true,
       configurable: true,
@@ -343,12 +329,7 @@ function decorateObject(out: any, spec: ContainerSpec, inst: Instance): object {
   return result;
 }
 
-function decorateArray(
-  out: any[],
-  spec: ContainerSpec,
-  inst: Instance,
-  stockSide: boolean,
-): object {
+function decorateArray(out: any[], spec: ContainerSpec, inst: Instance): object {
   const log = logOf(spec, inst);
   let result: object = out;
   const apply = (effect: Effect, at: number) => {
@@ -387,10 +368,8 @@ function decorateArray(
         break;
       }
       case "ownIterator": {
-        // Stock's spread follows an own `Symbol.iterator`; the array skeleton reads by index
-        // (#116, documented), so the compiled instance alone carries it and must never call it.
-        // The tuple skeleton evaluates stock's spread, so its instance carries it on both sides.
-        if (stockSide && spec.kind === "array") break;
+        // Stock's spread follows an own `Symbol.iterator`, and so does each skeleton's capture
+        // (stock's own spread), so both instances carry it and both logs hold its calls
         const values = out.slice();
         Object.defineProperty(out, Symbol.iterator, {
           value: function iterator() {
@@ -481,7 +460,6 @@ export function snapshotInput(
 ): unknown {
   if (typeof v !== "object" || v === null) return v;
   const info = inst.infos.get(v);
-  if (info?.spec.oneSided) return { $oneSided: info.spec.id };
   const target = info === undefined ? v : info.target;
   const hit = seen.get(target);
   if (hit !== undefined) return hit;
@@ -512,7 +490,7 @@ export function snapshotInput(
   };
   seen.set(target, out);
   for (const k of Reflect.ownKeys(target)) {
-    // The own iterator is a decoration the compiled instance alone carries on an array (#116)
+    // An own iterator is a function object the two instances cannot share; both carry one
     if (k === Symbol.iterator) continue;
     const d = Object.getOwnPropertyDescriptor(target, k)!;
     (out.keys as unknown[]).push([
@@ -600,10 +578,11 @@ const isElementRead = (e: string) => e.startsWith("get ") && e !== "get length";
 /**
  * Whether `cow` is `stock` with contiguous blocks inserted, each an optional `get length` (the
  * fresh array's allocation) followed by a subsequence, in order, of the element reads stock made
- * before the block. This is the documented prefix re-read of the array and record skeletons at
- * the first forced change (#65), and stock's rebuild mode's up-front length read (the block is
- * then the length read alone, before any element); one block per read pass, so a container a
- * union reads through two array options may carry two. Under a Proxy every read is logged
+ * before the block. This is the documented prefix re-read of the record skeleton at the first
+ * forced change (#65; the array skeleton's went with its inline timeline, #116), and stock's
+ * rebuild mode's up-front length read (the block is then the length read alone, before any
+ * element); one block per read pass, so a container a union reads through two record options
+ * may carry two. Under a Proxy every read is logged
  * (`complete`), so the block must follow the read of the changed element and may re-read only
  * the elements before that read; an accessor logs one key alone, so the changed element's own
  * read may be unlogged and the block may re-read any logged element before it.

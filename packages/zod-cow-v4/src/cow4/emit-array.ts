@@ -2,7 +2,7 @@
 import type { CodeCtx } from "./codectx.js";
 import { containerChildFn, emitContainerChecks } from "./emit.js";
 import { officialFn } from "./official.js";
-import { type Fn, isAsyncProduct, type Node } from "./product.js";
+import { type Fn, hasPromise, isAsyncProduct, type Node } from "./product.js";
 import { cowSafeContainerForChild, isPure } from "./purity.js";
 
 /* ── array skeleton: element-level reference comparison + prefix rebuild at the first change ── */
@@ -103,7 +103,11 @@ export function emitCoWArray(
       ctx.write(`${started}[${n}] = ${f}(${e});`);
     });
     ctx.write(`}`);
-    ctx.write(`const ${settled} = await Promise.all(${started});`);
+    // No element suspended: the started results are the settled ones and the skeleton completes synchronously (#105)
+    ctx.write(`let ${settled} = ${started};`);
+    ctx.write(
+      `if (${ctx.addConst(hasPromise)}(${started})) ${settled} = yield Promise.all(${started});`,
+    );
     ctx.write(`for (let ${i} = 0; ${i} < ${n}; ${i}++) {`);
     ctx.indented(() => {
       ctx.write(`const ${e} = ${reads}[${i}];`);

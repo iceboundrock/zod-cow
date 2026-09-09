@@ -126,7 +126,8 @@ function emitAsyncMapLoop(
     ctx.write(`} else { const kr = kp, vr = vp; ${entry} }`);
   });
   ctx.write(`}`);
-  ctx.write(`if (${proms}.length) await Promise.all(${proms});`);
+  // No pair suspended: the skeleton completes synchronously, like stock's loop (#105)
+  ctx.write(`if (${proms}.length) yield Promise.all(${proms});`);
   ctx.write(`for (let j = 0, n = 0; j < ${log}.length; j += 4, n++) {`);
   ctx.indented(() => {
     ctx.write(`if (${log}[j + 2] === INVALID || ${log}[j + 3] === INVALID) return INVALID;`);

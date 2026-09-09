@@ -119,20 +119,31 @@ export function compile<T extends z.ZodType>(schema: T, options?: CompileOptions
   }
 
   if (isAsync) {
-    // Async skeleton: the sync API throws, as stock does; the async entries await the skeleton and fall back to stock
+    // Async skeleton: the sync API throws, as stock does; the async entries await the skeleton and fall back to stock.
+    // The skeleton answers synchronously when nothing it ran returned a Promise, like stock's runtime (#105), so
+    // its result is awaited only when it is one, and a throw that leaves it synchronously takes the same route as
+    // a rejection (a sync island's `$ZodAsyncError` at a Promise is the fallback's signal on both).
     const fast = cowFn;
+    const settle = async (data: unknown): Promise<unknown> => {
+      try {
+        const out = fast(data);
+        return out instanceof Promise ? await out : out;
+      } catch (e) {
+        return asyncFallbackOr(e);
+      }
+    };
     return {
       ...common,
       parse: throwSyncOnAsync,
       safeParse: throwSyncOnAsync,
       validate: throwSyncOnAsync,
       async parseAsync(data) {
-        const out = await (fast(data) as Promise<unknown>).catch(asyncFallbackOr);
+        const out = await settle(data);
         if (out !== INVALID) return out as z.output<T>;
         return unwrap(await stockParseAsync(data));
       },
       async safeParseAsync(data) {
-        const out = await (fast(data) as Promise<unknown>).catch(asyncFallbackOr);
+        const out = await settle(data);
         if (out !== INVALID) return ok(out);
         return (await stockParseAsync(data)) as Err;
       },

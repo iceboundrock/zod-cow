@@ -1583,7 +1583,8 @@ import { compile } from "../src/index.js";
   assert.equal(unhandled, 0, "a started promise is always attached to the Promise.all");
   console.log("  a rejecting child next to a failing sync sibling rejects, nothing unhandled ✓");
 
-  // Code pin: the async layout awaits one Promise.all and nothing else; the sync layout awaits nothing
+  // Code pin: the async layout suspends on one Promise.all and nothing else, and only when a started
+  // result is a Promise (#105); the sync layout suspends nowhere
   for (const S of [
     z.tuple([refine, pass]),
     z.tuple([z.string()], refine),
@@ -1592,11 +1593,19 @@ import { compile } from "../src/index.js";
     z.record(z.enum(["a"]), pass),
   ]) {
     const C = compile(S);
-    assert.ok(C.async && C.code!.includes("await Promise.all("), "async layout: one Promise.all");
-    assert.equal((C.code!.match(/await /g) ?? []).length, 1, "async layout: a single await");
+    assert.ok(C.async && C.code!.includes("yield Promise.all("), "async layout: one Promise.all");
+    assert.equal((C.code!.match(/yield /g) ?? []).length, 1, "async layout: a single suspension");
+    assert.match(
+      C.code!,
+      /if \((\w+ instanceof Promise( \|\| \w+ instanceof Promise)*|c\d+\(\w+\))\) (\[[^\]]*\]|\w+) = yield Promise\.all\(/,
+      "the Promise.all runs only when a started result is a Promise",
+    );
+    assert.ok(!C.code!.includes("await"), "an async skeleton awaits nothing itself");
   }
-  assert.ok(!compile(z.tuple([z.string(), z.number().optional()])).code!.includes("await"));
-  console.log("  the async layout awaits one Promise.all; the sync layout awaits nothing ✓");
+  assert.ok(!compile(z.tuple([z.string(), z.number().optional()])).code!.includes("yield"));
+  console.log(
+    "  the async layout suspends on one guarded Promise.all; the sync layout suspends nowhere ✓",
+  );
 }
 
 /* ── 21. union skeleton: each option's CoW product tried in order, the clean input shared (#58) ── */
@@ -2678,6 +2687,255 @@ import { compile } from "../src/index.js";
   }
   console.log(
     "  strict and loose enum records of 3 / 40 keys accept every key order by reference and copy or reject like stock ✓",
+  );
+}
+/* ── 27. a statically async skeleton completes synchronously when nothing returned a Promise, like stock's runtime (#105) ── */
+{
+  console.log("\n── sync completion of async skeletons (#105) ──");
+  // The reduction of #105: the inner set is statically async (its member transform) but empty, so
+  // stock completes the tuple synchronously and both members reach the wrapper's async refine at
+  // the same depth; their promises settle in start order and the set keeps the input order. An
+  // async-function skeleton returned a Promise for the tuple member even so, one round deeper than
+  // the null member's refine, and the parent set wrote the null first.
+  const child = z
+    .tuple([z.set(z.date().transform(async (v) => v)), z.boolean().transform((v) => v)])
+    .nullable()
+    .refine(async () => true);
+  const tag = (v: unknown) => (v === null ? "null" : "tuple");
+  const S105 = z.set(child);
+  const s105 = new Set<unknown>([[new Set(), true], null]);
+  const stockSet = [...(await S105.parseAsync(s105))].map(tag).join(",");
+  assert.equal(stockSet, "tuple,null", "stock: the tuple member keeps its place");
+  assert.equal(
+    [...(await compile(S105).parseAsync(s105))].map(tag).join(","),
+    stockSet,
+    "set members settle in stock's order (#105)",
+  );
+  const M105 = z.map(z.string(), child);
+  const m105 = new Map<string, unknown>([
+    ["t", [new Set(), true]],
+    ["n", null],
+  ]);
+  const stockMap = [...(await M105.parseAsync(m105)).keys()].join(",");
+  assert.equal(stockMap, "t,n");
+  assert.equal(
+    [...(await compile(M105).parseAsync(m105)).keys()].join(","),
+    stockMap,
+    "map entries settle in stock's order (#105)",
+  );
+  const R105 = z.record(z.string(), child);
+  const r105 = { t: [new Set(), true], n: null };
+  const stockRec = Object.keys(await R105.parseAsync(r105)).join(",");
+  assert.equal(stockRec, "t,n");
+  assert.equal(
+    Object.keys(await compile(R105).parseAsync(r105)).join(","),
+    stockRec,
+    "record pairs settle in stock's order (#105)",
+  );
+  console.log(
+    "  the #105 reduction: set, map and record write the tuple member first, like stock ✓",
+  );
+
+  // Every container kind as a member: data that stock completes synchronously (the async-typed child
+  // never runs) keeps its place ahead of a later null member under a nullable wrapper with an async
+  // refine, since stock ties both members on the refine's promise and settles them in start order
+  const asyncT = z.string().transform(async (v) => v);
+  const kinds = [
+    ["object, absent optional key", z.object({ a: asyncT.optional() }), {}],
+    ["array, empty", z.array(asyncT), []],
+    ["tuple, no rest element", z.tuple([z.string()], asyncT), ["a"]],
+    ["tuple, absent optional slot", z.tuple([z.string(), asyncT.optional()]), ["a"]],
+    ["enum record, absent key", z.record(z.enum(["a"]), asyncT.optional()), {}],
+    ["record, empty", z.record(z.string(), asyncT), {}],
+    ["map, empty", z.map(z.string(), asyncT), new Map()],
+    ["set, empty", z.set(asyncT), new Set()],
+    ["optional above an array, empty", z.array(asyncT).optional(), []],
+    ["nested: array of empty sets", z.array(z.set(asyncT)), [new Set(), new Set()]],
+    ["union with a container option", z.union([z.array(asyncT), z.number()]), 5],
+  ] as [string, z.ZodType, unknown][];
+  for (const [label, K, data] of kinds) {
+    const S = z.set(K.nullable().refine(async () => true));
+    const input = new Set<unknown>([data, null]);
+    const stock = [...(await S.parseAsync(input))];
+    assert.equal(stock.length, 2);
+    assert.equal(stock[1], null, `stock ${label}: the data member settles first`);
+    const ours = [...(await compile(S).parseAsync(input))];
+    assert.equal(ours.length, 2);
+    assert.equal(ours[1], null, `${label}: the data member settles first, like stock`);
+    assert.deepEqual(ours[0], stock[0], `${label}: same output`);
+  }
+  console.log(
+    "  every container kind that stock completes synchronously keeps its place ahead of a null member ✓",
+  );
+
+  // A member the async-typed child does run still settles after one it does not, in both (control)
+  const C = z.set(
+    z
+      .array(asyncT)
+      .nullable()
+      .refine(async () => true),
+  );
+  const cIn = new Set<unknown>([["a"], [], null]);
+  const view = (s: Set<unknown>) =>
+    [...s].map((m) => (m === null ? "null" : `[${(m as string[]).length}]`)).join(",");
+  const stockC = view(await C.parseAsync(cIn));
+  assert.equal(stockC, "[0],null,[1]", "stock: the non-empty array settles a round later");
+  assert.equal(view(await compile(C).parseAsync(cIn)), stockC, "the non-empty member settles last");
+  console.log("  a member whose async child ran settles after the others, like stock ✓");
+
+  // Side effects: a sync refine on a container the parse completes synchronously runs before the
+  // next sibling starts, as stock's runChecks does; an async-function skeleton ran it a round later
+  const log: string[] = [];
+  const T = z.tuple([
+    z.array(asyncT).refine(() => {
+      log.push("A checked");
+      return true;
+    }),
+    z.string().transform((v) => {
+      log.push("B");
+      return v;
+    }),
+  ]);
+  await T.parseAsync([[], "x"]);
+  const stockLog = log.splice(0).join(", ");
+  assert.equal(stockLog, "A checked, B");
+  await compile(T).parseAsync([[], "x"]);
+  assert.equal(log.join(", "), stockLog, "the sync refine runs before the sibling starts");
+  console.log("  a sync refine on a synchronously completed container runs before the sibling ✓");
+
+  // The async entries answer a synchronously completed parse, and the input reference survives
+  const E = compile(z.set(asyncT));
+  const empty = new Set<string>();
+  assert.equal(E.async, true);
+  assert.equal(await E.parseAsync(empty), empty, "parseAsync returns the input reference");
+  const safe = await E.safeParseAsync(empty);
+  assert.ok(safe.success && safe.data === empty);
+  assert.throws(
+    () => E.parse(empty),
+    (e: unknown) => (e as Error).constructor.name === "$ZodAsyncError",
+  );
+  console.log(
+    "  the async entries answer a synchronously completed parse; the sync API still throws ✓",
+  );
+
+  // A child that throws synchronously (a throwing refine, a sync island meeting a Promise) throws out of
+  // the parent's start loop, where an async-function skeleton rejected a round later: the parent aborts
+  // before it starts the next sibling, as stock's loop does
+  const thrower = z.number().refine(() => {
+    throw new Error("boom");
+  });
+  const throwLog: string[] = [];
+  const nested = z.tuple([z.string().transform(async (v) => v), thrower]);
+  const parent = z.tuple([
+    nested,
+    z.string().transform((v) => {
+      throwLog.push("sibling started");
+      return v;
+    }),
+  ]);
+  const throwIn = [["a", 1], "x"];
+  await parent.parseAsync(throwIn).catch((e) => throwLog.push(`threw ${(e as Error).message}`));
+  const stockThrow = throwLog.splice(0).join(", ");
+  assert.equal(stockThrow, "threw boom", "stock aborts before the next sibling starts");
+  await compile(parent)
+    .parseAsync(throwIn)
+    .catch((e) => throwLog.push(`threw ${(e as Error).message}`));
+  assert.equal(
+    throwLog.splice(0).join(", "),
+    stockThrow,
+    "a synchronous throw aborts the parent's start loop, like stock (#105)",
+  );
+  console.log("  a synchronously throwing child aborts the parent's start loop, like stock ✓");
+
+  // The other side of that abort: a promise a sibling had already started is left unattached by the throw,
+  // in stock's loop and in the skeleton alike, so the unhandled-rejection count is stock's
+  let unhandled105 = 0;
+  const on105 = () => {
+    unhandled105++;
+  };
+  process.on("unhandledRejection", on105);
+  const unattached = z.tuple([
+    z.string().transform(async () => {
+      throw new Error("A");
+    }),
+    thrower,
+  ]);
+  await unattached.parseAsync(["a", 1]).catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  const stockUnhandled = unhandled105;
+  assert.equal(stockUnhandled, 1, "stock leaves the started promise unattached");
+  await compile(unattached)
+    .parseAsync(["a", 1])
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  process.off("unhandledRejection", on105);
+  assert.equal(
+    unhandled105 - stockUnhandled,
+    stockUnhandled,
+    "the started promise is left unattached exactly as stock leaves it (#105)",
+  );
+  console.log("  the sibling promise the throw leaves unattached matches stock ✓");
+
+  // The test every suspension point makes is stock's own, `instanceof Promise`, never "has a `then`":
+  // a container output that is itself thenable (an object carrying a callable `then`) is a value, so a
+  // member whose async-typed skeleton completed synchronously is written as it is. The async-function
+  // skeleton returned it and the promise it resolved with adopted it, which ran the object's own `then`
+  // and put its resolution in the member's place. The positions whose settled value still passes through
+  // a `Promise.all` of their own (an object key, a tuple slot beside a member that did suspend) keep that
+  // adoption, the residual tracked in #124.
+  // biome-ignore lint/suspicious/noThenProperty: an intentional thenable, which stock's detector (`instanceof Promise`) does not treat as async
+  const Thenable = z.object({ then: z.any(), b: z.array(asyncT) });
+  const thenIn = {
+    // biome-ignore lint/suspicious/noThenProperty: the same intentional thenable, as the parsed value
+    then: (res: (v: unknown) => void) => {
+      res("adopted");
+    },
+    b: [] as string[],
+  };
+  const held = (v: unknown) =>
+    v && typeof (v as { then?: unknown }).then === "function" ? "thenable" : JSON.stringify(v);
+  for (const [label, S, input, pick] of [
+    ["set member", z.set(Thenable), new Set([thenIn]), (o: any) => [...o][0]],
+    ["map value", z.map(z.string(), Thenable), new Map([["k", thenIn]]), (o: any) => o.get("k")],
+    ["record value", z.record(z.string(), Thenable), { k: thenIn }, (o: any) => o.k],
+    ["array element", z.array(Thenable), [thenIn], (o: any) => o[0]],
+  ] as [string, z.ZodType, unknown, (o: any) => unknown][]) {
+    const stockHeld = held(pick(await S.parseAsync(input)));
+    assert.equal(stockHeld, "thenable", `stock ${label}: a thenable output is the value`);
+    assert.equal(
+      held(pick(await compile(S).parseAsync(input))),
+      stockHeld,
+      `${label}: a synchronously completed thenable output is written as it is (#105)`,
+    );
+  }
+  // The other side of the same test: a Promise subclass is a Promise, so it takes on both sides the
+  // route a native one takes — the sync API throws and the async entries answer the settled value
+  class SubPromise<T> extends Promise<T> {}
+  const SP = z.object({
+    a: z.string().transform(() => SubPromise.resolve("sub") as unknown as string),
+  });
+  const spIn = { a: "x" };
+  const outcome = async (p: {
+    parse: (v: unknown) => unknown;
+    parseAsync: (v: unknown) => Promise<unknown>;
+  }) => {
+    let sync: string;
+    try {
+      sync = `value ${JSON.stringify(p.parse(spIn))}`;
+    } catch (e) {
+      sync = `throw ${(e as Error).constructor.name}`;
+    }
+    return `${sync} | ${JSON.stringify(await p.parseAsync(spIn))}`;
+  };
+  const stockSub = await outcome(SP);
+  assert.equal(stockSub, 'throw TypeError | {"a":"sub"}');
+  assert.equal(
+    await outcome(compile(SP)),
+    stockSub,
+    "a Promise subclass is a Promise on both sides (#105)",
+  );
+  console.log(
+    "  the suspension test is stock's: a thenable output is a value, a Promise subclass is not ✓",
   );
 }
 

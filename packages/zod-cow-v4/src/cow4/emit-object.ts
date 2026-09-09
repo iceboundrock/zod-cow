@@ -4,7 +4,13 @@
  * own assembly rules).
  */
 import { ZodCompileUnsupportedError } from "zod/v4/core";
-import { type CodeCtx, emitDeclaredKeyWalk, emitOwnSymbolProbe, escKey } from "./codectx.js";
+import {
+  type CodeCtx,
+  emitDeclaredKeyWalk,
+  emitOwnSymbolProbe,
+  emitSettleAll,
+  escKey,
+} from "./codectx.js";
 import { containerChecksCall, containerChildFn } from "./emit.js";
 
 import { officialFn } from "./official.js";
@@ -191,8 +197,9 @@ export function emitCoWObject(
     const settled = new Map<KeyPlan, string>();
     const asyncOnes = started.filter((s) => s.p.async);
     for (const s of asyncOnes) settled.set(s.p, ctx.var());
-    ctx.write(
-      `const [${asyncOnes.map((s) => settled.get(s.p)).join(", ")}] = await Promise.all([${asyncOnes.map((s) => s.resVar).join(", ")}]);`,
+    emitSettleAll(
+      ctx,
+      asyncOnes.map((s) => ({ settled: settled.get(s.p)!, started: s.resVar })),
     );
     for (const s of started) {
       emitPresenceGuard(s.p);

@@ -87,7 +87,8 @@ function emitAsyncSetLoop(
     ctx.write(`else ${log}.push(i, r === vIn, r);`);
   });
   ctx.write(`}`);
-  ctx.write(`if (${proms}.length) await Promise.all(${proms});`);
+  // No member suspended: the skeleton completes synchronously, like stock's loop (#105)
+  ctx.write(`if (${proms}.length) yield Promise.all(${proms});`);
   ctx.write(`for (let j = 0, n = 0; j < ${log}.length; j += 3, n++) {`);
   ctx.indented(() => {
     ctx.write(`if (${log}[j + 2] === INVALID) return INVALID;`);

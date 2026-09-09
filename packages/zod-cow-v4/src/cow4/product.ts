@@ -6,7 +6,10 @@ import { $ZodAsyncError } from "zod/v4/core";
 
 /* zod4 core types (kept loose; the prototype semantic layer is authoritative) */
 export type Node = any;
-/** Product contract: output value | INVALID | true(assertOnly); an async product returns Promise<output value | INVALID> */
+/**
+ * Product contract: output value | INVALID | true(assertOnly). An async product answers either the value itself
+ * or a Promise of it: it suspends only when something it ran returned a Promise, as stock's runtime does (#105).
+ */
 export type Fn = (input: any) => unknown;
 
 /**

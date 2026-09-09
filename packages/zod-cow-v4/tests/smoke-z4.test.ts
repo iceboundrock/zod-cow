@@ -2817,6 +2817,64 @@ import { compile } from "../src/index.js";
   console.log(
     "  the async entries answer a synchronously completed parse; the sync API still throws ✓",
   );
+
+  // A child that throws synchronously (a throwing refine, a sync island meeting a Promise) throws out of
+  // the parent's start loop, where an async-function skeleton rejected a round later: the parent aborts
+  // before it starts the next sibling, as stock's loop does
+  const thrower = z.number().refine(() => {
+    throw new Error("boom");
+  });
+  const throwLog: string[] = [];
+  const nested = z.tuple([z.string().transform(async (v) => v), thrower]);
+  const parent = z.tuple([
+    nested,
+    z.string().transform((v) => {
+      throwLog.push("sibling started");
+      return v;
+    }),
+  ]);
+  const throwIn = [["a", 1], "x"];
+  await parent.parseAsync(throwIn).catch((e) => throwLog.push(`threw ${(e as Error).message}`));
+  const stockThrow = throwLog.splice(0).join(", ");
+  assert.equal(stockThrow, "threw boom", "stock aborts before the next sibling starts");
+  await compile(parent)
+    .parseAsync(throwIn)
+    .catch((e) => throwLog.push(`threw ${(e as Error).message}`));
+  assert.equal(
+    throwLog.splice(0).join(", "),
+    stockThrow,
+    "a synchronous throw aborts the parent's start loop, like stock (#105)",
+  );
+  console.log("  a synchronously throwing child aborts the parent's start loop, like stock ✓");
+
+  // The other side of that abort: a promise a sibling had already started is left unattached by the throw,
+  // in stock's loop and in the skeleton alike, so the unhandled-rejection count is stock's
+  let unhandled105 = 0;
+  const on105 = () => {
+    unhandled105++;
+  };
+  process.on("unhandledRejection", on105);
+  const unattached = z.tuple([
+    z.string().transform(async () => {
+      throw new Error("A");
+    }),
+    thrower,
+  ]);
+  await unattached.parseAsync(["a", 1]).catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  const stockUnhandled = unhandled105;
+  assert.equal(stockUnhandled, 1, "stock leaves the started promise unattached");
+  await compile(unattached)
+    .parseAsync(["a", 1])
+    .catch(() => {});
+  await new Promise((r) => setTimeout(r, 0));
+  process.off("unhandledRejection", on105);
+  assert.equal(
+    unhandled105 - stockUnhandled,
+    stockUnhandled,
+    "the started promise is left unattached exactly as stock leaves it (#105)",
+  );
+  console.log("  the sibling promise the throw leaves unattached matches stock ✓");
 }
 
 console.log("\nAll smoke assertions passed ✓");

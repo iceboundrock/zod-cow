@@ -232,6 +232,10 @@ export function emitSettleAll(
   entries: { settled: string; started: string }[],
   spread: { settled: string; started: string } | null = null,
 ): void {
+  // Nothing to settle: the callers reach this only with an async child or an async rest (the object and
+  // record layouts are guarded on `some(async)`, the tuple's `anyAsync` covers both), and an empty emission
+  // would be invalid JS (`let ;`), so a future caller with neither writes nothing instead.
+  if (entries.length === 0 && !spread) return;
   const inits = entries.map((e) => `${e.settled} = ${e.started}`);
   const tests = entries.map((e) => `${e.started} instanceof Promise`);
   const targets = entries.map((e) => e.settled);

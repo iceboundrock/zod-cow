@@ -2875,6 +2875,68 @@ import { compile } from "../src/index.js";
     "the started promise is left unattached exactly as stock leaves it (#105)",
   );
   console.log("  the sibling promise the throw leaves unattached matches stock ✓");
+
+  // The test every suspension point makes is stock's own, `instanceof Promise`, never "has a `then`":
+  // a container output that is itself thenable (an object carrying a callable `then`) is a value, so a
+  // member whose async-typed skeleton completed synchronously is written as it is. The async-function
+  // skeleton returned it and the promise it resolved with adopted it, which ran the object's own `then`
+  // and put its resolution in the member's place. The positions whose settled value still passes through
+  // a `Promise.all` of their own (an object key, a tuple slot beside a member that did suspend) keep that
+  // adoption, the residual tracked in #124.
+  // biome-ignore lint/suspicious/noThenProperty: an intentional thenable, which stock's detector (`instanceof Promise`) does not treat as async
+  const Thenable = z.object({ then: z.any(), b: z.array(asyncT) });
+  const thenIn = {
+    // biome-ignore lint/suspicious/noThenProperty: the same intentional thenable, as the parsed value
+    then: (res: (v: unknown) => void) => {
+      res("adopted");
+    },
+    b: [] as string[],
+  };
+  const held = (v: unknown) =>
+    v && typeof (v as { then?: unknown }).then === "function" ? "thenable" : JSON.stringify(v);
+  for (const [label, S, input, pick] of [
+    ["set member", z.set(Thenable), new Set([thenIn]), (o: any) => [...o][0]],
+    ["map value", z.map(z.string(), Thenable), new Map([["k", thenIn]]), (o: any) => o.get("k")],
+    ["record value", z.record(z.string(), Thenable), { k: thenIn }, (o: any) => o.k],
+    ["array element", z.array(Thenable), [thenIn], (o: any) => o[0]],
+  ] as [string, z.ZodType, unknown, (o: any) => unknown][]) {
+    const stockHeld = held(pick(await S.parseAsync(input)));
+    assert.equal(stockHeld, "thenable", `stock ${label}: a thenable output is the value`);
+    assert.equal(
+      held(pick(await compile(S).parseAsync(input))),
+      stockHeld,
+      `${label}: a synchronously completed thenable output is written as it is (#105)`,
+    );
+  }
+  // The other side of the same test: a Promise subclass is a Promise, so it takes on both sides the
+  // route a native one takes — the sync API throws and the async entries answer the settled value
+  class SubPromise<T> extends Promise<T> {}
+  const SP = z.object({
+    a: z.string().transform(() => SubPromise.resolve("sub") as unknown as string),
+  });
+  const spIn = { a: "x" };
+  const outcome = async (p: {
+    parse: (v: unknown) => unknown;
+    parseAsync: (v: unknown) => Promise<unknown>;
+  }) => {
+    let sync: string;
+    try {
+      sync = `value ${JSON.stringify(p.parse(spIn))}`;
+    } catch (e) {
+      sync = `throw ${(e as Error).constructor.name}`;
+    }
+    return `${sync} | ${JSON.stringify(await p.parseAsync(spIn))}`;
+  };
+  const stockSub = await outcome(SP);
+  assert.equal(stockSub, 'throw TypeError | {"a":"sub"}');
+  assert.equal(
+    await outcome(compile(SP)),
+    stockSub,
+    "a Promise subclass is a Promise on both sides (#105)",
+  );
+  console.log(
+    "  the suspension test is stock's: a thenable output is a value, a Promise subclass is not ✓",
+  );
 }
 
 console.log("\nAll smoke assertions passed ✓");

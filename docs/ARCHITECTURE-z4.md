@@ -704,10 +704,10 @@ The case with the biggest gain: an all-numeric, all-clean tuple. stock does `new
 
 Design premise: the official compileFn always throws `ZodCompileAsyncError` for async (refine/transform/custom/superRefine/pipe, 6
 `isAsyncFunction` detection points in total), which is exactly a ready-made "subtree async detector".
-This layer turns "async detected → degrade the whole tree" into "convert in place to an async island + a local await in the skeleton":
+This layer turns "async detected → degrade the whole tree" into "convert in place to an async island + a local await site in the skeleton":
 
-1. async island: `makeAsyncIsland(schema)` = an async black box returning `Promise<output | INVALID>`,
-   and the product carries the `ZC_ASYNC` symbol marker.
+1. async island: `makeAsyncIsland(schema)` = a black box answering `output | INVALID`, or a `Promise` of it when
+   stock's run came back as one, and the product carries the `ZC_ASYNC` symbol marker.
 2. await emission: every product call site checks `isAsyncProduct(fn)` and sets `ctx.async = true`. An await site is
    `ctx.awaitExpr` / `ctx.call` (#105): the expression's result, suspended on only when it is a `Promise`, which is the
    test stock's runtime makes of every child's result (`r instanceof Promise`) before it goes on synchronously. The set, map and

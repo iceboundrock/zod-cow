@@ -68,7 +68,7 @@ export type ChildProduct =
   | { kind: "validator"; fn: Fn } // official assertOnly: answers pass/fail only, output = input (unusable as a value)
   | { kind: "parser"; fn: Fn } // official parser: returns the output value (stock semantics), paired with a reference comparison to detect dirtiness
   | { kind: "cow"; fn: Fn } // this layer's container sub-skeleton: the original reference when clean, a new container when dirty
-  | { kind: "async"; fn: Fn }; // async island / async sub-skeleton: returns Promise<output | INVALID>, the call site emits await
+  | { kind: "async"; fn: Fn }; // async island / async sub-skeleton: output | INVALID, or a Promise of it when something it ran returned one; the call site is an await site, which suspends only on a Promise (#105)
 
 function productOf(fn: Fn, syncKind: "parser" | "cow"): ChildProduct {
   return isAsyncProduct(fn) ? { kind: "async", fn } : { kind: syncKind, fn };

@@ -69,8 +69,9 @@ function makeIsland(schema: Node): Fn {
 }
 
 /**
- * Channel for async subtrees. Marked async so the skeleton emits `await` (or the settlement log of
- * the set / map / record skeletons) at the call site. The island itself is not an async function:
+ * Channel for async subtrees. Marked async so the skeleton makes its call site an await site (or the
+ * settlement log of the set / map / record skeletons), which suspends only on a `Promise` (#105).
+ * The island itself is not an async function:
  * a run that came back synchronously is answered synchronously, so a sync entry of a set, map or
  * record keeps its place in stock's write order (stock's runtime writes a sync entry inside its
  * loop and an async one when its promise settles), and an async run adds exactly one `.then`
@@ -534,7 +535,8 @@ export function pureSubtreeNeedsIsland(schema: Node): boolean {
  * Get the official product for a subtree. pure → assertOnly validator (validation semantics intact, output = input);
  * otherwise → parser (stock output semantics). On product generation failure it degrades step by step.
  * async is no longer rethrown upwards (Task 6): a subtree for which the official compileFn throws ZodCompileAsyncError
- * is routed to an async island instead (returns a Promise, awaited at the call site); lazy(async·…) is covered by the static detection.
+ * is routed to an async island instead (an await site at the call site, which suspends only when the island answered
+ * a Promise, #105); lazy(async·…) is covered by the static detection.
  *
  * Callbacks stock's generated code calls are wrapped for the duration of the compile so a `$ZodAsyncError` they throw
  * is recorded like this layer's own (#80); a callback stock would run in a runtime island is unreachable that way, so
